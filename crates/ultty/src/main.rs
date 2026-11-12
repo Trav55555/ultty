@@ -110,6 +110,7 @@ Usage: ultty [OPTIONS] [-e COMMAND [ARGS]...]
 Options:
   -e COMMAND [ARGS]...  Run COMMAND in the first tab instead of your shell.
                         Everything after -e is passed to COMMAND.
+                        Does not restore or save the session.
                         -- does the same.
   -h, --help            Print this help and exit
   -V, --version         Print the version and exit

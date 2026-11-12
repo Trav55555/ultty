@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Check `ultty -e`: the window's only tab runs the given command instead of
-# the shell, and Ultty exits when that command does, as when the last tab's
-# program exits. Also checks that a bad argument is refused before any
-# window opens.
+# the shell, Ultty exits when that command does, as when the last tab's
+# program exits, and the user's saved session is neither restored nor
+# overwritten, whether the window ends on its own or by SIGTERM. Also
+# checks that a bad argument is refused before any window opens.
 #
 #   scripts/e2e/exec-flag.sh [artifact-dir]
 #
@@ -33,7 +34,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-printf '[behavior]\ncursor_blink = false\n' >"$out/config/ultty/config.toml"
+printf '[behavior]\ncursor_blink = false\nrestore_session = true\n' >"$out/config/ultty/config.toml"
+# A saved session of two tabs: restoring it would open two, saving over it
+# would change it.
+mkdir -p "$out/config/ultty/sessions"
+session="$out/config/ultty/sessions/last.json"
+cat >"$session" <<'EOF'
+{
+  "version": 1,
+  "timestamp": "0",
+  "tabs": [
+    {"title": "saved-one", "working_directory": "/", "split_direction": "Horizontal",
+     "terminals": [{"title": "one", "working_directory": "/", "is_focused": true}]},
+    {"title": "saved-two", "working_directory": "/", "split_direction": "Horizontal",
+     "terminals": [{"title": "two", "working_directory": "/", "is_focused": true}]}
+  ],
+  "active_tab_index": 0
+}
+EOF
+cp "$session" "$out/session.before"
 
 log="$out/ultty.log"
 fail() {
@@ -69,45 +88,85 @@ running() {
     grep -q '^State:[[:space:]]*[^Z]' "/proc/$1/status" 2>/dev/null
 }
 
-# Without unsetting WAYLAND_DISPLAY, a Wayland session in the environment
-# wins over DISPLAY and the window opens on the desktop. SHELL points at a
-# program that fails, so a tab that ran the shell would not print "hi".
-env -u WAYLAND_DISPLAY \
-    DISPLAY=":$(cat "$out/display")" \
-    XDG_RUNTIME_DIR="$runtime" \
-    XDG_CONFIG_HOME="$out/config" \
-    SHELL=/bin/false \
-    RUST_LOG="info,wgpu_core=warn,wgpu_hal=warn" \
-    "$ULTTY" -e sh -c 'echo hi; sleep 5' >"$log" 2>&1 &
-ultty_pid=$!
-
 ctl() {
     env XDG_RUNTIME_DIR="$runtime" ULTTY_PID="$ultty_pid" "$ULTTYCTL" "$@"
 }
-socket="$runtime/ultty-ctl-$ultty_pid.sock"
-for _ in $(seq 300); do
-    [ -S "$socket" ] && ctl ping >/dev/null 2>&1 && break
-    running "$ultty_pid" || fail "Ultty exited during startup"
-    sleep 0.1
-done
-[ -S "$socket" ] || fail "no control socket at $socket within 30 s"
 
+# Start Ultty as `ultty ARGS...` with shell $1, its log in $out/ultty-$2.log,
+# and wait until its control socket answers. Without unsetting
+# WAYLAND_DISPLAY, a Wayland session in the environment wins over DISPLAY
+# and the window opens on the desktop.
+start_ultty() {
+    local shell=$1 name=$2
+    shift 2
+    log="$out/ultty-$name.log"
+    env -u WAYLAND_DISPLAY \
+        DISPLAY=":$(cat "$out/display")" \
+        XDG_RUNTIME_DIR="$runtime" \
+        XDG_CONFIG_HOME="$out/config" \
+        SHELL="$shell" \
+        RUST_LOG="info,wgpu_core=warn,wgpu_hal=warn" \
+        "$ULTTY" "$@" >"$log" 2>&1 &
+    ultty_pid=$!
+    local socket="$runtime/ultty-ctl-$ultty_pid.sock"
+    for _ in $(seq 300); do
+        [ -S "$socket" ] && ctl ping >/dev/null 2>&1 && break
+        running "$ultty_pid" || fail "Ultty exited during startup"
+        sleep 0.1
+    done
+    [ -S "$socket" ] || fail "no control socket at $socket within 30 s"
+}
+
+# Wait up to 20 s for the running Ultty to exit, and check it exited cleanly.
+wait_exit() {
+    for _ in $(seq 200); do
+        running "$ultty_pid" || break
+        sleep 0.1
+    done
+    running "$ultty_pid" && fail "Ultty still runs 20 s after $1"
+    local status=0
+    wait "$ultty_pid" || status=$?
+    [ "$status" -eq 0 ] || fail "Ultty exited with status $status after $1"
+    ! grep -q "panicked at" "$log" || fail "Ultty logged a panic"
+}
+
+tab_count() {
+    ctl --json tabs >"$out/tabs.json"
+    grep -o '"index"' "$out/tabs.json" | wc -l
+}
+
+session_unchanged() {
+    cmp -s "$session" "$out/session.before" || fail "$1 changed the saved session: $(cat "$session")"
+}
+
+# SHELL points at a program that fails, so a tab that ran the shell would
+# not print "hi".
+start_ultty /bin/false natural -e sh -c 'echo hi; sleep 5'
 ctl wait-for hi --timeout 4000 >/dev/null || fail "the first tab did not print hi"
-ctl --json tabs >"$out/tabs.json"
-[ "$(grep -o '"index"' "$out/tabs.json" | wc -l)" -eq 1 ] || fail "want one tab: $(cat "$out/tabs.json")"
-echo "-e: the first tab ran the command"
+[ "$(tab_count)" -eq 1 ] || fail "want one tab, not the saved two: $(cat "$out/tabs.json")"
+echo "-e: the first tab ran the command; the saved session was not restored"
 
 # The command exits after its sleep; its tab closes and, as the last one,
 # takes the window with it.
-for _ in $(seq 200); do
-    running "$ultty_pid" || break
-    sleep 0.1
-done
-running "$ultty_pid" && fail "Ultty still runs 20 s after the command exited"
-status=0
-wait "$ultty_pid" || status=$?
-[ "$status" -eq 0 ] || fail "Ultty exited with status $status"
-! grep -q "panicked at" "$log" || fail "Ultty logged a panic"
-echo "-e: Ultty exited with the command"
+wait_exit "the command exited"
+session_unchanged "an -e window that ended with its command"
+echo "-e: Ultty exited with the command and left the saved session alone"
+
+# SIGTERM saves the session of an ordinary window; not of an -e one.
+start_ultty /bin/false sigterm -e sleep 60
+kill -TERM "$ultty_pid"
+wait_exit "SIGTERM"
+grep -q "Received signal" "$log" || fail "Ultty did not log the SIGTERM"
+session_unchanged "an -e window stopped by SIGTERM"
+echo "-e: SIGTERM left the saved session alone"
+
+# Control: the same SIGTERM to a window without -e does save, so the checks
+# above can fail.
+start_ultty /bin/sh control
+[ "$(tab_count)" -eq 2 ] || fail "the control window did not restore the saved two tabs"
+kill -TERM "$ultty_pid"
+wait_exit "SIGTERM"
+! cmp -s "$session" "$out/session.before" || fail "the control window did not save its session"
+echo "control: a window without -e restores and saves the session"
 
 echo "exec-flag: ok"

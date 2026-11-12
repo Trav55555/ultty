@@ -136,6 +136,9 @@ pub struct App {
     renderer: Renderer,
     /// Terminal manager (handles multiple tabs/panes)
     terminal_manager: TerminalManager,
+    /// Where the session is saved on exit; `None` for an `ultty -e` window,
+    /// whose one tab must not replace the user's saved tabs.
+    session_file: Option<std::path::PathBuf>,
     /// Tab bar state for rendering
     tab_bar: TabBarState,
     /// Temporarily fixed tab width after a close, so close buttons stay aligned.
@@ -433,6 +436,10 @@ impl App {
             surface,
             renderer,
             terminal_manager,
+            session_file: session_file(
+                startup_command,
+                ultty::session::SessionData::last_session_path(),
+            ),
             tab_bar,
             tab_width_freeze: None,
             last_render: Instant::now(),
@@ -676,14 +683,9 @@ impl App {
         .map_err(|e| anyhow::anyhow!("Failed to restore session: {}", e))
     }
 
-    /// Save the current session.
+    /// Save the current session, unless this window keeps none.
     fn save_session(&self) {
-        let session = self.terminal_manager.to_session_data();
-        if let Err(e) = session.save_as_last() {
-            tracing::warn!("Failed to save session: {}", e);
-        } else {
-            tracing::info!("Session saved");
-        }
+        save_session(&self.terminal_manager, self.session_file.as_deref());
     }
 
     /// Clear out the sockets and tokens that killed or crashed instances
@@ -1609,6 +1611,30 @@ fn control_flow(deadline: Option<Instant>) -> ControlFlow {
     deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
 }
 
+/// The file a window saves its session to on exit: the user's last session,
+/// except for a window started with `ultty -e`, which neither restores nor
+/// saves one.
+fn session_file(
+    startup_command: Option<&StartupCommand>,
+    last_session: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    match startup_command {
+        Some(_) => None,
+        None => last_session,
+    }
+}
+
+/// Write `manager`'s tabs to `file`; with no file, write nothing.
+fn save_session(manager: &TerminalManager, file: Option<&std::path::Path>) {
+    let Some(file) = file else {
+        return;
+    };
+    match manager.to_session_data().save(file) {
+        Ok(()) => tracing::info!("Session saved"),
+        Err(e) => tracing::warn!("Failed to save session: {}", e),
+    }
+}
+
 /// Drives [`App`] from winit. The window, and so the app, is created on the
 /// first `resumed`, as winit 0.30 requires.
 struct AppHandler {
@@ -1697,6 +1723,34 @@ mod tests {
         resize_direction_at_window_edge, window_should_use_square_corners,
         MAINTENANCE_POLL_INTERVAL,
     };
+
+    #[test]
+    fn a_window_started_with_a_command_leaves_the_saved_session_alone() {
+        use super::{save_session, session_file, StartupCommand};
+        use ultty::terminal_manager::{no_tab_env, TerminalManager};
+
+        let dir = tempfile::tempdir().unwrap();
+        let last = dir.path().join("ultty/sessions/last.json");
+        std::fs::create_dir_all(last.parent().unwrap()).unwrap();
+        std::fs::write(&last, "the user's tabs").unwrap();
+
+        let command = StartupCommand {
+            program: "sleep".to_owned(),
+            args: vec!["5".to_owned()],
+        };
+        let manager =
+            TerminalManager::with_command_tab(80, 24, "sleep", &command.args, &mut no_tab_env)
+                .unwrap();
+        let file = session_file(Some(&command), Some(last.clone()));
+        save_session(&manager, file.as_deref());
+        assert_eq!(std::fs::read_to_string(&last).unwrap(), "the user's tabs");
+
+        // A window started without one saves over it, as before.
+        let file = session_file(None, Some(last.clone()));
+        save_session(&manager, file.as_deref());
+        let saved = std::fs::read_to_string(&last).unwrap();
+        assert!(saved.contains("\"tabs\""), "{saved}");
+    }
 
     #[test]
     fn maintenance_poll_interval_is_not_frame_cadence() {
