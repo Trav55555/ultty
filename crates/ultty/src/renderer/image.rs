@@ -4,6 +4,7 @@
 //! ImageWidget rendering, including pipeline creation, texture upload,
 //! caching, and draw calls.
 
+use super::image_cache::ImageKey;
 use super::{CachedImageTexture, ImagePipeline, Renderer, Vertex};
 use crate::grid::{Terminal, TerminalImage};
 use wgpu::util::DeviceExt;
@@ -150,8 +151,9 @@ impl Renderer {
     }
 
     /// Upload an image to the GPU and cache it.
-    fn upload_image(&mut self, image: &TerminalImage) -> bool {
-        if self.image_cache.contains_key(&image.id) {
+    fn upload_image(&mut self, owner: u64, image: &TerminalImage) -> bool {
+        let key = ImageKey::new(owner, image.id);
+        if self.image_cache.contains(&key) {
             return true;
         }
 
@@ -163,17 +165,6 @@ impl Renderer {
             "terminal image",
         ) {
             return false;
-        }
-
-        // Evict oldest entries if cache exceeds limit (64 textures)
-        const MAX_IMAGE_CACHE: usize = 64;
-        if self.image_cache.len() >= MAX_IMAGE_CACHE {
-            // Remove entries not currently referenced by the terminal
-            let excess = self.image_cache.len() - MAX_IMAGE_CACHE + 1;
-            let keys_to_remove: Vec<_> = self.image_cache.keys().take(excess).copied().collect();
-            for key in keys_to_remove {
-                self.image_cache.remove(&key);
-            }
         }
 
         // Ensure image pipeline exists
@@ -242,13 +233,14 @@ impl Renderer {
         });
 
         self.image_cache.insert(
-            image.id,
+            key,
             CachedImageTexture {
                 texture,
                 bind_group,
                 width: image.width,
                 height: image.height,
             },
+            image.data.len(),
         );
 
         true
@@ -393,11 +385,12 @@ impl Renderer {
         }
 
         // Upload any new image, then render each one with its own texture
+        let owner = terminal.uid();
         for image in terminal.images().images() {
-            if !self.upload_image(image) {
+            if !self.upload_image(owner, image) {
                 continue;
             }
-            let Some(cached) = self.image_cache.get(&image.id) else {
+            let Some(cached) = self.image_cache.get(&ImageKey::new(owner, image.id)) else {
                 continue;
             };
 
