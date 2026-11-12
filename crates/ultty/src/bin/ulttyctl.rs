@@ -10,7 +10,7 @@ use ultty_protocol::control::{
     ControlData, ControlEnvelope, ControlEvent, ControlRequest, ControlResponse, OutputFormat,
     PaneState, PaneStatus, SplitDirection, WaitCondition,
 };
-use ultty_protocol::{Key, Modifiers};
+use ultty_protocol::{Key, Modifiers, OverrideFormat, MAX_OVERRIDE_SOURCE_LEN};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -109,9 +109,14 @@ fn main() {
 /// which the server answers only when its own timeout runs out.
 fn read_timeout_for(request: &ControlRequest, read_timeout_secs: u64) -> u64 {
     const WAIT_FOR_MARGIN_SECS: u64 = 5;
+    // The server gives the app 5 s to answer an override push.
+    const OVERRIDE_REPLY_SECS: u64 = 5;
     match request {
         ControlRequest::WaitFor { timeout_ms, .. } => {
             read_timeout_secs.max(timeout_ms.div_ceil(1000) + WAIT_FOR_MARGIN_SECS)
+        }
+        ControlRequest::PushOverride { .. } | ControlRequest::ClearOverride { .. } => {
+            read_timeout_secs.max(OVERRIDE_REPLY_SECS + WAIT_FOR_MARGIN_SECS)
         }
         _ => read_timeout_secs,
     }
@@ -389,6 +394,7 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
         }
         "regions" if rest.is_empty() => Ok(ControlRequest::Regions { target: None }),
         "regions" => Err("usage: regions".to_string()),
+        "override" => parse_override(rest),
         "status" => parse_status(rest),
         "auth" => Ok(ControlRequest::Authenticate {
             token: rest
@@ -398,6 +404,41 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
         }),
         _ => Err(format!("unknown command: {}", command)),
     }
+}
+
+const OVERRIDE_USAGE: &str = "usage: override push <file> | override clear";
+
+/// `override push FILE` (Luau when FILE ends in `.luau`, TOML otherwise) or
+/// `override clear`: an override for the native app in the pane (ADR 0023
+/// §9). The file is read here, so the app sees it even when its directory
+/// is not the terminal's.
+fn parse_override(args: &[String]) -> Result<ControlRequest, String> {
+    match args {
+        [push, file] if push == "push" => {
+            let path = Path::new(file);
+            let source = read_override_source(path)?;
+            Ok(ControlRequest::PushOverride {
+                format: OverrideFormat::for_path(path),
+                source,
+                target: None,
+            })
+        }
+        [clear] if clear == "clear" => Ok(ControlRequest::ClearOverride { target: None }),
+        _ => Err(OVERRIDE_USAGE.to_string()),
+    }
+}
+
+/// The text of the override file at `path`, within the push limit.
+fn read_override_source(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if bytes.len() > MAX_OVERRIDE_SOURCE_LEN {
+        return Err(format!(
+            "{}: {} bytes; an override is at most {MAX_OVERRIDE_SOURCE_LEN}",
+            path.display(),
+            bytes.len()
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| format!("{}: not UTF-8 text", path.display()))
 }
 
 /// `split [right|down] [cmd args...]`: a pane next to the focused one.
@@ -668,11 +709,13 @@ fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
         | ControlRequest::SetPaneStatus { target, .. }
         | ControlRequest::LastCommand { target, .. }
         | ControlRequest::Regions { target }
+        | ControlRequest::PushOverride { target, .. }
+        | ControlRequest::ClearOverride { target }
         | ControlRequest::SplitPane { target, .. } => {
             *target = Some(id);
             Ok(())
         }
-        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for, subscribe, status, last-command, regions, split and lua open --split".to_string()),
+        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for, subscribe, status, last-command, regions, override, split and lua open --split".to_string()),
     }
 }
 
@@ -883,9 +926,10 @@ GLOBAL FLAGS:
     --pane <id>             Act on pane <id> (from `panes`) instead of the
                             focused one. Goes before the command; applies to
                             text, selection, send-*, run, search, wait-for,
-                            subscribe, status, last-command, regions, split
-                            and lua open --split (which otherwise split the
-                            pane ulttyctl runs in, from $ULTTY_PANE)
+                            subscribe, status, last-command, regions,
+                            override, split and lua open --split (which
+                            otherwise split the pane ulttyctl runs in, from
+                            $ULTTY_PANE)
     -V, --version           Show ulttyctl version without connecting to Ultty
     -h, --help              Show this help
 
@@ -1019,6 +1063,7 @@ mod tests {
 
     use std::io::Write;
     use std::os::unix::net::UnixStream;
+    use std::path::Path;
     use std::thread;
     use std::time::Duration;
 
@@ -1026,6 +1071,7 @@ mod tests {
         ControlData, ControlEvent, ControlRequest, ControlResponse, PaneState, PaneStatus,
         SplitDirection, WaitCondition,
     };
+    use ultty_protocol::OverrideFormat;
 
     #[test]
     fn read_response_retries_until_delayed_writer_closes() {
@@ -1140,6 +1186,94 @@ mod tests {
             with_auth_token(ControlRequest::Ping, None),
             ControlRequest::Ping
         );
+    }
+
+    #[test]
+    fn override_push_reads_the_file_and_takes_its_format_from_the_name() {
+        let dir = std::env::temp_dir().join(format!("ulttyctl-override-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml = dir.join("try.toml");
+        let luau = dir.join("try.luau");
+        std::fs::write(&toml, "[widget.a]\nhidden = true\n").unwrap();
+        std::fs::write(&luau, "return {}").unwrap();
+
+        let args = |file: &Path| {
+            vec![
+                "--pane".to_string(),
+                "3".to_string(),
+                "override".to_string(),
+                "push".to_string(),
+                file.display().to_string(),
+            ]
+        };
+        assert_eq!(
+            parse_cli_request(&args(&toml)).unwrap(),
+            ControlRequest::PushOverride {
+                format: OverrideFormat::Toml,
+                source: "[widget.a]\nhidden = true\n".to_string(),
+                target: Some(3),
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args(&luau)).unwrap(),
+            ControlRequest::PushOverride {
+                format: OverrideFormat::Luau,
+                source: "return {}".to_string(),
+                target: Some(3),
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&["override".to_string(), "clear".to_string()]).unwrap(),
+            ControlRequest::ClearOverride { target: None }
+        );
+
+        let missing = parse_cli_request(&args(&dir.join("absent.toml"))).unwrap_err();
+        assert!(missing.contains("absent.toml"), "{missing}");
+        let usage = parse_cli_request(&["override".to_string()]).unwrap_err();
+        assert!(usage.starts_with("usage: override"), "{usage}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The source limit is the one a user meets: a file of exactly the
+    /// limit is sent, one byte more is refused here with its size.
+    #[test]
+    fn override_push_refuses_a_file_over_the_source_limit_and_sends_one_at_it() {
+        use ultty_protocol::MAX_OVERRIDE_SOURCE_LEN;
+        let dir =
+            std::env::temp_dir().join(format!("ulttyctl-override-size-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = dir.join("at.toml");
+        let over = dir.join("over.toml");
+        std::fs::write(&at, "#".repeat(MAX_OVERRIDE_SOURCE_LEN)).unwrap();
+        std::fs::write(&over, "#".repeat(MAX_OVERRIDE_SOURCE_LEN + 1)).unwrap();
+        let args = |file: &Path| {
+            vec![
+                "override".to_string(),
+                "push".to_string(),
+                file.display().to_string(),
+            ]
+        };
+
+        match parse_cli_request(&args(&at)).unwrap() {
+            ControlRequest::PushOverride { source, .. } => {
+                assert_eq!(source.len(), MAX_OVERRIDE_SOURCE_LEN)
+            }
+            other => panic!("{other:?}"),
+        }
+        let refused = parse_cli_request(&args(&over)).unwrap_err();
+        assert!(
+            refused.contains("over.toml")
+                && refused.contains(&(MAX_OVERRIDE_SOURCE_LEN + 1).to_string()),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn override_requests_wait_long_enough_for_the_app_to_answer() {
+        let clear = ControlRequest::ClearOverride { target: None };
+        assert_eq!(read_timeout_for(&clear, 5), 10);
+        assert_eq!(read_timeout_for(&clear, 30), 30);
     }
 
     #[test]

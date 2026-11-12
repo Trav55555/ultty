@@ -169,8 +169,9 @@ App                                          Terminal
 | `CAP_INLINE_SURFACES` | `0x0100` |
 | `CAP_SEMANTICS` | `0x0200` |
 | `CAP_INPUT_CURSOR` | `0x0400` |
+| `CAP_OVERRIDE_PUSH` | `0x0800` |
 
-`CAP_ALL_KNOWN` is the OR of those bits. Capabilities are negotiated as `requested & supported`; the version is `min(client, server)`. A version below `MIN_PROTOCOL_VERSION` is rejected with `Error` 426.
+`CAP_ALL_KNOWN` is the OR of those bits. `CLIENT_DEFAULT_CAPABILITIES`, what a client asks for unless it has reason not to, is `CAP_ALL_KNOWN` without `CAP_OVERRIDE_PUSH`: that bit commits the client to answering `SetOverride` (section 10.7), so only a client with that code adds it. Capabilities are negotiated as `requested & supported`; the version is `min(client, server)`. A version below `MIN_PROTOCOL_VERSION` is rejected with `Error` 426.
 
 | Response | Payload in encoding order |
 |----------|---------------------------|
@@ -231,7 +232,7 @@ App and terminal codes are separate namespaces.
 | `Blur` | `0x0042` | `Subscribe` | `0x0050` |
 | `Unsubscribe` | `0x0051` | `ClipboardGet` | `0x0060` |
 | `ClipboardSet` | `0x0061` | `Pong` | `0x0070` |
-| `Disconnect` | `0x00FF` | | |
+| `OverrideResult` | `0x0080` | `Disconnect` | `0x00FF` |
 
 #### Terminal → App
 
@@ -242,9 +243,9 @@ App and terminal codes are separate namespaces.
 | `Resize` | `0x0022` | `FocusEvent` | `0x0023` |
 | `ScrollEvent` | `0x0024` | `ClipboardContent` | `0x0025` |
 | `SurfaceEvent` | `0x0026` | `Ping` | `0x0070` |
-| `Error` | `0x00FF` | | |
+| `SetOverride` | `0x0080` | `Error` | `0x00FF` |
 
-Code `0x0026` is `SetSemantics` from the app and `SurfaceEvent` from the terminal.
+Code `0x0026` is `SetSemantics` from the app and `SurfaceEvent` from the terminal; `0x0080` is `OverrideResult` from the app and `SetOverride` from the terminal.
 
 ---
 
@@ -632,6 +633,21 @@ A region in a surface gets no key events: `Subscribe` with `EVENT_KEY` on a surf
 
 Ultty offers `CAP_INLINE_SURFACES` to every session. `ulttyctl regions` lists each surface with its rows, its state (`unplaced` until its anchor came, `placed` while drawn, `hidden` while placed but not drawn) and, once placed, the line of its first row counted from the oldest line the terminal holds, then its region tree.
 
+### 10.7 Pushed Overrides
+
+A user override ([ADR 0023](adr/0023-ulttui-overrides.md) §9) is a TOML or Luau file that reshapes an app by widget id. `ulttyctl override push` sends one to the native app in a pane without writing it to disk; the terminal relays it over the session.
+
+| Message | Direction | Code | Payload in encoding order |
+|---------|-----------|------|---------------------------|
+| `SetOverride` | terminal → app | `0x0080` | `request_id: u32`, `pushed: Option<(format: u8, source: string)>` |
+| `OverrideResult` | app → terminal | `0x0080` | `request_id: u32`, `error: Option<string>` |
+
+`format` is `Toml=0` or `Luau=1`; another value is a decode error. `source` is the file's text, at most 128 KiB (`MAX_OVERRIDE_SOURCE_LEN`): smaller than the 1 MiB override file limit because the push travels in a control request capped at 1 MiB of JSON, which escaping can grow up to six times. `pushed` absent means: clear the pushed override.
+
+The terminal sends `SetOverride` only to a session that negotiated `CAP_OVERRIDE_PUSH`, and answers the control request with an error for one that did not, so an app built before this capability never receives the message. A client asks for the bit only if it answers the message; `CLIENT_DEFAULT_CAPABILITIES` leaves it out (section 2.1). An app that negotiated it must answer every `SetOverride` with an `OverrideResult` carrying the same `request_id`: `error` absent when the override was applied (or cleared), otherwise why it was not, in the words the app would log for a bad file (a parse error, an unknown setting, a Luau file sent to an app built without Luau, an app whose overrides are off). A failed push leaves the app's overrides as they were. The terminal keeps the `request_id`s it sent a session and ignores an `OverrideResult` for any other, or a second one for the same id, so a session cannot make it hold answers nobody asked for; it sends a session at most 64 `SetOverride`s before one is answered or given up on (Ultty gives up after 5 s), and refuses the control request past that.
+
+The app keeps one pushed override, in memory, over its files: a push replaces the previous push, the files keep reloading underneath, and a clear removes it. `ulttyctl` reports the app's `error` and exits non-zero; Ultty answers for the app when the pane has no native session or the session does not answer within 5 s. Only the terminal can start a push, so a remote host at the other end of an in-band session cannot push into the user's apps.
+
 ---
 
 ## 11. Atomic Updates
@@ -684,6 +700,7 @@ Supply row and column track vectors and place children with start/end `GridLine`
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.1.0-draft | 2026-11-11 | `SetOverride` (terminal `0x0080`), `OverrideResult` (app `0x0080`) and `CAP_OVERRIDE_PUSH` (`0x0800`), section 10.7 (ADR 0023 §9) |
 | 0.1.0-draft | 2026-11-11 | Sessions belong to panes: drawn in, sized to and closed with their pane, section 1.2 (ADR 0025); no wire change |
 | 0.1.0-draft | 2026-11-10 | Roles `Table`, `Row`, `Cell`, `ColumnHeader`, `ComboBox` and `Option` (21 to 26), section 10.5 (ADR 0021) |
 | 0.1.0-draft | 2026-11-10 | `CAP_INPUT_CURSOR` (`0x0400`) and the input widget's caret, widget tag 7, section 8.4 |

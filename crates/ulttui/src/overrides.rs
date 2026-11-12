@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use ultty_protocol::{Color, Content, Style};
+use ultty_protocol::{Color, Content, OverrideFormat, PushedOverride, Style};
 
 use crate::event::{Key, KeyEvent};
 use crate::widgets::View;
@@ -438,7 +438,8 @@ impl Source {
 }
 
 /// Where an app's overrides come from (a TOML file, a Luau file, or both),
-/// and the last good version of each.
+/// the last good version of each, and the override pushed through the
+/// terminal over them (ADR 0023 §9).
 #[derive(Debug, Default)]
 pub struct OverrideFile {
     toml: Option<Source>,
@@ -448,6 +449,16 @@ pub struct OverrideFile {
     /// The last good load of the Luau file.
     #[cfg(feature = "lua-overrides")]
     script: Option<Rc<OverrideScript>>,
+    /// A pushed TOML override: merged over `parsed` per widget id, its
+    /// keys asked first.
+    pushed_toml: Option<Overrides>,
+    /// A pushed Luau override: replaces `script` while it is in force.
+    #[cfg(feature = "lua-overrides")]
+    pushed_luau: Option<Rc<OverrideScript>>,
+    /// Whether overrides are on at all. Off ([`OverrideFile::disabled`]:
+    /// `ULTTUI_NO_OVERRIDES`, no usable app name, a mock backend) refuses
+    /// pushes too, as ADR 0023 §2 promises.
+    enabled: bool,
     current: Rc<Overrides>,
 }
 
@@ -472,6 +483,7 @@ impl OverrideFile {
         let mut file = Self {
             toml: toml.map(Source::new),
             luau: luau.map(Source::new),
+            enabled: true,
             ..Self::default()
         };
         file.refresh();
@@ -570,9 +582,79 @@ impl OverrideFile {
         if !changed {
             return false;
         }
-        let combined = self.parsed.clone();
+        self.recombine()
+    }
+
+    /// Put `pushed` in force over the files, replacing any earlier push;
+    /// `None` clears the pushed layer. The source is parsed as a file of
+    /// its format would be, and a source that does not parse changes
+    /// nothing and is the error. Returns whether the overrides changed.
+    pub fn push(&mut self, pushed: Option<&PushedOverride>) -> Result<bool, String> {
+        if !self.enabled {
+            return Err(format!(
+                "overrides are off in this app ({DISABLE_ENV} is set, or it has no usable app name); nothing pushed"
+            ));
+        }
+        match pushed {
+            None => {
+                self.pushed_toml = None;
+                #[cfg(feature = "lua-overrides")]
+                {
+                    self.pushed_luau = None;
+                }
+            }
+            Some(PushedOverride {
+                format: OverrideFormat::Toml,
+                source,
+            }) => {
+                let parsed = Overrides::parse(source)?;
+                self.pushed_toml = Some(parsed);
+                #[cfg(feature = "lua-overrides")]
+                {
+                    self.pushed_luau = None;
+                }
+            }
+            Some(PushedOverride {
+                format: OverrideFormat::Luau,
+                source,
+            }) => {
+                #[cfg(feature = "lua-overrides")]
+                {
+                    let script = OverrideScript::load(source, "pushed override")?;
+                    self.pushed_luau = Some(Rc::new(script));
+                    self.pushed_toml = None;
+                }
+                #[cfg(not(feature = "lua-overrides"))]
+                {
+                    let _ = source;
+                    return Err(
+                        "this app was built without the lua-overrides feature; it takes TOML overrides only"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(self.recombine())
+    }
+
+    /// Rebuild the overrides in force from the files and the pushed layer.
+    /// Returns whether they changed.
+    fn recombine(&mut self) -> bool {
+        let mut combined = self.parsed.clone();
+        if let Some(pushed) = &self.pushed_toml {
+            combined.widgets.extend(
+                pushed
+                    .widgets
+                    .iter()
+                    .map(|(id, widget)| (id.clone(), widget.clone())),
+            );
+            let mut keys = pushed.keys.clone();
+            keys.append(&mut combined.keys);
+            combined.keys = keys;
+        }
         #[cfg(feature = "lua-overrides")]
-        let combined = combined.with_script(self.script.clone());
+        let combined =
+            combined.with_script(self.pushed_luau.clone().or_else(|| self.script.clone()));
         let differs = *self.current != combined;
         self.current = Rc::new(combined);
         differs
@@ -1085,6 +1167,167 @@ mod tests {
         let file = OverrideFile::from_paths(Some(toml), Some(luau.clone()));
         assert!(file.overrides().widget("a").unwrap().hidden);
         assert!(OverrideFile::at(&luau).overrides().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn pushed(format: OverrideFormat, source: &str) -> PushedOverride {
+        PushedOverride {
+            format,
+            source: source.to_string(),
+        }
+    }
+
+    /// A pushed TOML override merges over the file per widget id and its
+    /// keys are asked first; a second push replaces the first; a clear
+    /// leaves the file's overrides as they were. The file keeps reloading
+    /// underneath.
+    #[test]
+    fn a_pushed_toml_override_layers_over_the_file_and_clears() {
+        let dir = scratch_dir("push");
+        let path = dir.join("app.toml");
+        std::fs::write(
+            &path,
+            "[widget.a]\nhidden = true\n[widget.b]\ntext = \"file\"\n[keys]\n\"j\" = \"down\"\n",
+        )
+        .unwrap();
+        let mut file = OverrideFile::at(&path);
+        let down = key(Key::Char('j'), false, false, false);
+
+        let changed = file
+            .push(Some(&pushed(
+                OverrideFormat::Toml,
+                "[widget.b]\nbold = true\n[keys]\n\"j\" = \"up\"\n",
+            )))
+            .unwrap();
+        assert!(changed);
+        let now = file.overrides();
+        assert!(
+            now.widget("a").unwrap().hidden,
+            "untouched ids keep the file's"
+        );
+        let b = now.widget("b").unwrap();
+        assert_eq!(
+            (b.bold, b.text.clone()),
+            (Some(true), None),
+            "a pushed id replaces the file's entry"
+        );
+        assert!(
+            matches!(now.remap(&down, false), Some(Remapped::Key(e)) if e.key == Key::Up),
+            "pushed keys are asked first"
+        );
+
+        // The file reloads underneath the push.
+        std::fs::write(&path, "[widget.c]\nhidden = true\n").unwrap();
+        assert!(file.refresh());
+        let now = file.overrides();
+        assert!(now.widget("a").is_none() && now.widget("c").unwrap().hidden);
+        assert_eq!(now.widget("b").unwrap().bold, Some(true));
+
+        // A second push replaces the first.
+        file.push(Some(&pushed(
+            OverrideFormat::Toml,
+            "[widget.d]\nhidden = true\n",
+        )))
+        .unwrap();
+        let now = file.overrides();
+        assert!(now.widget("b").is_none() && now.widget("d").unwrap().hidden);
+        assert!(now.remap(&down, false).is_none());
+
+        // A push that does not parse changes nothing and is the error.
+        let err = file
+            .push(Some(&pushed(
+                OverrideFormat::Toml,
+                "[widget.d]\nhidden = \"maybe\"\n",
+            )))
+            .unwrap_err();
+        assert!(err.contains("widget.d.hidden"), "{err}");
+        assert!(file.overrides().widget("d").unwrap().hidden);
+
+        assert!(file.push(None).unwrap());
+        let now = file.overrides();
+        assert!(now.widget("d").is_none() && now.widget("c").unwrap().hidden);
+        assert!(
+            !file.push(None).unwrap(),
+            "clearing nothing changes nothing"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(feature = "lua-overrides"))]
+    #[test]
+    fn without_the_feature_a_pushed_luau_override_is_refused() {
+        let dir = scratch_dir("push-no-luau");
+        let mut file = OverrideFile::at(dir.join("absent.toml"));
+        let err = file
+            .push(Some(&pushed(OverrideFormat::Luau, "return {}")))
+            .unwrap_err();
+        assert!(err.contains("lua-overrides"), "{err}");
+        assert!(file.overrides().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Overrides that are off (`ULTTUI_NO_OVERRIDES`, no app name) stay off
+    /// for pushes too; the push is refused with a reason, not applied.
+    #[test]
+    fn a_push_into_disabled_overrides_is_refused() {
+        let mut file = OverrideFile::disabled();
+        let err = file
+            .push(Some(&pushed(
+                OverrideFormat::Toml,
+                "[widget.a]\nhidden = true\n",
+            )))
+            .unwrap_err();
+        assert!(err.contains("overrides are off"), "{err}");
+        assert!(file.overrides().is_empty());
+        let err = file.push(None).unwrap_err();
+        assert!(err.contains("overrides are off"), "{err}");
+
+        // The environment switch is what disables them.
+        let resolved = resolve_path("app", |key| {
+            (key == DISABLE_ENV).then(|| OsString::from("1"))
+        });
+        assert_eq!(resolved, None);
+    }
+
+    #[cfg(feature = "lua-overrides")]
+    #[test]
+    fn a_pushed_luau_override_replaces_the_scripts_hooks_and_clears() {
+        let dir = scratch_dir("push-luau");
+        let luau = dir.join("app.luau");
+        std::fs::write(
+            &luau,
+            "return { key = function(chord) if chord == 'j' then return 'down' end end }",
+        )
+        .unwrap();
+        let mut file = OverrideFile::at(&luau);
+        let j = key(Key::Char('j'), false, false, false);
+        assert!(
+            matches!(file.overrides().remap(&j, false), Some(Remapped::Key(e)) if e.key == Key::Down)
+        );
+
+        assert!(file
+            .push(Some(&pushed(
+                OverrideFormat::Luau,
+                "return { key = function(chord) if chord == 'j' then return 'up' end end }",
+            )))
+            .unwrap());
+        assert!(
+            matches!(file.overrides().remap(&j, false), Some(Remapped::Key(e)) if e.key == Key::Up)
+        );
+
+        let err = file
+            .push(Some(&pushed(OverrideFormat::Luau, "return {")))
+            .unwrap_err();
+        assert!(err.contains("pushed override"), "{err}");
+        assert!(
+            matches!(file.overrides().remap(&j, false), Some(Remapped::Key(e)) if e.key == Key::Up)
+        );
+
+        assert!(file.push(None).unwrap());
+        assert!(
+            matches!(file.overrides().remap(&j, false), Some(Remapped::Key(e)) if e.key == Key::Down)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -49,6 +49,7 @@ pub mod exec_grant;
 pub mod in_band;
 mod layout;
 mod messages;
+mod overrides;
 mod semantics;
 mod style;
 mod surface;
@@ -73,6 +74,7 @@ pub use layout::{
     TrackSizingFunction,
 };
 pub use messages::{AppMessage, ComputedRegionLayout, FrameId, LayoutTrigger, TerminalMessage};
+pub use overrides::{OverrideFormat, PushedOverride, MAX_OVERRIDE_SOURCE_LEN};
 pub use semantics::{
     capped, derive_semantics, Expanded, Live, Role, SemanticValue, Semantics, SetPosition, Toggled,
     MAX_NAME_CHARS, SEMANTICS_FLAGS_ALL, SEMANTICS_FLAG_ATOMIC, SEMANTICS_FLAG_BUSY,
@@ -123,6 +125,9 @@ pub const CAP_SEMANTICS: u32 = 0x0200;
 /// Capability: the caret position of an input widget (`InputWidget::cursor`,
 /// sent as widget tag 7).
 pub const CAP_INPUT_CURSOR: u32 = 0x0400;
+/// Capability: the terminal may push a user override into the app
+/// (`SetOverride`, answered with `OverrideResult`; ADR 0023 §9).
+pub const CAP_OVERRIDE_PUSH: u32 = 0x0800;
 
 /// All capabilities known by this protocol version.
 pub const CAP_ALL_KNOWN: u32 = CAP_LAYOUT_FLEXBOX
@@ -132,10 +137,15 @@ pub const CAP_ALL_KNOWN: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_REGION_METADATA
     | CAP_INLINE_SURFACES
     | CAP_SEMANTICS
-    | CAP_INPUT_CURSOR;
+    | CAP_INPUT_CURSOR
+    | CAP_OVERRIDE_PUSH;
 
-/// Default capability request for current clients.
-pub const CLIENT_DEFAULT_CAPABILITIES: u32 = CAP_ALL_KNOWN;
+/// Default capability request for current clients: every known capability
+/// a client gets by decoding what the terminal sends. `CAP_OVERRIDE_PUSH`
+/// is left out, because a client that negotiates it must answer
+/// `SetOverride` with `OverrideResult`; a client with that code (`ulttui`'s
+/// native backend) adds the bit itself.
+pub const CLIENT_DEFAULT_CAPABILITIES: u32 = CAP_ALL_KNOWN & !CAP_OVERRIDE_PUSH;
 
 /// Negotiate a protocol version for a client/server pair.
 pub const fn negotiate_protocol_version(client_version: u16, server_version: u16) -> Option<u16> {

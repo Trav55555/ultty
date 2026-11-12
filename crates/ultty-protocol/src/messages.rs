@@ -4,6 +4,7 @@ use crate::{
     content::Content,
     events::{FocusEvent, InputEvent, ResizeEvent, ScrollEvent},
     layout::Constraints,
+    overrides::PushedOverride,
     semantics::Semantics,
     style::Style,
     surface::SurfaceEventKind,
@@ -136,6 +137,14 @@ pub enum AppMessage {
     // Keepalive
     /// Pong response to a Ping from the terminal.
     Pong,
+
+    // Overrides
+    /// The answer to a `SetOverride`: applied when `error` is `None`,
+    /// otherwise why it was not (ADR 0023 §9).
+    OverrideResult {
+        request_id: u32,
+        error: Option<String>,
+    },
 }
 
 /// Messages from terminal to app.
@@ -188,6 +197,16 @@ pub enum TerminalMessage {
     // Keepalive
     /// Ping request to the app (expects a Pong reply).
     Ping,
+
+    // Overrides
+    /// Apply a user override pushed through the terminal, or clear the
+    /// pushed one when `pushed` is `None` (ADR 0023 §9). Sent only to a
+    /// session that negotiated `CAP_OVERRIDE_PUSH`; the app answers with
+    /// `OverrideResult` carrying the same `request_id`.
+    SetOverride {
+        request_id: u32,
+        pushed: Option<PushedOverride>,
+    },
 
     // Errors
     /// Error response.

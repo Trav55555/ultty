@@ -29,6 +29,7 @@ fn changes_what_is_shown(msg: &AppMessage) -> bool {
             | AppMessage::ClipboardGet
             | AppMessage::ClipboardSet { .. }
             | AppMessage::Pong
+            | AppMessage::OverrideResult { .. }
             | AppMessage::Disconnect
     )
 }
@@ -287,6 +288,16 @@ impl NativeSession {
             AppMessage::Pong => {
                 debug!("Session {} received pong", self.session_id);
                 self.awaiting_pong = false;
+            }
+
+            AppMessage::OverrideResult { request_id, error } => {
+                debug!(
+                    "Session {} answered override push {}: {}",
+                    self.session_id,
+                    request_id,
+                    error.as_deref().unwrap_or("applied")
+                );
+                self.accept_override_result(request_id, error);
             }
 
             AppMessage::Disconnect => {

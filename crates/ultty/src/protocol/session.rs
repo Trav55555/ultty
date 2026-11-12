@@ -23,9 +23,10 @@ use std::os::unix::net::UnixStream;
 use bytes::BytesMut;
 use tracing::{debug, error, info, warn};
 use ultty_protocol::{
-    AppMessage, Dimension, Display, FlexDirection, FrameId, LayoutTrigger, RegionId,
-    TerminalMessage, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, CAP_INPUT_CURSOR, CAP_LAYOUT_FLEXBOX,
-    CAP_REGION_METADATA, CAP_SEMANTICS, CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, PROTOCOL_VERSION,
+    AppMessage, Dimension, Display, FlexDirection, FrameId, LayoutTrigger, PushedOverride,
+    RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, CAP_INPUT_CURSOR,
+    CAP_LAYOUT_FLEXBOX, CAP_OVERRIDE_PUSH, CAP_REGION_METADATA, CAP_SEMANTICS,
+    CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, PROTOCOL_VERSION,
 };
 #[cfg(test)]
 use ultty_protocol::{Content, Style};
@@ -72,7 +73,12 @@ const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_STREAM_LIFECYCLE
     | CAP_REGION_METADATA
     | CAP_SEMANTICS
-    | CAP_INPUT_CURSOR;
+    | CAP_INPUT_CURSOR
+    | CAP_OVERRIDE_PUSH;
+
+/// Most `SetOverride`s a session may have unanswered at once; one more is
+/// refused, so an applied push is never mistaken for a lost one.
+pub const MAX_AWAITED_OVERRIDE_RESULTS: usize = 64;
 
 /// An in-band session with no traffic from its app for this long has ended.
 /// Clients send a heartbeat (an unsolicited `Pong`) at least every few
@@ -171,6 +177,16 @@ pub struct NativeSession {
     pending_clipboard_get: bool,
     /// Pending clipboard set request.
     pending_clipboard_set: Option<String>,
+    /// Request ids of `SetOverride`s sent and not yet answered, oldest
+    /// first; an `OverrideResult` for any other id is dropped, so the app
+    /// cannot make the terminal hold answers nobody asked for. At most
+    /// [`MAX_AWAITED_OVERRIDE_RESULTS`]: the control plane gives up on a
+    /// push after a few seconds, so an id that stays here is one it has
+    /// already answered for.
+    awaited_override_results: VecDeque<u32>,
+    /// Answers to `SetOverride` the app sent and the control plane has not
+    /// taken: request id and the app's error, if any (ADR 0023 §9).
+    pending_override_results: Vec<(u32, Option<String>)>,
     /// Active style transitions: region_id -> (start_time, start_opacity, target_style).
     style_animations: HashMap<RegionId, StyleAnimation>,
     /// Time of last data received from client.
@@ -323,6 +339,8 @@ impl NativeSession {
             active_streams: HashMap::new(),
             pending_clipboard_get: false,
             pending_clipboard_set: None,
+            awaited_override_results: VecDeque::new(),
+            pending_override_results: Vec::new(),
             style_animations: HashMap::new(),
             last_activity: std::time::Instant::now(),
             last_ping_sent: None,
@@ -1166,6 +1184,70 @@ impl NativeSession {
         self.send_message(&TerminalMessage::ClipboardContent { text })
     }
 
+    /// Whether the app negotiated `CAP_OVERRIDE_PUSH`, so it can be sent
+    /// `SetOverride` and will answer it.
+    pub fn accepts_override_push(&self) -> bool {
+        self.capabilities & CAP_OVERRIDE_PUSH != 0
+    }
+
+    /// Push an override into the app (`None` clears the pushed one). The
+    /// app answers with an `OverrideResult` for `request_id`, read back with
+    /// [`NativeSession::take_override_results`].
+    pub fn send_set_override(
+        &mut self,
+        request_id: u32,
+        pushed: Option<PushedOverride>,
+    ) -> io::Result<()> {
+        if self.awaited_override_results.len() >= MAX_AWAITED_OVERRIDE_RESULTS {
+            return Err(io::Error::other(format!(
+                "{MAX_AWAITED_OVERRIDE_RESULTS} override pushes are unanswered"
+            )));
+        }
+        self.send_message(&TerminalMessage::SetOverride { request_id, pushed })?;
+        self.awaited_override_results.push_back(request_id);
+        Ok(())
+    }
+
+    /// How many `SetOverride`s the app has not answered yet.
+    pub fn awaiting_override_results(&self) -> usize {
+        self.awaited_override_results.len()
+    }
+
+    /// Stop waiting for the answer to `request_id` (the control plane gave
+    /// up on it); a late answer is then dropped.
+    pub fn forget_override_result(&mut self, request_id: u32) {
+        self.awaited_override_results.retain(|&id| id != request_id);
+    }
+
+    /// Keep an `OverrideResult` the control plane is waiting for; drop one
+    /// nobody asked for, or a second answer to the same push. Returns
+    /// whether it was kept.
+    pub(super) fn accept_override_result(
+        &mut self,
+        request_id: u32,
+        error: Option<String>,
+    ) -> bool {
+        let Some(at) = self
+            .awaited_override_results
+            .iter()
+            .position(|&id| id == request_id)
+        else {
+            debug!(
+                "Session {} answered override push {} nobody is waiting for; dropped",
+                self.session_id, request_id
+            );
+            return false;
+        };
+        self.awaited_override_results.remove(at);
+        self.pending_override_results.push((request_id, error));
+        true
+    }
+
+    /// The app's answers to `SetOverride` since the last call.
+    pub fn take_override_results(&mut self) -> Vec<(u32, Option<String>)> {
+        std::mem::take(&mut self.pending_override_results)
+    }
+
     /// Send a scroll event notification to the client for a specific region.
     pub fn send_scroll_event(
         &mut self,
@@ -1226,6 +1308,125 @@ mod tests {
                     | CAP_INLINE_SURFACES,
             })
             .unwrap();
+    }
+
+    /// An app that asks for `CAP_OVERRIDE_PUSH` gets it, can be sent
+    /// `SetOverride`, and its answers are collected for the control plane;
+    /// an app that did not ask is told apart (ADR 0023 §9).
+    #[test]
+    fn override_push_is_negotiated_relayed_and_answered() {
+        let mut session = make_session();
+        session
+            .handle_message(AppMessage::ClientHello {
+                version: PROTOCOL_VERSION,
+                requested_capabilities: CAP_LAYOUT_FLEXBOX,
+            })
+            .unwrap();
+        assert!(!session.accepts_override_push());
+
+        let mut session = make_session();
+        session
+            .handle_message(AppMessage::ClientHello {
+                version: PROTOCOL_VERSION,
+                requested_capabilities: CAP_LAYOUT_FLEXBOX | CAP_OVERRIDE_PUSH,
+            })
+            .unwrap();
+        assert!(session.accepts_override_push());
+        session.take_sent_messages();
+
+        let pushed = PushedOverride {
+            format: ultty_protocol::OverrideFormat::Toml,
+            source: "[widget.a]\nhidden = true\n".to_string(),
+        };
+        session.send_set_override(3, Some(pushed.clone())).unwrap();
+        session.send_set_override(4, None).unwrap();
+        assert_eq!(
+            session.take_sent_messages(),
+            vec![
+                TerminalMessage::SetOverride {
+                    request_id: 3,
+                    pushed: Some(pushed),
+                },
+                TerminalMessage::SetOverride {
+                    request_id: 4,
+                    pushed: None,
+                },
+            ]
+        );
+
+        let shown = session.shown_generation();
+        session
+            .handle_message(AppMessage::OverrideResult {
+                request_id: 3,
+                error: Some("widget.a.hidden: expected true or false".to_string()),
+            })
+            .unwrap();
+        session
+            .handle_message(AppMessage::OverrideResult {
+                request_id: 4,
+                error: None,
+            })
+            .unwrap();
+        assert_eq!(
+            session.take_override_results(),
+            vec![
+                (
+                    3,
+                    Some("widget.a.hidden: expected true or false".to_string())
+                ),
+                (4, None),
+            ]
+        );
+        assert!(session.take_override_results().is_empty());
+        assert_eq!(
+            session.shown_generation(),
+            shown,
+            "an answer changes nothing the app shows"
+        );
+
+        // Answers nobody asked for, and a second answer to a push already
+        // answered, are dropped rather than queued: an app (an in-band one
+        // on a remote host too) cannot grow the terminal's memory with them.
+        for request_id in [3, 4, 99, 100, 101] {
+            session
+                .handle_message(AppMessage::OverrideResult {
+                    request_id,
+                    error: Some("x".repeat(1000)),
+                })
+                .unwrap();
+        }
+        assert!(session.take_override_results().is_empty());
+        assert!(session.pending_override_results.is_empty());
+
+        // The pushes a session may have unanswered are bounded: one more is
+        // refused rather than an older one forgotten, so an applied push
+        // never looks lost. Giving up on one (the control plane's timeout)
+        // makes room and drops its late answer.
+        for request_id in 0..MAX_AWAITED_OVERRIDE_RESULTS as u32 {
+            session.send_set_override(request_id, None).unwrap();
+        }
+        assert_eq!(
+            session.awaiting_override_results(),
+            MAX_AWAITED_OVERRIDE_RESULTS
+        );
+        let refused = session.send_set_override(1000, None).unwrap_err();
+        assert!(refused.to_string().contains("unanswered"), "{refused}");
+        session.take_sent_messages();
+        assert!(
+            session.accept_override_result(0, None),
+            "the oldest is still awaited"
+        );
+
+        session.forget_override_result(1);
+        assert!(
+            !session.accept_override_result(1, None),
+            "a forgotten push's answer is dropped"
+        );
+        session.send_set_override(1000, None).unwrap();
+        assert_eq!(
+            session.awaiting_override_results(),
+            MAX_AWAITED_OVERRIDE_RESULTS - 1
+        );
     }
 
     #[test]

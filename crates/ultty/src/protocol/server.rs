@@ -72,6 +72,9 @@ pub struct ProtocolServer {
     listeners: HashMap<usize, TabListener>,
     /// Sessions keyed by their poller key.
     sessions: HashMap<usize, NativeSession>,
+    /// `OverrideResult`s of sessions that closed before the control plane
+    /// took them (an answer read along with the app's exit), by session key.
+    orphaned_override_results: Vec<(usize, u32, Option<String>)>,
     /// Next poller key; listeners and sessions share one key space.
     next_key: usize,
     viewport_width: f32,
@@ -143,6 +146,7 @@ impl ProtocolServer {
             poller: Poller::new()?,
             listeners: HashMap::new(),
             sessions: HashMap::new(),
+            orphaned_override_results: Vec::new(),
             next_key: 0,
             viewport_width: 80.0,
             viewport_height: 24.0,
@@ -379,6 +383,12 @@ impl ProtocolServer {
 
     fn remove_session(&mut self, key: usize) {
         if let Some(mut session) = self.sessions.remove(&key) {
+            // An override answer read along with the app's exit still
+            // reaches the control plane.
+            for (request_id, error) in session.take_override_results() {
+                self.orphaned_override_results
+                    .push((key, request_id, error));
+            }
             // Its surfaces freeze where they stand, with their last cells.
             session.freeze_surfaces();
             for pairing in self.pairings.values_mut() {
@@ -984,6 +994,55 @@ impl ProtocolServer {
             }
         }
         self.flush();
+    }
+
+    /// Every session with the key that names it to
+    /// [`ProtocolServer::send_set_override`] and in
+    /// [`ProtocolServer::take_override_results`].
+    pub fn sessions_with_keys(&self) -> impl Iterator<Item = (usize, &NativeSession)> {
+        self.sessions.iter().map(|(&key, session)| (key, session))
+    }
+
+    /// Whether the session `key` names is still connected.
+    pub fn has_session(&self, key: usize) -> bool {
+        self.sessions.contains_key(&key)
+    }
+
+    /// Push an override into one session (ADR 0023 §9); `None` clears the
+    /// pushed one. The app's answer comes back through
+    /// [`ProtocolServer::take_override_results`].
+    pub fn send_set_override(
+        &mut self,
+        session_key: usize,
+        request_id: u32,
+        pushed: Option<ultty_protocol::PushedOverride>,
+    ) -> io::Result<()> {
+        let session = self
+            .sessions
+            .get_mut(&session_key)
+            .ok_or_else(|| io::Error::other("the native session is gone"))?;
+        session.send_set_override(request_id, pushed)?;
+        self.flush();
+        Ok(())
+    }
+
+    /// Stop waiting for session `session_key`'s answer to `request_id`.
+    pub fn forget_override_result(&mut self, session_key: usize, request_id: u32) {
+        if let Some(session) = self.sessions.get_mut(&session_key) {
+            session.forget_override_result(request_id);
+        }
+    }
+
+    /// The apps' answers to `SetOverride` since the last call: session key,
+    /// request id and the error, if any.
+    pub fn take_override_results(&mut self) -> Vec<(usize, u32, Option<String>)> {
+        let mut results = std::mem::take(&mut self.orphaned_override_results);
+        for (&key, session) in &mut self.sessions {
+            for (request_id, error) in session.take_override_results() {
+                results.push((key, request_id, error));
+            }
+        }
+        results
     }
 
     /// Advance all animations (scroll and style transitions) across all sessions.
@@ -1770,6 +1829,51 @@ mod tests {
                 )
             })
             .count()
+    }
+
+    /// An app that answers a `SetOverride` and exits in the same breath
+    /// still gets its answer to the control plane: the server keeps a
+    /// closing session's results.
+    #[test]
+    fn an_override_answer_read_with_the_apps_exit_is_kept() {
+        use std::io::Write;
+        let dir = TempDir::new();
+        let (mut server, path) = server_with_tab(&dir);
+        let mut client = connect(&mut server, &path);
+        client
+            .write_all(&encode(&AppMessage::ClientHello {
+                version: ultty_protocol::PROTOCOL_VERSION,
+                requested_capabilities: ultty_protocol::CLIENT_DEFAULT_CAPABILITIES
+                    | ultty_protocol::CAP_OVERRIDE_PUSH,
+            }))
+            .unwrap();
+        server.poll(Some(Duration::from_millis(100))).unwrap();
+        let _handshake = socket_replies(&mut client);
+        let (key, _) = server
+            .sessions_with_keys()
+            .next()
+            .expect("the session is connected");
+        assert!(server.has_session(key));
+
+        server.send_set_override(key, 9, None).unwrap();
+        client
+            .write_all(&encode(&AppMessage::OverrideResult {
+                request_id: 9,
+                error: None,
+            }))
+            .unwrap();
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        drop(client);
+        for _ in 0..20 {
+            server.poll(Some(Duration::from_millis(50))).unwrap();
+            if !server.has_session(key) {
+                break;
+            }
+        }
+        assert!(!server.has_session(key), "the session should have closed");
+
+        assert_eq!(server.take_override_results(), vec![(key, 9, None)]);
+        assert!(server.take_override_results().is_empty());
     }
 
     #[test]

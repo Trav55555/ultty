@@ -1561,6 +1561,33 @@ mod tests {
         assert!(json.contains("Pong") || json.contains("pong"));
     }
 
+    /// A push at the source limit always fits the request cap, even when
+    /// every byte of it is a control character JSON escapes six-fold, so a
+    /// user meets the source limit and never the request cap.
+    #[test]
+    fn a_largest_override_push_fits_under_the_request_cap() {
+        use ultty_protocol::{OverrideFormat, MAX_OVERRIDE_SOURCE_LEN};
+        let envelope = ControlEnvelope {
+            output_format: OutputFormat::Json,
+            request: ControlRequest::WithToken {
+                token: "f".repeat(64),
+                request: Box::new(ControlRequest::PushOverride {
+                    format: OverrideFormat::Luau,
+                    source: "\u{1}".repeat(MAX_OVERRIDE_SOURCE_LEN),
+                    target: Some(u64::MAX),
+                }),
+            },
+        };
+        let json = serde_json::to_vec(&envelope).unwrap();
+        assert!(
+            json.len() <= MAX_REQUEST_BYTES,
+            "{} bytes of request for {MAX_OVERRIDE_SOURCE_LEN} of source",
+            json.len()
+        );
+        let parsed = parse_request(&json).expect("the request parses");
+        assert!(matches!(parsed.request, ControlRequest::WithToken { .. }));
+    }
+
     #[test]
     fn send_response_removes_one_shot_client() {
         let mut server = test_server("remove-client");

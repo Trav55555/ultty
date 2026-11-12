@@ -149,7 +149,12 @@ impl UlttyClient {
     /// [`in_band::InBandTty::open_on`].
     pub fn connect_in_band_on(mut tty: in_band::InBandTty) -> Result<Self, Error> {
         let mut received = Vec::new();
-        if !in_band::probe(&mut tty, &mut received, in_band::PROBE_TIMEOUT)? {
+        if !in_band::probe(
+            &mut tty,
+            &mut received,
+            in_band::PROBE_TIMEOUT,
+            CLIENT_DEFAULT_CAPABILITIES,
+        )? {
             return Err(Error::NotUltty);
         }
         let mut client = Self::with_link(Link::InBand(Box::new(tty)));
@@ -864,7 +869,19 @@ mod tests {
         }
 
         fn answer_handshake(&mut self, server_version: u16) {
-            assert!(matches!(self.read_one(), AppMessage::ClientHello { .. }));
+            // A raw client never answers SetOverride, so it must not ask for
+            // CAP_OVERRIDE_PUSH: a push to it would hang until the timeout.
+            match self.read_one() {
+                AppMessage::ClientHello {
+                    requested_capabilities,
+                    ..
+                } => assert_eq!(
+                    requested_capabilities & ultty_protocol::CAP_OVERRIDE_PUSH,
+                    0,
+                    "a raw client advertised CAP_OVERRIDE_PUSH"
+                ),
+                other => panic!("expected ClientHello, got {other:?}"),
+            }
             self.send(&TerminalMessage::ServerHello {
                 version: server_version,
                 capabilities: CLIENT_DEFAULT_CAPABILITIES,

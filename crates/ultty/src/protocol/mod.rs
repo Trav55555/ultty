@@ -7,4 +7,4 @@ pub mod server;
 pub mod session;
 
 pub use server::ProtocolServer;
-pub use session::NativeSession;
+pub use session::{NativeSession, MAX_AWAITED_OVERRIDE_RESULTS};

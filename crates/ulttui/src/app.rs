@@ -524,6 +524,23 @@ impl<A: Application> App<A> {
             }
         }
 
+        // 2. Overrides pushed through the terminal (ADR 0023 §9): put each
+        // in force, or tell the terminal why not; the app never sees them.
+        while let Some((request_id, pushed)) = self.backend.take_override_push() {
+            let error = match self.overrides.push(pushed.as_ref()) {
+                Ok(changed) => {
+                    tracing::info!(cleared = pushed.is_none(), "applied pushed override");
+                    self.needs_render |= changed;
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "rejected pushed override");
+                    Some(error)
+                }
+            };
+            self.backend.report_override_result(request_id, error)?;
+        }
+
         // 3. Drain message queue (update → Cmd scheduling)
         if self.drain_messages(rt) {
             self.needs_render = true;
@@ -691,12 +708,12 @@ impl<A: Application> App<A> {
             if let Some(screen) = self.screen_stack.last() {
                 let view = screen.view();
                 let composed = OverlayView::new(&view, overlay);
-                FocusManager::with_current_mut(|fm| fm.register_view_tree(&composed));
+                FocusManager::register_current_view_tree(&composed);
                 self.backend.render(&composed)?;
             } else {
                 let view = self.app.view();
                 let composed = OverlayView::new(&view, overlay);
-                FocusManager::with_current_mut(|fm| fm.register_view_tree(&composed));
+                FocusManager::register_current_view_tree(&composed);
                 self.backend.render(&composed)?;
             }
             FocusManager::with_current_mut(|fm| fm.end_frame());
@@ -2385,6 +2402,157 @@ mod async_tests {
         };
         let labels = format!("{:?}", mock.rendered_messages.last().unwrap());
         assert!(labels.contains("label: \"A\"") && labels.contains("label: \"B\""));
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn toml_push(source: &str) -> Option<ultty_protocol::PushedOverride> {
+        Some(ultty_protocol::PushedOverride {
+            format: ultty_protocol::OverrideFormat::Toml,
+            source: source.to_string(),
+        })
+    }
+
+    /// The button labels of the mock's last render, in order.
+    fn rendered_labels(runner: &App<KeyLogApp>) -> Vec<String> {
+        let Backend::Mock(mock) = &runner.backend else {
+            panic!("mock backend");
+        };
+        mock.last_messages()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                ultty_protocol::AppMessage::SetContent {
+                    content:
+                        ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Button(b)),
+                    ..
+                } => Some(b.label.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn override_results(runner: &App<KeyLogApp>) -> Vec<(u32, Option<String>)> {
+        let Backend::Mock(mock) = &runner.backend else {
+            panic!("mock backend");
+        };
+        mock.override_results.clone()
+    }
+
+    /// Overrides on, from a file that does not exist: what an app whose
+    /// user has written nothing yet runs with.
+    fn enabled_overrides() -> crate::overrides::OverrideFile {
+        let dir = std::env::temp_dir().join(format!("ulttui-app-overrides-{}", std::process::id()));
+        crate::overrides::OverrideFile::at(dir.join("absent.toml"))
+    }
+
+    /// An override the terminal pushes (ADR 0023 §9) shows on the next
+    /// frame without any event, is answered, and a clear takes it away.
+    #[test]
+    fn a_pushed_override_applies_on_the_next_frame_and_clears() {
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut mock = MockBackend::new(vec![]).blocking_when_exhausted();
+        mock.push_override(7, toml_push("[widget.b]\ntext = \"Pushed\"\n"));
+        let mut runner = App::new_with_backend(KeyLogApp { keys }, Backend::Mock(mock))
+            .override_file(enabled_overrides());
+        let rt = test_runtime();
+        runner.render().unwrap();
+        assert_eq!(rendered_labels(&runner), ["A", "B"]);
+
+        assert!(runner.run_tick(&rt).unwrap());
+        assert_eq!(rendered_labels(&runner), ["A", "Pushed"]);
+        assert_eq!(override_results(&runner), [(7, None)]);
+
+        let Backend::Mock(mock) = &mut runner.backend else {
+            panic!("mock backend");
+        };
+        mock.push_override(8, None);
+        assert!(runner.run_tick(&rt).unwrap());
+        assert_eq!(rendered_labels(&runner), ["A", "B"]);
+        assert_eq!(override_results(&runner), [(7, None), (8, None)]);
+    }
+
+    /// A pushed Luau file's `widget` hook relabels through the runner too,
+    /// and a later TOML push replaces it.
+    #[cfg(feature = "lua-overrides")]
+    #[test]
+    fn a_pushed_luau_override_applies_and_a_toml_push_replaces_it() {
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut mock = MockBackend::new(vec![]).blocking_when_exhausted();
+        mock.push_override(
+            1,
+            Some(ultty_protocol::PushedOverride {
+                format: ultty_protocol::OverrideFormat::Luau,
+                source: "return { widget = function(id) if id == 'a' then return { text = 'Lua' } end end }"
+                    .to_string(),
+            }),
+        );
+        let mut runner = App::new_with_backend(KeyLogApp { keys }, Backend::Mock(mock))
+            .override_file(enabled_overrides());
+        let rt = test_runtime();
+        runner.render().unwrap();
+
+        assert!(runner.run_tick(&rt).unwrap());
+        assert_eq!(rendered_labels(&runner), ["Lua", "B"]);
+        // The hook is cached; another frame asks nothing new of it.
+        assert!(runner.run_tick(&rt).unwrap());
+        assert_eq!(rendered_labels(&runner), ["Lua", "B"]);
+
+        let Backend::Mock(mock) = &mut runner.backend else {
+            panic!("mock backend");
+        };
+        mock.push_override(2, toml_push("[widget.b]\ntext = \"Toml\"\n"));
+        assert!(runner.run_tick(&rt).unwrap());
+        assert_eq!(rendered_labels(&runner), ["A", "Toml"]);
+        assert_eq!(override_results(&runner), [(1, None), (2, None)]);
+    }
+
+    /// An app whose overrides are off (`ULTTUI_NO_OVERRIDES`, no app name;
+    /// a mock backend reads none) refuses a push with a reason and draws
+    /// as before, so the switch holds for pushes too (ADR 0023 §2, §9).
+    #[test]
+    fn a_push_into_an_app_with_overrides_off_is_refused() {
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut mock = MockBackend::new(vec![]).blocking_when_exhausted();
+        mock.push_override(4, toml_push("[widget.b]\ntext = \"Pushed\"\n"));
+        let mut runner = App::new_with_backend(KeyLogApp { keys }, Backend::Mock(mock));
+        let rt = test_runtime();
+        runner.render().unwrap();
+
+        assert!(runner.run_tick(&rt).unwrap());
+
+        assert_eq!(rendered_labels(&runner), ["A", "B"]);
+        let results = override_results(&runner);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 4);
+        let error = results[0].1.as_deref().expect("the push is refused");
+        assert!(error.contains("overrides are off"), "{error}");
+    }
+
+    /// A push that does not parse is answered with the reason and leaves
+    /// the overrides in force, from the file and from an earlier push.
+    #[test]
+    fn a_bad_pushed_override_is_reported_and_changes_nothing() {
+        let (path, file) = override_file("pushed-base.toml", "[widget.a]\ntext = \"File\"\n");
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut mock = MockBackend::new(vec![]).blocking_when_exhausted();
+        mock.push_override(1, toml_push("[widget.b]\ntext = \"Pushed\"\n"));
+        mock.push_override(2, toml_push("[widget.b]\ntext = 3\n"));
+        let mut runner =
+            App::new_with_backend(KeyLogApp { keys }, Backend::Mock(mock)).override_file(file);
+        let rt = test_runtime();
+        runner.render().unwrap();
+
+        assert!(runner.run_tick(&rt).unwrap());
+
+        assert_eq!(rendered_labels(&runner), ["File", "Pushed"]);
+        let results = override_results(&runner);
+        assert_eq!(results[0], (1, None));
+        assert_eq!(results[1].0, 2);
+        let error = results[1].1.as_deref().expect("the bad push is reported");
+        assert!(
+            error.contains("widget.b.text") && error.contains("expected a string"),
+            "{error}"
+        );
         let _ = std::fs::remove_file(path);
     }
 }

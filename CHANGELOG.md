@@ -30,6 +30,18 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Added
 
+- `ulttyctl override push <file>` and `override clear` (ADR 0023 §9): try a
+  user override on the native `ulttui` app in a pane without writing it
+  under `~/.config`. The override applies on the app's next frame, in
+  memory over its files; a bad one is refused with the app's parse error,
+  as is any push to an app with `ULTTUI_NO_OVERRIDES` set. A pushed file
+  is at most 128 KiB. New protocol messages `SetOverride` and
+  `OverrideResult` (both `0x0080`) behind `CAP_OVERRIDE_PUSH` (`0x0800`),
+  which `CLIENT_DEFAULT_CAPABILITIES` leaves out (a client asks for it
+  only if it answers `SetOverride`; `ulttui`'s native backend does), so
+  apps on older `ulttui` and raw `ultty-client` apps are refused cleanly.
+  `ulttyctl mcp` serves them as `ultty_push_override` and
+  `ultty_clear_override`.
 - Native apps draw in split panes ([ADR 0025](docs/adr/0025-native-sessions-in-panes.md)):
   a native session is bound to the pane whose PTY runs its app (the pane
   whose foreground process group the connecting process is in; a one-pane
@@ -139,6 +151,10 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Fixed
 
+- A Luau override file with a `widget` hook panicked every `ulttui` app
+  on its first frame ("RefCell already mutably borrowed"): the runner
+  registered focusable widgets while holding the focus manager, and the
+  hook read focus through it. Registration no longer holds it.
 - `DiffView`'s line texts are one cell high in native mode; they were laid
   out with no height.
 - `ulttui` answers the terminal's `Ping` over the socket. An app that had

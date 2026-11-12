@@ -71,7 +71,10 @@ use ultty_protocol::{
     TrackSizingFunction,
     WidgetContent,
 };
-use ultty_protocol::{Expanded, Live, SurfaceEventKind, MAX_SURFACE_ROWS, MIN_SURFACE_ROWS};
+use ultty_protocol::{
+    Expanded, Live, OverrideFormat, PushedOverride, SurfaceEventKind, MAX_SURFACE_ROWS,
+    MIN_SURFACE_ROWS,
+};
 
 // ============================================================================
 // Arbitrary Implementations for Basic Types
@@ -875,7 +878,21 @@ fn arb_app_message() -> impl Strategy<Value = AppMessage> {
             .prop_map(|(id, events)| AppMessage::Unsubscribe { id, events }),
         // Disconnect
         Just(AppMessage::Disconnect),
+        // OverrideResult
+        (any::<u32>(), proptest::option::of(".*"))
+            .prop_map(|(request_id, error)| { AppMessage::OverrideResult { request_id, error } }),
     ]
+}
+
+fn arb_set_override() -> impl Strategy<Value = TerminalMessage> {
+    (
+        any::<u32>(),
+        proptest::option::of((proptest::sample::select(OverrideFormat::ALL.to_vec()), ".*")),
+    )
+        .prop_map(|(request_id, pushed)| TerminalMessage::SetOverride {
+            request_id,
+            pushed: pushed.map(|(format, source)| PushedOverride { format, source }),
+        })
 }
 
 fn arb_terminal_message() -> impl Strategy<Value = TerminalMessage> {
@@ -919,6 +936,8 @@ fn arb_terminal_message() -> impl Strategy<Value = TerminalMessage> {
         arb_scroll_event().prop_map(TerminalMessage::Scroll),
         // SurfaceEvent
         arb_surface_event(),
+        // SetOverride
+        arb_set_override(),
         // Error
         (any::<u16>(), ".*").prop_map(|(code, message)| TerminalMessage::Error { code, message }),
     ]

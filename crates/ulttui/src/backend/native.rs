@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use bytes::BytesMut;
 use ultty_protocol::{
     AppMessage, ComputedRegionLayout, Content, FrameId, InputEvent, InputType, Key, Modifiers,
-    RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_INPUT_CURSOR, CAP_REGION_METADATA,
-    CAP_SEMANTICS, CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL,
-    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    PushedOverride, RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_INPUT_CURSOR,
+    CAP_OVERRIDE_PUSH, CAP_REGION_METADATA, CAP_SEMANTICS, CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY,
+    EVENT_MOUSE, EVENT_SCROLL, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
 use crate::event::Event;
@@ -51,6 +51,12 @@ fn name_new_regions(messages: &mut Vec<AppMessage>, tree: &RetainedTree) {
 /// How long the terminal has to answer `ClientHello` with `SessionReady`.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// What this backend asks the terminal for: the client defaults, plus
+/// pushed overrides (ADR 0023 §9), which it answers through
+/// [`NativeBackend::send_override_result`]. A client that does not answer
+/// `SetOverride` must not ask for that bit.
+pub const REQUESTED_CAPABILITIES: u32 = CLIENT_DEFAULT_CAPABILITIES | CAP_OVERRIDE_PUSH;
+
 pub struct NativeBackend {
     stream: Option<UnixStream>,
     /// The in-band link, when the app talks through its own terminal.
@@ -72,7 +78,14 @@ pub struct NativeBackend {
     /// The region last reported to the terminal as focused.
     reported_focus: Option<RegionId>,
     pending_events: VecDeque<Event>,
+    /// Overrides the terminal pushed (ADR 0023 §9), for the runner to
+    /// apply and answer.
+    pending_overrides: VecDeque<OverridePush>,
 }
+
+/// A `SetOverride` from the terminal: the request to answer and what to
+/// put in force (`None` clears the pushed override).
+pub type OverridePush = (u32, Option<PushedOverride>);
 
 impl NativeBackend {
     pub fn new() -> Self {
@@ -91,6 +104,7 @@ impl NativeBackend {
             retained: RetainedTree::new(),
             reported_focus: None,
             pending_events: VecDeque::new(),
+            pending_overrides: VecDeque::new(),
         }
     }
 
@@ -150,7 +164,12 @@ impl NativeBackend {
     fn init_in_band(&mut self) -> crate::Result<()> {
         let mut tty = in_band::InBandTty::open()?;
         let mut received = Vec::new();
-        if !in_band::probe(&mut tty, &mut received, in_band::PROBE_TIMEOUT)? {
+        if !in_band::probe(
+            &mut tty,
+            &mut received,
+            in_band::PROBE_TIMEOUT,
+            REQUESTED_CAPABILITIES,
+        )? {
             return Err(crate::Error::NativeUnavailable(
                 "the terminal does not answer the in-band probe",
             ));
@@ -359,7 +378,22 @@ impl NativeBackend {
     /// Whether events were read ahead (with a message that carried several,
     /// or an earlier read).
     pub fn has_pending_events(&self) -> bool {
-        !self.pending_events.is_empty()
+        !self.pending_events.is_empty() || !self.pending_overrides.is_empty()
+    }
+
+    /// The next override the terminal pushed, if any (ADR 0023 §9).
+    pub fn take_override_push(&mut self) -> Option<OverridePush> {
+        self.pending_overrides.pop_front()
+    }
+
+    /// Answer a `SetOverride`: `error` is why it was not applied, if it
+    /// was not.
+    pub fn send_override_result(
+        &mut self,
+        request_id: u32,
+        error: Option<String>,
+    ) -> crate::Result<()> {
+        self.send_message(&AppMessage::OverrideResult { request_id, error })
     }
 
     /// When the next in-band heartbeat is due.
@@ -385,7 +419,7 @@ impl NativeBackend {
     fn send_client_hello(&mut self) -> crate::Result<()> {
         let msg = AppMessage::ClientHello {
             version: PROTOCOL_VERSION,
-            requested_capabilities: CLIENT_DEFAULT_CAPABILITIES,
+            requested_capabilities: REQUESTED_CAPABILITIES,
         };
         self.send_message(&msg)
     }
@@ -497,6 +531,9 @@ impl NativeBackend {
                     Err(crate::Error::Io(err)) if terminal_gone(&err) => {}
                     other => other?,
                 },
+                TerminalMessage::SetOverride { request_id, pushed } => {
+                    self.pending_overrides.push_back((request_id, pushed));
+                }
                 _ => {}
             }
         }
@@ -692,6 +729,16 @@ mod tests {
         let fake = std::thread::spawn(move || {
             let mut hello = [0u8; 14];
             terminal.read_exact(&mut hello).unwrap();
+            // This backend answers SetOverride, so it asks for pushes.
+            let decoded = <AppMessage as ultty_protocol::Decode>::decode(&mut &hello[..]).unwrap();
+            assert!(
+                matches!(
+                    decoded,
+                    AppMessage::ClientHello { requested_capabilities, .. }
+                        if requested_capabilities & ultty_protocol::CAP_OVERRIDE_PUSH != 0
+                ),
+                "{decoded:?}"
+            );
             for msg in [
                 TerminalMessage::ServerHello {
                     version: ultty_protocol::PROTOCOL_VERSION,
