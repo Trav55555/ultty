@@ -460,7 +460,7 @@ wait_done() {
 resize_window() {
   local term="$1" win="$2" w="$3" h="$4"
   if [[ "$term" == ultty ]]; then
-    "$BIN/ulttyctl" resize "$w" "$h" >/dev/null
+    "$BIN/ulttyctl" --pid "$TERM_PID" resize "$w" "$h" >/dev/null
   elif [[ "$SESSION" == wayland ]]; then
     swaymsg "[con_id=$win] resize set $w px $h px" >/dev/null
   else
@@ -587,7 +587,7 @@ run_k2p() {
 new_tab() {
   local term="$1" title="$2"
   case "$term" in
-    ultty) "$BIN/ulttyctl" new-tab sleep 600 >/dev/null ;;
+    ultty) "$BIN/ulttyctl" --pid "$TERM_PID" new-tab sleep 600 >/dev/null ;;
     gnome-terminal)
       DBUS_SESSION_BUS_ADDRESS=$(tr '\0' '\n' <"/proc/$(owner_pid "$term" "$title")/environ" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p') \
         gnome-terminal --tab -- sleep 600 ;;

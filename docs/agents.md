@@ -47,8 +47,13 @@ claude mcp add ultty -- ulttyctl mcp
 ```
 
 `ulttyctl` talks to the Ultty window it runs in (through `ULTTY_PID`, which
-Ultty sets for its shells), or else the most recently started one. So an
-agent started in an Ultty pane drives that window.
+Ultty sets for its shells), so an agent started in an Ultty pane drives that
+window and no other. While that Ultty runs but has no control socket yet,
+commands fail rather than reach another window. Only once it has exited (a
+tmux session can outlive the window that started it) does `ulttyctl` use the
+most recently started Ultty instead, and it says so on stderr. Without
+`ULTTY_PID` it uses the most recently started one; `ulttyctl --pid <pid>`
+names an instance exactly and never falls back.
 
 ## The tools
 

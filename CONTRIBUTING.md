@@ -111,8 +111,11 @@ Every Ultty process (each window) listens on its own socket,
 `$XDG_RUNTIME_DIR/ultty-ctl-<pid>.sock` with mode 0600. Without
 `XDG_RUNTIME_DIR` it uses a private `ultty-<uid>` directory (mode 0700, owned
 by the user, checked at start) under `$TMPDIR` or `/tmp`. `ulttyctl` talks to
-the most recently started instance that is still running. This is the socket
-the smoke gates use.
+the instance named by `--pid`, else by `ULTTY_PID` (set for every shell Ultty
+starts), else the most recently started one that is still running. A named
+instance that runs but is not listening yet is an error, never a reason to
+use another; only a `ULTTY_PID` whose Ultty has exited falls back to the
+newest, with a notice on stderr. This is the socket the smoke gates use.
 
 **Cleanup.** Ultty removes its sockets and token when it exits, including on
 SIGTERM, SIGHUP and SIGINT, which it handles as a window close (a signal it

@@ -19,7 +19,16 @@ mkdir -p "$out"
 command -v Xvfb >/dev/null || { echo "Xvfb is required" >&2; exit 2; }
 
 cargo build -q --release -p ultty --bins
-cleanup() { kill "${ultty_pid-}" "${xvfb_pid-}" 2>/dev/null || true; }
+# A private runtime dir holds this Ultty's control socket and no other's,
+# so ulttyctl cannot reach a window on the desktop. Socket paths are short
+# (108 bytes), so it lives directly under /tmp.
+runtime=$(mktemp -d /tmp/ultty-soak.XXXXXX)
+chmod 700 "$runtime"
+cleanup() {
+    kill "${ultty_pid-}" "${xvfb_pid-}" 2>/dev/null || true
+    wait 2>/dev/null || true
+    rm -rf "$runtime"
+}
 trap cleanup EXIT
 
 Xvfb -displayfd 3 -screen 0 1920x1200x24 3>"$out/display" 2>"$out/xvfb.log" &
@@ -32,17 +41,28 @@ for _ in $(seq 50); do [ -s "$out/display" ] && break; sleep 0.1; done
 : >"$out/ultty.log"
 # Without unsetting WAYLAND_DISPLAY, a Wayland session in the environment
 # wins over DISPLAY and the window opens on the desktop instead of Xvfb.
+export XDG_RUNTIME_DIR="$runtime"
+unset ULTTY_SOCKET ULTTY_AUTH_TOKEN
 env -u WAYLAND_DISPLAY DISPLAY=":$(cat "$out/display")" ULTTY_TRACE_PIPELINE=1 \
     RUST_LOG=info,ultty::perf=info target/release/ultty >>"$out/ultty.log" 2>&1 &
 ultty_pid=$!
 export ULTTY_PID=$ultty_pid PATH="$PWD/target/release:$PATH"
-for _ in $(seq 80); do ulttyctl ping >/dev/null 2>&1 && break; sleep 0.25; done
-ulttyctl ping >/dev/null
+# --pid: this Ultty or an error, never another one.
+ctl() { ulttyctl --pid "$ultty_pid" "$@"; }
+for _ in $(seq 80); do
+    [ -S "$runtime/ultty-ctl-$ultty_pid.sock" ] && ctl ping >/dev/null 2>&1 && break
+    kill -0 "$ultty_pid" 2>/dev/null || { echo "Ultty exited during startup" >&2; exit 1; }
+    sleep 0.25
+done
+ctl ping >/dev/null || { echo "Ultty $ultty_pid never answered on its control socket" >&2; exit 1; }
 
 stream="$PWD/scripts/bench/agent-stream.py"
-ulttyctl new-tab /usr/bin/python3 "$stream" --seed 2 >/dev/null
-ulttyctl new-tab /usr/bin/python3 "$stream" --seed 1 >/dev/null
-ulttyctl close-tab 1 >/dev/null   # the starting shell; the streams remain
+ctl new-tab /usr/bin/python3 "$stream" --seed 2 >/dev/null
+ctl new-tab /usr/bin/python3 "$stream" --seed 1 >/dev/null
+ctl close-tab 1 >/dev/null   # the starting shell; the streams remain
+# Fail now, not after hours of samples, if the tabs did not land here.
+tabs=$(ctl --json panes | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["panes"]))')
+[ "$tabs" = 2 ] || { echo "expected 2 streaming panes in Ultty $ultty_pid, found $tabs" >&2; exit 1; }
 
 gpu_kib() {
     awk '/^[0-9a-f]+-[0-9a-f]+ /{m=($0 ~ /memfd/)} m && /^Rss:/{s+=$2} END{print s+0}' \
@@ -66,7 +86,7 @@ for minute in $(seq 1 "$minutes"); do
     kill -0 "$ultty_pid" 2>/dev/null || { echo "Ultty exited at minute $minute" >&2; exit 1; }
     if (( minute % 5 == 0 )); then
         # shellcheck disable=SC2086 # width and height are two words
-        ulttyctl resize ${sizes[$(( (minute / 5) % 4 ))]} >/dev/null || true
+        ctl resize ${sizes[$(( (minute / 5) % 4 ))]} >/dev/null || true
     fi
     rss=$(awk '/^Rss:/{print $2}' "/proc/$ultty_pid/smaps_rollup")
     anon=$(awk '/^RssAnon:/{print $2}' "/proc/$ultty_pid/status")
