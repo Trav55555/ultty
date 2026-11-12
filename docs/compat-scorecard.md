@@ -20,7 +20,7 @@ and, for key encoding, `crates/ultty/src/keys.rs`. The README's
 | Hyperlinks (OSC 8) | Yes | Clickable file paths and URLs in output | Ctrl+click opens http, https, mailto and ftp only |
 | Clipboard writes (OSC 52) | Yes | Copying from a program, including over ssh | Reads are refused; writes can be turned off |
 | Shell prompt marks (OSC 133) | Yes | Knowing where commands and their output start and end | Feeds `ulttyctl last-command` and command events |
-| Working directory (OSC 7) | Yes | Opening a new tab where the shell is |  |
+| Working directory (OSC 7) | Yes | Opening a new tab where the shell is | New tabs and splits start in the focused pane's directory; local `file://` hosts only (`behavior.inherit_working_directory`) |
 | Desktop notifications (OSC 9, OSC 777) | Yes | "Done" or "needs input" from a long-running agent |  |
 | Progress (OSC 9;4) | Yes | A progress bar on the tab; ConEmu's sequence, also read by Windows Terminal and Ghostty |  |
 | Theme change reports (mode 2031) | Yes | Programs restyling when the system switches light/dark |  |

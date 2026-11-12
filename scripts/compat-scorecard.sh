@@ -23,7 +23,7 @@ true_colour_and_underline_styles|24-bit colour, underline styles and colour|Synt
 hyperlinks|Hyperlinks (OSC 8)|Clickable file paths and URLs in output|Ctrl+click opens http, https, mailto and ftp only
 clipboard_write|Clipboard writes (OSC 52)|Copying from a program, including over ssh|Reads are refused; writes can be turned off
 prompt_marks|Shell prompt marks (OSC 133)|Knowing where commands and their output start and end|Feeds `ulttyctl last-command` and command events
-working_directory|Working directory (OSC 7)|Opening a new tab where the shell is|
+working_directory|Working directory (OSC 7)|Opening a new tab where the shell is|New tabs and splits start in the focused pane's directory; local `file://` hosts only (`behavior.inherit_working_directory`)
 notifications|Desktop notifications (OSC 9, OSC 777)|"Done" or "needs input" from a long-running agent|
 progress|Progress (OSC 9;4)|A progress bar on the tab; ConEmu's sequence, also read by Windows Terminal and Ghostty|
 colour_scheme_updates|Theme change reports (mode 2031)|Programs restyling when the system switches light/dark|

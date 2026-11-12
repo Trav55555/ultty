@@ -177,6 +177,10 @@ pub mod kitty_keyboard {
 pub struct ShellIntegration {
     /// Current working directory (from OSC 7)
     pub working_directory: Option<String>,
+    /// The OSC 7 URI as the shell sent it, host included. The host decides
+    /// whether the directory exists on this machine, which `working_directory`
+    /// no longer says.
+    pub working_directory_uri: Option<String>,
     /// Line where current prompt started
     pub prompt_line: Option<u16>,
     /// Line where current command started
@@ -856,8 +860,14 @@ impl Terminal {
         self.shell_integration.working_directory.as_deref()
     }
 
+    /// The last OSC 7 value exactly as received (`file://host/path`).
+    pub fn working_directory_uri(&self) -> Option<&str> {
+        self.shell_integration.working_directory_uri.as_deref()
+    }
+
     /// Set working directory (from OSC 7 file://host/path).
     pub fn set_working_directory(&mut self, uri: String) {
+        self.shell_integration.working_directory_uri = Some(uri.clone());
         // Parse file:// URI to extract path
         let path = if let Some(stripped) = uri.strip_prefix("file://") {
             // Skip file://hostname/ prefix
@@ -2017,6 +2027,15 @@ mod tests {
         // Should not panic
         let text = term.selected_text().unwrap();
         assert!(text.contains("XYZ"));
+    }
+
+    #[test]
+    fn working_directory_keeps_the_uri_with_its_host() {
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+        assert_eq!(term.working_directory_uri(), None);
+        term.set_working_directory("file://box/home/a%20b".into());
+        assert_eq!(term.working_directory(), Some("/home/a b"));
+        assert_eq!(term.working_directory_uri(), Some("file://box/home/a%20b"));
     }
 
     #[test]
