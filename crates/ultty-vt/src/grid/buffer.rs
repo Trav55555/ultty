@@ -464,6 +464,14 @@ impl Buffer {
         }
     }
 
+    /// How many rows have been evicted from the front of history so far.
+    ///
+    /// `evicted_lines() + absolute index` numbers a row for good, so a
+    /// reader holding absolute indices can tell how far they have shifted.
+    pub fn evicted_lines(&self) -> usize {
+        self.evicted
+    }
+
     /// Get the underlying grid.
     pub fn grid(&self) -> &Grid {
         &self.grid

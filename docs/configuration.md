@@ -162,6 +162,43 @@ uses those to move between panes (`focus_pane_up`, `focus_pane_down`), so the
 defaults here are Ctrl+Shift+PageUp and PageDown, beside Shift+PageUp and
 PageDown for scrolling by a page. Set any of the three to `""` to turn it off.
 
+## Searching scrollback
+
+```toml
+[search]
+regex = false
+smart_case = true
+
+[keybindings]
+find = "ctrl+shift+f"
+```
+
+`find` enters copy mode with a query prompt. You can also press `/` (search
+forward) or `?` (search backward) in copy mode. Type the query and press Enter;
+`n` and `N` move to the next and previous match, and the first jump goes to the
+match nearest the cursor in the search direction. Esc leaves the prompt.
+
+- Matching reads a soft-wrapped line as one line, so a match can run across
+  the wrap. A hard line break (a newline from the program) still ends it.
+  Trailing blanks at the end of a line are not part of it.
+- `smart_case = true` ignores case unless the query has an uppercase letter.
+  With `false`, matching is always case sensitive.
+- `regex = true` reads the query as a regular expression in the Rust `regex`
+  crate's syntax. Ctrl+R in the prompt toggles it for that search; the prompt
+  shows `[regex]` while it is on. A pattern that does not compile shows its
+  error in the status line; a pattern that
+  can match nothing (`a*`) skips the empty matches.
+- All matches are highlighted, the current one brighter, and the status line
+  shows `[3/17]` or `[no matches]`.
+- The scan runs in slices of about 2 ms per frame, so the terminal keeps up
+  with its program while a large scrollback is searched; the status line shows
+  `searching 40%`. Measured in a release build on 120-column lines: 10k lines
+  in 8 ms, 100k in 140 ms, 1M in 0.6 to 1.4 s, split over many frames. Matches are a snapshot: output that arrives after the scan
+  passes a row is not searched, and matches in lines the scrollback limit
+  evicts later are dropped.
+- A logical line over 1 MiB is searched in pieces, so a match cannot cross
+  those cuts.
+
 ## Line height
 
 ```toml

@@ -1445,6 +1445,7 @@ impl App {
         let viewport_cols = dims.cols as usize;
         drop(terminal);
 
+        self.copy_mode.set_search_regex(self.config.search.regex);
         self.copy_mode
             .enter(total_rows, viewport_rows, viewport_cols);
         tracing::debug!("Entered copy mode");
@@ -1462,6 +1463,7 @@ impl App {
         let viewport_cols = dims.cols as usize;
         drop(terminal);
 
+        self.copy_mode.set_search_regex(self.config.search.regex);
         self.copy_mode
             .enter_search(total_rows, viewport_rows, viewport_cols);
         tracing::debug!("Entered search mode");
