@@ -24,6 +24,13 @@ gsettings set "$profile" cursor-blink-mode off
 gsettings set "$profile" audible-bell false
 gsettings set org.gnome.Terminal.Legacy.Settings confirm-close false
 gsettings set org.gnome.Terminal.Legacy.Settings default-show-menubar false
+# GNOME Terminal 3.56+ asks to become the default terminal in a bar above
+# the terminal, and the bar takes keyboard focus: typed keys never reach
+# the terminal, so every keypress-latency sample failed ("no pixels
+# changed"). Older versions have neither the bar nor the key.
+if gsettings list-keys org.gnome.Terminal.Legacy.Settings | grep -qx always-check-default-terminal; then
+  gsettings set org.gnome.Terminal.Legacy.Settings always-check-default-terminal false
+fi
 
 # Fail loudly if the settings did not stick (for example, no dconf service).
 [[ "$(gsettings get "$profile" default-size-columns)" == "$cols" ]] || {
