@@ -496,6 +496,11 @@ pub struct FontConfig {
     /// value. A later entry for the same feature wins. Entries that do not
     /// parse are ignored with a warning (see [`parse_font_features`]).
     pub features: Vec<String>,
+    /// Draw ranges of codepoints from a specific family, as a list of
+    /// `{ range = "U+E0A0-U+E0A3", family = "Symbols Nerd Font Mono" }`
+    /// tables. A later entry wins where ranges overlap. See
+    /// [`parse_codepoint_map`].
+    pub codepoint_map: Vec<CodepointMapEntry>,
     /// Font size in points
     pub size: f32,
     /// Line height as a multiple of the font size: the cell height is
@@ -533,6 +538,7 @@ impl Default for FontConfig {
             italic_family: String::new(),
             bold_italic_family: String::new(),
             features: Vec::new(),
+            codepoint_map: Vec::new(),
             size: 14.0,
             // 1.0 = no extra spacing between lines, required for block characters
             // to touch (e.g., OpenCode logo). Users can increase if they prefer
@@ -571,6 +577,61 @@ impl FontConfig {
             self.size = clamped;
         }
     }
+}
+
+/// One entry of `font.codepoint_map`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct CodepointMapEntry {
+    /// `U+E0A0` or `U+E0A0-U+E0A3` (inclusive).
+    pub range: String,
+    /// The family to draw the range from.
+    pub family: String,
+}
+
+/// Parse `U+XXXX` or `U+XXXX-U+YYYY` (hex, case-insensitive) into an
+/// inclusive range of characters. `None` for anything else, including a
+/// reversed range or a value that is not a Unicode scalar value.
+pub fn parse_codepoint_range(range: &str) -> Option<std::ops::RangeInclusive<char>> {
+    fn one(text: &str) -> Option<char> {
+        let hex = text
+            .trim()
+            .strip_prefix("U+")
+            .or_else(|| text.trim().strip_prefix("u+"))?;
+        if hex.is_empty() || hex.len() > 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        char::from_u32(u32::from_str_radix(hex, 16).ok()?)
+    }
+    let (start, end) = match range.split_once('-') {
+        Some((start, end)) => (one(start)?, one(end)?),
+        None => {
+            let ch = one(range)?;
+            (ch, ch)
+        }
+    };
+    (start <= end).then_some(start..=end)
+}
+
+/// The entries of `font.codepoint_map` as ranges with their families, in
+/// order, warning about entries with a bad range or no family and skipping
+/// them.
+pub fn parse_codepoint_map(
+    entries: &[CodepointMapEntry],
+) -> Vec<(std::ops::RangeInclusive<char>, String)> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let range = parse_codepoint_range(&entry.range);
+            if range.is_none() || entry.family.is_empty() {
+                warn!(
+                    "font.codepoint_map entry {:?} -> {:?} needs a range such as \"U+E0A0-U+E0A3\" and a family; ignoring it",
+                    entry.range, entry.family
+                );
+                return None;
+            }
+            range.map(|range| (range, entry.family.clone()))
+        })
+        .collect()
 }
 
 /// One OpenType feature setting from `font.features`.
@@ -1284,6 +1345,54 @@ mod tests {
         ] {
             assert_eq!(FontFeature::parse(bad), None, "for {bad:?}");
         }
+    }
+
+    #[test]
+    fn codepoint_ranges_parse() {
+        assert_eq!(
+            parse_codepoint_range("U+E0A0"),
+            Some('\u{E0A0}'..='\u{E0A0}')
+        );
+        assert_eq!(
+            parse_codepoint_range("u+e0a0-U+E0A3"),
+            Some('\u{E0A0}'..='\u{E0A3}')
+        );
+        assert_eq!(
+            parse_codepoint_range("U+1F600"),
+            Some('\u{1F600}'..='\u{1F600}')
+        );
+        for bad in [
+            "",
+            "E0A0",
+            "U+",
+            "U+XYZ",
+            "U+E0A3-U+E0A0",
+            "U+D800",
+            "U+110000",
+            "U+E0A0-",
+            "U+E0A0 U+E0A3",
+        ] {
+            assert_eq!(parse_codepoint_range(bad), None, "for {bad:?}");
+        }
+    }
+
+    #[test]
+    fn codepoint_map_is_read_and_bad_entries_are_skipped() {
+        let config: Config = toml::from_str(
+            "[[font.codepoint_map]]\nrange = \"U+E000-U+F8FF\"\nfamily = \"Symbols\"\n\
+             [[font.codepoint_map]]\nrange = \"nope\"\nfamily = \"X\"\n\
+             [[font.codepoint_map]]\nrange = \"U+41\"\nfamily = \"\"\n\
+             [[font.codepoint_map]]\nrange = \"U+41\"\nfamily = \"Serif\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.font.codepoint_map.len(), 4);
+        assert_eq!(
+            parse_codepoint_map(&config.font.codepoint_map),
+            [
+                ('\u{E000}'..='\u{F8FF}', "Symbols".to_string()),
+                ('A'..='A', "Serif".to_string()),
+            ]
+        );
     }
 
     #[test]

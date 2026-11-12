@@ -111,9 +111,10 @@ type RunGlyphs = Vec<(u16, ShapedGlyph)>;
 /// ligatures: a single printable ASCII character with nothing that needs the
 /// per-cell path (wide characters, grapheme clusters, hidden text, symbols
 /// drawn procedurally).
-fn joins_ligature_run(cell: &crate::grid::Cell) -> bool {
+fn joins_ligature_run(cell: &crate::grid::Cell, fonts: &FontSelection) -> bool {
     let ch = cell.char();
     ch.is_ascii_graphic()
+        && fonts.mapped(ch).is_none()
         && !is_procedural_cell_symbol(ch)
         && !cell.has_flag(CellFlags::WIDE_CHAR)
         && !cell.has_flag(CellFlags::WIDE_CHAR_SPACER)
@@ -137,8 +138,11 @@ fn ligature_key(cell: &crate::grid::Cell) -> (bool, bool, crate::grid::Color, bo
 
 /// The end (exclusive) of the ligature run starting at `start`: consecutive
 /// cells that join runs, with the same face and foreground.
-fn ligature_run_end(row: &RowView<'_>, start: u16, cols: u16) -> u16 {
-    let Some(first) = row.cell(start).filter(joins_ligature_run) else {
+fn ligature_run_end(row: &RowView<'_>, start: u16, cols: u16, fonts: &FontSelection) -> u16 {
+    let Some(first) = row
+        .cell(start)
+        .filter(|cell| joins_ligature_run(cell, fonts))
+    else {
         return start;
     };
     let key = ligature_key(&first);
@@ -146,7 +150,7 @@ fn ligature_run_end(row: &RowView<'_>, start: u16, cols: u16) -> u16 {
     while end < cols {
         let joins = row
             .cell(end)
-            .is_some_and(|cell| joins_ligature_run(&cell) && ligature_key(&cell) == key);
+            .is_some_and(|cell| joins_ligature_run(&cell, fonts) && ligature_key(&cell) == key);
         if !joins {
             break;
         }
@@ -326,6 +330,16 @@ struct FontSelection {
     /// Real bold and italic faces of each entry of `families`.
     face_styles: [FaceStyles; 4],
     features: FontFeatures,
+    /// `font.codepoint_map`: ranges drawn from a given family, with that
+    /// family's real faces. Later entries win.
+    codepoints: Vec<MappedRange>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct MappedRange {
+    range: std::ops::RangeInclusive<char>,
+    family: String,
+    face_styles: FaceStyles,
 }
 
 impl FontSelection {
@@ -348,6 +362,31 @@ impl FontSelection {
             families,
             face_styles,
             features: font_features(&crate::config::parse_font_features(&config.features)),
+            codepoints: crate::config::parse_codepoint_map(&config.codepoint_map)
+                .into_iter()
+                .map(|(range, family)| MappedRange {
+                    range,
+                    face_styles: FaceStyles::of_family(db, &family),
+                    family,
+                })
+                .collect(),
+        }
+    }
+
+    /// The mapped range `ch` falls in, if `font.codepoint_map` has one.
+    fn mapped(&self, ch: char) -> Option<&MappedRange> {
+        self.codepoints
+            .iter()
+            .rev()
+            .find(|mapped| mapped.range.contains(&ch))
+    }
+
+    /// Attributes for `ch`'s style, from its mapped family if it has one.
+    fn attrs_for(&self, ch: char, bold: bool, italic: bool) -> Attrs<'_> {
+        match self.mapped(ch) {
+            Some(mapped) => styled_attrs(&mapped.family, bold, italic, mapped.face_styles)
+                .font_features(self.features.clone()),
+            None => self.attrs(bold, italic),
         }
     }
 
@@ -385,6 +424,8 @@ fn font_features(features: &[crate::config::FontFeature]) -> FontFeatures {
 /// glyphs are drawn in. An emoji-presentation cluster is shaped with
 /// `emoji_family` when one is installed, unstyled: color emoji fonts have no
 /// bold or italic faces, and a skewed or recolored emoji is no improvement.
+/// A cluster starting with a character in `font.codepoint_map` is shaped
+/// with the mapped family instead, which wins over the emoji family.
 /// Anything else, or with no emoji family, uses the configured family.
 fn cluster_attrs<'a>(
     text: &str,
@@ -392,6 +433,10 @@ fn cluster_attrs<'a>(
     fonts: &'a FontSelection,
     emoji_family: Option<&'a str>,
 ) -> (Attrs<'a>, CellStyle) {
+    let first = text.chars().next().unwrap_or(' ');
+    if fonts.mapped(first).is_some() {
+        return (fonts.attrs_for(first, style.bold, style.italic), style);
+    }
     match emoji_family.filter(|_| emoji_presentation(text)) {
         Some(emoji) => (
             Attrs::new().family(Family::Name(emoji)),
@@ -1421,7 +1466,7 @@ impl TextRenderer {
             // the font can join them (`=>`, `!=`). Each glyph is drawn
             // at, and in the color of, the cell its cluster starts at.
             if self.ligatures {
-                let mut end = ligature_run_end(row, col_idx, cols);
+                let mut end = ligature_run_end(row, col_idx, cols, &self.fonts);
                 // The block cursor's cell is drawn on its own, in the
                 // inverted color, so a ligature never straddles it.
                 if let Some(cursor_col) = cursor_col {
@@ -2415,12 +2460,12 @@ mod tests {
     fn ligature_runs_stop_at_spaces_wide_chars_and_face_changes() {
         let row = row_of("a=>b c");
         assert_eq!(
-            ligature_run_end(&RowView::from(&row), 0, row.width()),
+            ligature_run_end(&RowView::from(&row), 0, row.width(), &selection("Mono")),
             4,
             "stops at the space"
         );
         assert_eq!(
-            ligature_run_end(&RowView::from(&row), 4, row.width()),
+            ligature_run_end(&RowView::from(&row), 4, row.width(), &selection("Mono")),
             4,
             "a space starts no run"
         );
@@ -2428,7 +2473,7 @@ mod tests {
         let mut row = row_of("x!=y");
         row[2].set_flag(CellFlags::BOLD);
         assert_eq!(
-            ligature_run_end(&RowView::from(&row), 0, row.width()),
+            ligature_run_end(&RowView::from(&row), 0, row.width(), &selection("Mono")),
             2,
             "bold changes the face"
         );
@@ -2436,7 +2481,7 @@ mod tests {
         let mut row = row_of("->中");
         row[2].set_flag(CellFlags::WIDE_CHAR);
         assert_eq!(
-            ligature_run_end(&RowView::from(&row), 0, row.width()),
+            ligature_run_end(&RowView::from(&row), 0, row.width(), &selection("Mono")),
             2,
             "non-ASCII ends the run"
         );
@@ -2445,10 +2490,16 @@ mod tests {
         // cells the program colored differently. Background does not.
         let mut row = row_of("==>");
         row[1].set_fg(crate::grid::Color::Named(2));
-        assert_eq!(ligature_run_end(&RowView::from(&row), 0, row.width()), 1);
+        assert_eq!(
+            ligature_run_end(&RowView::from(&row), 0, row.width(), &selection("Mono")),
+            1
+        );
         let mut row = row_of("==>");
         row[1].set_bg(crate::grid::Color::Named(2));
-        assert_eq!(ligature_run_end(&RowView::from(&row), 0, row.width()), 3);
+        assert_eq!(
+            ligature_run_end(&RowView::from(&row), 0, row.width(), &selection("Mono")),
+            3
+        );
     }
 
     #[test]
@@ -2790,5 +2841,73 @@ mod tests {
             shaped_glyph_ids("DejaVu Sans", &["-liga", "liga"], "fi").unwrap(),
             default
         );
+    }
+
+    fn mapped_config() -> FontConfig {
+        config_with(|c| {
+            c.codepoint_map = vec![
+                crate::config::CodepointMapEntry {
+                    range: "U+E000-U+F8FF".to_string(),
+                    family: "Symbols".to_string(),
+                },
+                crate::config::CodepointMapEntry {
+                    range: "U+E0A0".to_string(),
+                    family: "Powerline Extra".to_string(),
+                },
+                crate::config::CodepointMapEntry {
+                    range: "U+3D".to_string(),
+                    family: "Serif".to_string(),
+                },
+            ];
+        })
+    }
+
+    #[test]
+    fn mapped_codepoints_use_their_family_and_the_last_entry_wins() {
+        let fonts = selection_of(&mapped_config());
+        let family = |text: &str| {
+            cluster_attrs(text, CellStyle::default(), &fonts, None)
+                .0
+                .family
+        };
+        assert_eq!(family("\u{E001}"), Family::Name("Symbols"));
+        assert_eq!(family("\u{E0A0}"), Family::Name("Powerline Extra"));
+        assert_eq!(family("a"), Family::Name("Mono"));
+        assert_eq!(family("\u{F8FF}"), Family::Name("Symbols"));
+        assert_eq!(family("\u{F900}"), Family::Name("Mono"));
+        // The mapping beats the emoji family.
+        let (attrs, _) = cluster_attrs(
+            "\u{E001}",
+            CellStyle::default(),
+            &fonts,
+            Some("Noto Color Emoji"),
+        );
+        assert_eq!(attrs.family, Family::Name("Symbols"));
+    }
+
+    #[test]
+    fn mapped_codepoints_keep_the_cells_style_and_features() {
+        let mut config = mapped_config();
+        config.features = vec!["-liga".to_string()];
+        let fonts = selection_of(&config);
+        let bold = CellStyle {
+            bold: true,
+            italic: false,
+        };
+        let (attrs, style) = cluster_attrs("\u{E001}", bold, &fonts, None);
+        assert_eq!(attrs.weight, Weight::BOLD);
+        assert_eq!(style, bold);
+        assert_eq!(attrs.font_features.features.len(), 1);
+    }
+
+    #[test]
+    fn mapped_ascii_does_not_join_ligature_runs() {
+        let fonts = selection_of(&mapped_config());
+        let row = row_of("a=>b");
+        let end =
+            |fonts: &FontSelection| ligature_run_end(&RowView::from(&row), 0, row.width(), fonts);
+        assert_eq!(end(&selection("Mono")), 4);
+        // `=` is mapped to another family: the run stops before it.
+        assert_eq!(end(&fonts), 1);
     }
 }

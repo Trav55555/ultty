@@ -228,6 +228,28 @@ cell again, empties its glyph cache and resizes every pane to the new cell
 size. A `size` you did not change in the file keeps any zoom you set with the
 font size keys; changing it resets the zoom to the new value.
 
+## Codepoint map
+
+```toml
+[[font.codepoint_map]]
+range = "U+E0A0-U+E0A3"
+family = "Symbols Nerd Font Mono"
+
+[[font.codepoint_map]]
+range = "U+4E00-U+9FFF"
+family = "Noto Sans CJK JP"
+```
+
+Each `[[font.codepoint_map]]` table draws a range of characters from a family
+of its own, whichever fonts would otherwise supply them. `range` is `U+XXXX`
+or `U+XXXX-U+YYYY` in hex, inclusive. Where ranges overlap, the later table
+wins. A mapped family is asked for bold and italic as usual, and gets
+`features`. A mapping wins over the emoji font, and a mapped ASCII character
+is shaped alone, so it does not join a ligature. An entry with a range that
+does not parse or an empty family is ignored with a warning in the log. Block
+and box-drawing characters and the Powerline triangles are drawn by Ultty
+itself and stay that way when mapped.
+
 ## Emoji and accents
 
 ```toml

@@ -27,9 +27,9 @@ Ranked by how much a typical user would notice:
    directory on Linux (`behavior.inherit_working_directory`, on by default).
 2. **Font configuration is thin.** *Mostly fixed.* Ultty now has separate
    bold, italic and bold italic families (`font.bold_family` and the like), an
-   OpenType feature list (`font.features`) and font changes on config reload.
-   It still has no variable-font axes, no codepoint-to-font map and no cell
-   offsets.
+   OpenType feature list (`font.features`), a codepoint-to-font map
+   (`[[font.codepoint_map]]`) and font changes on config reload. It still has
+   no variable-font axes and no cell offsets.
 3. **No Kitty graphics protocol.** Ghostty supports it (1.4 added
    animation). Programs that only speak Kitty's protocol, such as many
    image viewers and some Neovim plugins, show no images. Ultty supports
@@ -157,7 +157,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Anti-aliasing | partial: grayscale only; subpixel masks treated as mono | grayscale; `alpha-blending` modes | follows the platform font library (unverified) | `renderer/atlas.rs` `SwashContent::SubpixelMask` |
 | Font features config | yes; `font.features` | yes; `font-feature` | no | `config.rs` `parse_font_features`; `docs/configuration.md` "OpenType features" |
 | Per-style fonts (bold, italic) | yes; `font.bold_family`, `italic_family`, `bold_italic_family` | yes; `font-family-bold` etc. | yes; `font.bold`, `italic`, `bold_italic` | `renderer/text.rs` `FontSelection` |
-| Codepoint-to-font map | no | yes; `font-codepoint-map` | no | none in `config.rs` |
+| Codepoint-to-font map | yes; `[[font.codepoint_map]]` | yes; `font-codepoint-map` | no | `config.rs` `parse_codepoint_map`; `renderer/text.rs` `FontSelection::mapped` |
 | Cell or glyph offsets | partial: `line_height` only | yes; `adjust-*` options | yes; `font.offset`, `glyph_offset` | `FontConfig::line_height` |
 | Live font changes | yes: size via keys; family, size, features and line height on config reload | yes | yes | `renderer/text.rs` `apply_font_config`; `docs/configuration.md` "Changing fonts without a restart" |
 
