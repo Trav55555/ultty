@@ -6,7 +6,9 @@
 Reports Ultty's own memory, anonymous RSS plus swap (when the CSV has
 anon_kib and swap_kib), at the end of warm-up and at the end, its least-squares trend after warm-up in MiB per
 hour, the peak, and the RSS total, and the frame time median and p99
-across the run (the per-minute p99s' median and worst). Exits 1 when RSS
+across the run (the per-minute p99s' median and worst). With draw times
+and window sizes in the CSV, also the draw time per window size in the
+first and last hour after warm-up. Exits 1 when memory
 grows by more than 1 MiB an hour after warm-up.
 
 Plain RSS is not judged: under memory pressure the kernel drops the
@@ -26,6 +28,30 @@ def slope(xs, ys):
     mx, my = statistics.fmean(xs), statistics.fmean(ys)
     den = sum((x - mx) ** 2 for x in xs)
     return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den if den else 0.0
+
+
+def report_drift(steady):
+    """Draw time per window size, first hour after warm-up against the last.
+
+    Draw time is Ultty's own work per frame (not presenting), so a rise at
+    the same window size means per-frame cost grows with the session.
+    """
+    if len(steady) < 120:
+        print("draw time drift: needs two hours after warm-up")
+        return
+    first = steady[:60]
+    last = steady[-60:]
+    print("draw time per window size (median of per-minute p99s), "
+          "first hour after warm-up -> last hour:")
+    for size in sorted({(r["width"], r["height"]) for r in steady}):
+        def p99(rs):
+            v = [r["draw_p99_us"] / 1000 for r in rs
+                 if (r["width"], r["height"]) == size and r["frames"] > 0]
+            return statistics.median(v) if v else None
+        a, b = p99(first), p99(last)
+        if a is None or b is None:
+            continue
+        print(f"  {size[0]:.0f}x{size[1]:.0f}: {a:.2f} -> {b:.2f} ms ({(b / a - 1) * 100:+.0f}%)")
 
 
 def main():
@@ -66,6 +92,8 @@ def main():
     if p99s:
         print(f"frame time: median of per-minute medians {statistics.median(p50s):.2f} ms, "
               f"per-minute p99 median {statistics.median(p99s):.2f} ms, worst {max(p99s):.2f} ms")
+    if "draw_p99_us" in rows[0]:
+        report_drift(steady)
     if trend > MAX_GROWTH_MIB_PER_HOUR:
         print(f"FAIL: memory grows more than {MAX_GROWTH_MIB_PER_HOUR} MiB/hour")
         sys.exit(1)
