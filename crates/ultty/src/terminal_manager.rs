@@ -119,9 +119,10 @@ impl ManagedTerminal {
         tab_id: TabId,
         cols: u16,
         rows: u16,
+        cell_px: Option<(u16, u16)>,
         env: &[(OsString, OsString)],
     ) -> io::Result<Self> {
-        let child = Child::spawn_shell(PtySize::new(cols, rows), &pane_env(id, env))
+        let child = Child::spawn_shell(PtySize::for_cells(cols, rows, cell_px), &pane_env(id, env))
             .map_err(io::Error::other)?;
         let event_loop = TerminalEventLoop::from_child(child, cols, rows)?;
         Ok(Self {
@@ -529,9 +530,12 @@ impl TerminalManager {
         self.next_terminal_id += 1;
 
         let (cols, rows) = (self.default_cols, self.default_rows);
+        let cell_px = self.pane_area.map(|area| area.cell_pixel_size());
         let terminal = match self.inherited_directory(source) {
-            Some(dir) => ManagedTerminal::new_with_dir(terminal_id, tab_id, cols, rows, &dir, env)?,
-            None => ManagedTerminal::new(terminal_id, tab_id, cols, rows, env)?,
+            Some(dir) => {
+                ManagedTerminal::new_with_dir(terminal_id, tab_id, cols, rows, cell_px, &dir, env)?
+            }
+            None => ManagedTerminal::new(terminal_id, tab_id, cols, rows, cell_px, env)?,
         };
 
         self.push_terminal(terminal);
@@ -715,12 +719,15 @@ impl TerminalManager {
             let Some(terminal) = self.terminals.iter_mut().find(|t| t.id == terminal_id) else {
                 continue;
             };
-            let current = {
+            let (current, cell_changed) = {
                 let mut state = terminal.event_loop.terminal();
+                let cell_changed = state.cell_pixel_size() != Some((cell_width, cell_height));
                 state.set_cell_pixel_size(cell_width, cell_height);
-                state.dimensions()
+                (state.dimensions(), cell_changed)
             };
-            if (current.cols, current.rows) != (cols, rows) {
+            // A zoom or font change moves the pixel size without moving the
+            // grid; the PTY reports pixels, so it needs the new size too.
+            if cell_changed || (current.cols, current.rows) != (cols, rows) {
                 terminal.resize(cols, rows)?;
             }
         }
@@ -1117,7 +1124,11 @@ impl TerminalManager {
             command,
             &full_args,
             &dir,
-            PtySize::new(self.default_cols, self.default_rows),
+            PtySize::for_cells(
+                self.default_cols,
+                self.default_rows,
+                self.pane_area.map(|area| area.cell_pixel_size()),
+            ),
             &pane_env(terminal_id, env),
         )
         .map_err(io::Error::other)?;
@@ -1296,11 +1307,11 @@ impl TerminalManager {
 
                 // Create terminal with working directory if available
                 let mut terminal = if let Some(ref wd) = term_data.working_directory {
-                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, wd, &env)?
+                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, None, wd, &env)?
                 } else if let Some(ref wd) = tab_data.working_directory {
-                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, wd, &env)?
+                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, None, wd, &env)?
                 } else {
-                    ManagedTerminal::new(tid, tab_id, cols, rows, &env)?
+                    ManagedTerminal::new(tid, tab_id, cols, rows, None, &env)?
                 };
 
                 terminal.title = term_data.title.clone();
@@ -1317,9 +1328,9 @@ impl TerminalManager {
                 let tid = TerminalId(manager.next_terminal_id);
                 manager.next_terminal_id += 1;
                 let mut terminal = if let Some(ref wd) = tab_data.working_directory {
-                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, wd, &env)?
+                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, None, wd, &env)?
                 } else {
-                    ManagedTerminal::new(tid, tab_id, cols, rows, &env)?
+                    ManagedTerminal::new(tid, tab_id, cols, rows, None, &env)?
                 };
                 terminal.title = tab_data.title.clone();
                 manager.terminals.push(terminal);
@@ -1494,12 +1505,16 @@ impl ManagedTerminal {
         tab_id: TabId,
         cols: u16,
         rows: u16,
+        cell_px: Option<(u16, u16)>,
         working_dir: &str,
         env: &[(OsString, OsString)],
     ) -> io::Result<Self> {
-        let child =
-            Child::spawn_shell_in_dir(PtySize::new(cols, rows), working_dir, &pane_env(id, env))
-                .map_err(io::Error::other)?;
+        let child = Child::spawn_shell_in_dir(
+            PtySize::for_cells(cols, rows, cell_px),
+            working_dir,
+            &pane_env(id, env),
+        )
+        .map_err(io::Error::other)?;
         let event_loop = TerminalEventLoop::from_child(child, cols, rows)?;
         Ok(Self {
             id,

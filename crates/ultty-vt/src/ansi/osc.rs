@@ -9,6 +9,17 @@ use super::{
 /// Maximum size for OSC/DCS string buffers to prevent unbounded memory growth.
 const MAX_STRING_BUFFER: usize = 65536;
 
+/// Maximum size of a sixel DCS string, which is far larger than any other
+/// DCS: a 1024x768 photo at 256 colours is a few MiB of sixel text.
+///
+/// 8 MiB is transient memory only. The parser frees the buffer at the string
+/// terminator, and the decoded image is bounded separately by
+/// `MAX_SIXEL_PIXELS` (16 Mi pixels, 64 MiB of RGBA) and the per-terminal
+/// image store cap (256 MiB). Even with the copy handed to the decoder the
+/// peak is about 16 MiB per pane, which a pane's 10 MiB `MAX_OUTBOUND`-class
+/// buffers already match in order of magnitude.
+pub(super) const MAX_SIXEL_STRING: usize = 8 * 1024 * 1024;
+
 impl AnsiParser {
     /// OSC string state - accumulating OSC content.
     pub(super) fn osc_string<F>(&mut self, byte: u8, callback: &mut F)
@@ -269,14 +280,32 @@ impl AnsiParser {
                 self.reset();
             }
             _ => {
-                // Accumulate DCS content
-                if self.dcs_buffer.len() < MAX_STRING_BUFFER {
-                    self.dcs_buffer.push(byte);
-                } else {
-                    self.reset();
+                // Accumulate DCS content. A string past its limit is
+                // consumed to its terminator and dropped, never printed: a
+                // truncated sixel or status string is not worth acting on.
+                if self.dcs_overflow {
+                    return;
                 }
+                let len = self.dcs_buffer.len();
+                if len < MAX_STRING_BUFFER || (len < MAX_SIXEL_STRING && self.dcs_is_sixel()) {
+                    self.dcs_buffer.push(byte);
+                    return;
+                }
+                self.dcs_overflow = true;
+                self.dcs_buffer = Vec::new();
             }
         }
+    }
+
+    /// Whether the DCS string collected so far is a sixel image: digits and
+    /// `;` (the parameters), then `q`. `$q` (DECRQSS) and `+q` (XTGETTCAP)
+    /// are not.
+    fn dcs_is_sixel(&self) -> bool {
+        let params = self
+            .dcs_buffer
+            .iter()
+            .position(|b| !(b.is_ascii_digit() || *b == b';'));
+        params.is_some_and(|end| self.dcs_buffer[end] == b'q')
     }
 
     /// DCS string ESC state - waiting for backslash to complete ST.
@@ -395,7 +424,7 @@ impl AnsiParser {
     where
         F: FnMut(Action),
     {
-        if self.dcs_buffer.is_empty() {
+        if self.dcs_overflow || self.dcs_buffer.is_empty() {
             return;
         }
 
