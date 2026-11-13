@@ -107,8 +107,8 @@ install_shell_integration() {
   dest="$DATA_DIR/ultty/shell-integration"
   mkdir -p "$dest"
   cp "$source"/ultty.* "$dest/"
-  say "installed shell integration to $dest; to use it, add to ~/.bashrc or ~/.zshrc:"
-  say "  source $dest/ultty.bash   (or ultty.zsh)"
+  say "installed shell integration to $dest; Ultty loads it in its own bash, zsh and fish shells."
+  say "for other shells, add to ~/.bashrc or ~/.zshrc: source $dest/ultty.bash   (or ultty.zsh)"
 }
 
 # Compile the xterm-ultty terminfo entry into ~/.terminfo, so terminal.term

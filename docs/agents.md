@@ -20,9 +20,11 @@ with a token Ultty writes at start. Nothing leaves your machine.
 ### 1. Shell integration
 
 Knowing when a command finished, and how, needs your shell to mark its
-prompts and commands (OSC 133). Ultty ships scripts for bash 4.4+ and zsh.
-Add one line at the end of `~/.bashrc` or `~/.zshrc`, after any prompt
-theme:
+prompts and commands (OSC 133). Ultty loads its scripts for bash 4.4+, zsh
+and fish by itself in the shells it starts (`terminal.shell_integration`, see
+[configuration](configuration.md#shell-integration)). For a login bash, or a
+shell Ultty did not start, add one line at the end of `~/.bashrc` or
+`~/.zshrc`, after any prompt theme:
 
 ```sh
 # install.sh puts them here:
@@ -36,7 +38,7 @@ They work alongside oh-my-zsh, pyenv and similar prompt hooks, and do
 nothing visible. Without them, everything below works except
 `last_command`, fenced `run_and_wait`, `wait` for `command_finished`, and the `command_*` events. Direct-child jobs work without shell integration.
 Other terminals that understand OSC 133 use the same marks; the rest ignore
-them. There is no fish script yet.
+them.
 
 ### 2. Connect the agent
 

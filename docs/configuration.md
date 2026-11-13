@@ -21,6 +21,47 @@ split gets the same `TERM` as the rest of its tab, and open panes keep the
 value they started with, so after a config reload the new value applies to
 tabs opened from then on. `COLORTERM` is always `truecolor`.
 
+## Shell integration
+
+```toml
+[terminal]
+shell_integration = "auto"   # or "off"
+```
+
+With `auto` (the default), the bash, zsh and fish shells Ultty starts load the
+shell integration by themselves: prompt, command and exit-status marks
+(OSC 133) and working-directory reports (OSC 7). You do not source anything
+from your rc files. With `off`, shells start as they are. The setting applies
+to tabs opened after a config reload.
+
+Setting `ULTTY_SHELL_INTEGRATION=off` (or `0`, `false`, `no`) in the
+environment Ultty starts in turns it off too. In a shell that was injected,
+`ULTTY_SHELL_INTEGRATION` is `auto` and `ULTTY_SHELL_INTEGRATION_DIR` names
+the directory of integration files, so an rc file can test for it.
+
+How each shell is started (the shell runs with no other arguments):
+
+- **bash** runs with `--rcfile` pointing at a wrapper that sources your
+  `~/.bashrc`, then the integration. This keeps bash's normal startup: no
+  `--posix` mode to undo, and `/etc/bash.bashrc` still runs first. A login
+  bash (`-l`, `--login`) ignores `--rcfile`, so it is left as it is and gets no
+  integration; source the script by hand there.
+- **zsh** runs with `ZDOTDIR` pointing at a directory whose `.zshenv` puts
+  your original `ZDOTDIR` back (unset stays unset), runs your own `.zshenv`,
+  and loads the integration from the first prompt, after your `.zshrc`.
+- **fish** finds the script in `vendor_conf.d`, because Ultty's directory is
+  first on `XDG_DATA_DIRS`; the script removes that entry again.
+- Any other shell is not touched, and neither is a tab that runs a command
+  rather than a shell (`ultty -e`, a launch profile with `command`).
+
+If you already source `ultty.bash`, `ultty.zsh` or `ultty.fish` yourself, keep
+doing so: the scripts do nothing the second time, so marks are sent once.
+Over ssh the remote shell is not injected; source the scripts there.
+
+The files are built into the binary. Ultty writes them to
+`$XDG_RUNTIME_DIR/ultty-shell-integration-<version>-<hash>` (mode 0700, files
+0600), or `<temp dir>/ultty-<uid>/` when that is unset.
+
 - `"xterm-256color"` (the default) is installed on almost every system, so it
   works everywhere, including over ssh. It describes a few things Ultty does
   not do (left and right margins, a printer port, setting the cursor colour),
@@ -111,7 +152,7 @@ With `true` (the default), a new tab or split starts in the directory of the
 pane it was made from: the focused pane for a new tab, the pane being split for
 a split. Ultty reads that directory from the shell's last OSC 7 report
 (`file://host/path`), which the shell integration scripts in
-`dist/shell-integration` send on every prompt. The report counts only when
+`dist/shell-integration` (loaded for you, see above) send on every prompt. The report counts only when
 its host is empty, `localhost` or this machine's hostname (so a pane that is
 ssh'd elsewhere does not send the new shell to a path that exists only on the
 remote host) and the directory still exists. The path is percent-decoded.
@@ -135,7 +176,7 @@ jump_next_prompt = "ctrl+shift+pagedown"
 select_last_output = "ctrl+shift+o"
 ```
 
-With shell integration (the bash and zsh scripts in `dist/shell-integration`,
+With shell integration (the scripts in `dist/shell-integration`, loaded automatically,
 or any shell that sends OSC 133), these move through the shell prompts in
 scrollback:
 

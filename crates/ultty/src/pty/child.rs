@@ -1,6 +1,8 @@
 //! Child process management for PTY.
 
-use super::{current_dir, default_shell, Pty, PtyError, PtySize, Result, SlavePty};
+use super::{
+    current_dir, default_shell, shell_integration, Pty, PtyError, PtySize, Result, SlavePty,
+};
 use crate::grid::DEFAULT_TERMINAL_NAME;
 use nix::libc;
 use nix::sys::signal::{self, Signal};
@@ -32,10 +34,12 @@ impl Child {
     /// Spawn a new shell in a PTY.
     ///
     /// `env` is added to the inherited environment (see [`Child::spawn`]).
+    /// A bash, zsh or fish shell is started so that it loads Ultty's shell
+    /// integration; see [`shell_integration`].
     pub fn spawn_shell(size: PtySize, env: &[(OsString, OsString)]) -> Result<Self> {
         let shell = default_shell();
         let working_dir = current_dir();
-        Self::spawn(&shell, &[&shell], &working_dir, size, env)
+        Self::spawn_interactive_shell(&shell, &working_dir, size, env)
     }
 
     /// Spawn a shell in a specific working directory.
@@ -49,7 +53,28 @@ impl Child {
         let shell = default_shell();
         let wd = std::path::PathBuf::from(working_dir);
         let wd = if wd.exists() { wd } else { current_dir() };
-        Self::spawn(&shell, &[&shell], &wd, size, env)
+        Self::spawn_interactive_shell(&shell, &wd, size, env)
+    }
+
+    /// Spawn `shell` with no arguments, plus whatever it needs to load the
+    /// shell integration.
+    fn spawn_interactive_shell(
+        shell: &str,
+        working_dir: &Path,
+        size: PtySize,
+        env: &[(OsString, OsString)],
+    ) -> Result<Self> {
+        let Some(injection) = shell_integration::for_spawn(shell, &[shell], env) else {
+            return Self::spawn(shell, &[shell], working_dir, size, env);
+        };
+        let mut env: Vec<_> = env
+            .iter()
+            .filter(|(key, _)| !injection.env.iter().any(|(added, _)| added == key))
+            .cloned()
+            .collect();
+        env.extend(injection.env);
+        let args: Vec<&str> = injection.args.iter().map(String::as_str).collect();
+        Self::spawn(shell, &args, working_dir, size, &env)
     }
 
     /// Spawn a command in a PTY.

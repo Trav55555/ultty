@@ -21,6 +21,7 @@ install: release
 	install -Dm644 dist/ultty.desktop $(DESTDIR)$(PREFIX)/share/applications/ultty.desktop
 	install -Dm644 dist/shell-integration/ultty.bash $(DESTDIR)$(PREFIX)/share/ultty/shell-integration/ultty.bash
 	install -Dm644 dist/shell-integration/ultty.zsh $(DESTDIR)$(PREFIX)/share/ultty/shell-integration/ultty.zsh
+	install -Dm644 dist/shell-integration/ultty.fish $(DESTDIR)$(PREFIX)/share/ultty/shell-integration/ultty.fish
 	@if command -v tic >/dev/null 2>&1; then \
 		mkdir -p "$(DESTDIR)$(TERMINFO_DIR)" && \
 		tic -x -o "$(DESTDIR)$(TERMINFO_DIR)" dist/terminfo/ultty.terminfo && \
