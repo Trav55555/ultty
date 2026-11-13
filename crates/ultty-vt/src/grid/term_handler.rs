@@ -164,7 +164,12 @@ impl<'a> TerminalHandler<'a> {
             Action::EraseInDisplay(mode) => match mode {
                 0 => self.terminal.grid_mut().erase_below(),
                 1 => self.terminal.grid_mut().erase_above(),
-                2 => self.terminal.grid_mut().clear(),
+                // Foot's `term_erase` drops the sixels on the erased rows
+                // too. Every image of the screen is on a visible row.
+                2 => {
+                    self.terminal.grid_mut().clear();
+                    self.terminal.images_mut().clear();
+                }
                 // ED 3 clears saved lines only (xterm).
                 3 => self.terminal.buffer_mut().clear_history(),
                 _ => {}
@@ -910,7 +915,7 @@ impl<'a> TerminalHandler<'a> {
         let cell_height = height.div_ceil(cell_pixel_height).min(u16::MAX as u32) as u16;
 
         // Allocate image ID and create the image
-        let id = self.terminal.images_mut().allocate_id();
+        let id = self.terminal.allocate_image_id();
         let image = TerminalImage {
             id,
             width,

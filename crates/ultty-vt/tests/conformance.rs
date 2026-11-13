@@ -691,6 +691,75 @@ fn sixel_images_span_cells_of_the_reported_size() {
     assert_eq!(spans(None), (3, 3), "8x16 fallback");
 }
 
+/// A 4 x 6 pixel red sixel.
+const SIXEL: &[u8] = b"\x1bPq#0;2;100;0;0#0~~~~\x1b\\";
+
+fn image_ids(term: &Terminal) -> Vec<u32> {
+    let mut ids: Vec<u32> = term.images().images().map(|image| image.id.0).collect();
+    ids.sort_unstable();
+    ids
+}
+
+#[test]
+fn each_screen_keeps_its_own_images() {
+    // foot keeps `normal.sixel_images` and `alt.sixel_images` apart.
+    let mut term = run(20, 10, SIXEL);
+    let main_ids = image_ids(&term);
+    assert_eq!(main_ids.len(), 1);
+
+    feed(&mut term, b"\x1b[?1049h");
+    assert!(term.images().is_empty(), "the alternate screen starts bare");
+    feed(&mut term, SIXEL);
+    let alt_ids = image_ids(&term);
+    assert_eq!(alt_ids.len(), 1);
+    assert_ne!(alt_ids, main_ids, "ids are unique across screens");
+
+    feed(&mut term, b"\x1b[?1049l");
+    assert_eq!(image_ids(&term), main_ids, "the main screen's image stays");
+
+    feed(&mut term, b"\x1b[?1049h");
+    assert!(
+        term.images().is_empty(),
+        "leaving cleared the alternate store"
+    );
+}
+
+#[test]
+fn leaving_the_alternate_screen_deletes_its_images_in_every_mode() {
+    for (enter, leave) in [
+        (&b"\x1b[?47h"[..], &b"\x1b[?47l"[..]),
+        (b"\x1b[?1047h", b"\x1b[?1047l"),
+        (b"\x1b[?1049h", b"\x1b[?1049l"),
+    ] {
+        let mut term = run(20, 10, enter);
+        feed(&mut term, SIXEL);
+        assert_eq!(term.images().images().count(), 1);
+        feed(&mut term, leave);
+        feed(&mut term, b"\x1b[?1047h");
+        assert!(term.images().is_empty(), "after {enter:?}");
+    }
+}
+
+#[test]
+fn ed_2_deletes_the_images_on_screen() {
+    let mut term = run(20, 10, SIXEL);
+    feed(&mut term, SIXEL);
+    assert_eq!(term.images().images().count(), 2);
+    feed(&mut term, b"\x1b[2J");
+    assert!(term.images().is_empty());
+}
+
+#[test]
+fn ris_deletes_the_images_of_both_screens() {
+    let mut term = run(20, 10, SIXEL);
+    feed(&mut term, b"\x1b[?1049h");
+    feed(&mut term, SIXEL);
+    feed(&mut term, b"\x1bc");
+    assert!(term.images().is_empty(), "main screen after RIS");
+    feed(&mut term, b"\x1b[?47h");
+    assert!(term.images().is_empty(), "alternate screen after RIS");
+}
+
 /// A sixel of `bytes` data bytes: one 100-pixel red run redrawn over itself (`$`), so it decodes to a
 /// 6-pixel-high image however long the string is.
 fn long_sixel(bytes: usize) -> Vec<u8> {
