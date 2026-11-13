@@ -4,6 +4,38 @@ This ledger records completed checks and remaining gates separately. The
 historical runtime evidence in [README.md](README.md) verifies earlier
 binaries and does not establish a runtime pass for the merged source.
 
+## Latest source checkpoint
+
+Rust source `76b8db8` integrates upstream `f835cc2`, including bounded VT
+image caching. The earlier `b61448a` runtime receipts below retain their
+original source and binary identities; they do not establish that the newest
+checkpoint passed those runtime gates.
+
+| Gate at `76b8db8` | Result | Receipt |
+|---|---|---|
+| Formatting and whitespace | Passed, no log retained | `cargo fmt --all -- --check` and `git diff --check`, operator receipt. |
+| Workspace Clippy | Passed, exit 0 | [Log](final-checkpoint/pr-cache-merge-clippy-01.log), 19.79 seconds. |
+| Headless runtime check | Passed, exit 0 | [Log](final-checkpoint/pr-cache-merge-headless-01.log), 10.17 seconds. |
+| MSRV workspace/all-target check | Passed, exit 0 | [Log](final-checkpoint/pr-cache-merge-msrv-01.log), 17.47 seconds. |
+| Workspace test execution | Passed, exit 0 | [Serial execution log](final-checkpoint/pr-cache-merge-workspace-test-01.log), same command/environment as below, run after the separate `--no-run` build completed. |
+| GPU image readback | Passed, exit 0 | [Execution log](final-checkpoint/pr-cache-merge-gpu-readback-01.log), [command and test-binary hash](final-checkpoint/gpu-readback.json). Real Mesa software Vulkan pixel assertions ran for pane image isolation and native image replacement; MIT cookie diagnostics did not prevent those assertions. |
+| Fresh GUI viewer lifecycle | Passed, exit 0 | [Receipt](final-checkpoint/viewer/receipt.json), [driver](final-checkpoint/viewer/driver.log), [initial image](final-checkpoint/viewer/first.png), [reattached image](final-checkpoint/viewer/reattached.png). Key plus 12-key burst reaches 13; graceful close, forced viewer exit, observer restrictions, reattachment and owned cleanup passed. Graceful closes both took about 19 ms. |
+
+The check commands, toolchains, task-local `TMPDIR`, `CARGO_INCREMENTAL=0`,
+`RUSTFLAGS=-Dwarnings` and separate target directories match the corresponding
+commands recorded below. The source was frozen before these checks began.
+
+The newest GUI binary is identified in
+[the final manifest](final-checkpoint/binary-manifest.json) by SHA-256
+`bdd84923dfb1bcd28ba71dca0731cc86f4cafe335d16c865cc69bbb4d9a9dba2`.
+Its viewer gate deliberately used the earlier `b61448a` headless host
+(`99c321c69a18d00012703e51aa6b1853231eb5caf857f7bb167776ff42095166`)
+and counter (`7e1296d0fa3a067275798ae75ee46de094484aea6b93fc86e246d326df5bb200`)
+from the earlier manifest. The receipt records this mixed-version integration;
+it does not imply those host/counter binaries were rebuilt from `76b8db8`.
+
+## Earlier integrated checkpoint
+
 Merged Rust source boundary: `b61448a`
 
 Upstream integration base: `ba43d2e`
@@ -37,7 +69,7 @@ build and Rust 1.90.0 MSRV compiler.
 | Existing App inline surface | Passed, exit 0 | [Log](integration/inline/driver.log), [placed](integration/inline/placed.png), [shifted](integration/inline/shifted.png), [siblings](integration/inline/split.png). Placement, offscreen restore, linewise scrolling, copy text and sibling survival passed. [GUI log](integration/inline/ultty.log) preserves the X11 connection/clipboard errors from simultaneous Xvfb/GUI cleanup; functional assertions passed, graceful teardown is covered by the viewer gate. |
 | Existing App control | Passed, exit 0 | [Result](integration/app-control/result.json), [semantic result](integration/app-control/semantic-result.json), [driver](integration/app-control/driver.log), 5.98 seconds. Full App control fences, status, jobs, replay, queue pressure, Rust/Luau semantic actions, no-handler refusal and ANSI parity passed. A stopped app timed out with unknown outcome, then applied the queued action after resume without an automatic retry. |
 | Persistent host control | Passed, exit 0 | [Result](integration/session-control/result.json), [driver](integration/session-control/driver.log), [detached actions](integration/session-control/detached-actions.json), 2.02 seconds. Literal argv, retained jobs, fenced Bash, status, Rust/Luau actions, zero-reader detached actions, V2 replay and MCP passed. |
-| Actual Tailscale path | Pending, `NeedsLogin` | The remote daemon requires login. No actual tailnet runtime pass is claimed; ordinary DNS/public SSH evidence remains distinct. |
+| Actual Tailscale path | Passed; cleanup confirmed | [Result](integration/tailnet/result.json), [route and cleanup](integration/tailnet/route-cleanup.json), [screenshot](integration/tailnet/remote-counter.png), [viewer log](integration/tailnet/gui.log), 16.71 seconds. Forced tailnet IPv4 `100.119.165.66`, strict known SSH host key and no public SSH fallback. DERP iad was observed initially, then a direct path. This gate used the earlier GUI and remote archive identified below, not `76b8db8`. |
 | Remote archive build | Passed; source delta retained | [Build log](integration/remote-build/build.log), [source provenance](integration/remote-build/source-provenance.json), [exact delta](integration/remote-build/source-delta.diff). Archive SHA-256 `7d10119564c26ecb0432f1902993af47d9f2a401c4b2ffe32f8924d8f5165b1e` built in 7 minutes 15 seconds. This archive differs from `b61448a` in the test-helper reexport gating in `app/control_wait.rs`; it is not an equal-byte source receipt. |
 | Deterministic memory budget | Passed, exit 0 | [Budget log](integration/pr-integration-memory-01.log). The existing workload, including the simulated 10-hour agent session, remained unchanged. This is a budget check, not a comparative performance result or a 10-hour wall-clock soak. |
 
@@ -105,9 +137,24 @@ python3 scripts/e2e/control-workflows.py \
   --output /home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-app-control-01
 ```
 
-The actual tailnet test remains pending because the remote Tailscale daemon
-reports `NeedsLogin`. The remote build is preparation evidence only and does
-not establish a tailnet connection or a Tailscale runtime pass.
+The completed tailnet runtime gate used GUI SHA-256
+`ed2fe21a2250861b8d0a7246fd69423bdb64757f5fec4e65033c9f1725e1686f`,
+remote host SHA-256
+`4d92c384d3565fd44ada32458c164dbafd07e8d5f94757798b5e9fd2d91e9930`,
+and archive SHA-256
+`7d10119564c26ecb0432f1902993af47d9f2a401c4b2ffe32f8924d8f5165b1e`.
+The archive's five-line `control_wait.rs` reexport delta remains recorded
+above. These inputs belong to the `b61448a` checkpoint, not the later
+bounded-image-cache merge. Hidden native state survived, exact helper replay
+completed, and the remote native counter rendered through the viewer.
+
+Cleanup confirmed the owned host, counter and replay child absent; helper,
+admin and scoped token files removed; the temporary daemon stopped; the node
+logged out and absent from local peers; remote task directories removed; and
+devbox still reachable. The route/cleanup receipt also discloses an unintended
+stable-toolchain update from 1.97.1 to 1.100.0 during the failed first remote
+build, followed by repair of the stable installation. It does not claim
+that the previous stable version was restored.
 
 The selected receipts omit credentials, token files, full configurations
 and large raw snapshots. Historical and integration runtime records retain

@@ -1,19 +1,23 @@
 {
   "historical_feature_checkpoint": "6881bc4",
   "integrated_rust_source": "b61448a",
-  "integration_gates": "Completed integration gates recorded in INTEGRATION.md; actual Tailscale runtime blocked NeedsLogin.",
+  "integration_gates": "Local integration gates complete with source/binary boundaries recorded in INTEGRATION.md; CI publication pending.",
   "files": {
+    ".gitattributes": {
+      "bytes": 89,
+      "sha256": "7f6896996e457aa15f55a36eedcdd13b542031509e99e4314177a97784496083"
+    },
     ".gitignore": {
       "bytes": 67,
       "sha256": "6e39330160e338aa94b00d10eb49f4d251dd2de2e8724a5d8ad2365e0357cdeb"
     },
     "INTEGRATION.md": {
-      "bytes": 9246,
-      "sha256": "109950f021902873ab20182a9389e18726463bbf2adf913003e75234e6c97eb9"
+      "bytes": 13065,
+      "sha256": "8c9cb67ffb63005e6dff88af9ab50187149213fd03faae44145d21e7c6497491"
     },
     "README.md": {
-      "bytes": 3643,
-      "sha256": "4ced9b9dd92d155b55babeaf76bfc5daa03a2665c1e46a5c4716bb2ba018f2f2"
+      "bytes": 3810,
+      "sha256": "f9d73cf9516ef927488705c15000e1932cb4c3d0d092924ad6dc3c7ed09c4e6a"
     },
     "app-smokes/binary-manifest.json": {
       "bytes": 1511,
@@ -78,6 +82,50 @@
     "devbox-ssh-02/result.json": {
       "bytes": 1075,
       "sha256": "33105c50cd3b698f7a505bfbeae1dd3be90a2e9e02c0c59e57c1f5a4b0c78643"
+    },
+    "final-checkpoint/binary-manifest.json": {
+      "bytes": 363,
+      "sha256": "5e5cf619f7bc9d34d7eb47021336923c7ba9157870f294bf10c0dbe9e9d0ced7"
+    },
+    "final-checkpoint/gpu-readback.json": {
+      "bytes": 453,
+      "sha256": "7173b560646eee1f90bd15dc8644dde0e0b275d1426a3fa751c95bab0301c09e"
+    },
+    "final-checkpoint/pr-cache-merge-clippy-01.log": {
+      "bytes": 391,
+      "sha256": "fdbf5ef4ae06a0fbe45330553aae651409865b937e81fb014ac7a152fa9dd2cc"
+    },
+    "final-checkpoint/pr-cache-merge-gpu-readback-01.log": {
+      "bytes": 274,
+      "sha256": "9d1ddb730dc3d41600a9413ae91e6753fa4822c5439736e8f488d48b41f56bc1"
+    },
+    "final-checkpoint/pr-cache-merge-headless-01.log": {
+      "bytes": 279,
+      "sha256": "e57816b99747d559fef3562939530c9b40c7844b8daa6d0fb6140c6bf47d38c6"
+    },
+    "final-checkpoint/pr-cache-merge-msrv-01.log": {
+      "bytes": 391,
+      "sha256": "d5edeeacf9c32e76b7b2b279459438cd65ea201d9e702a27bc3a279d8f36d035"
+    },
+    "final-checkpoint/pr-cache-merge-workspace-test-01.log": {
+      "bytes": 239609,
+      "sha256": "25154c38eb35891cb77ce8ab603e387011d01cbcb709d15d7c72fed6d3643fc0"
+    },
+    "final-checkpoint/viewer/driver.log": {
+      "bytes": 57,
+      "sha256": "ae8e31afd7544b47151ee2f40682ddfd8f7e5aac8f09c80139336d51cd9e6ca2"
+    },
+    "final-checkpoint/viewer/first.png": {
+      "bytes": 40176,
+      "sha256": "8fa14980bc8a9014dfaed04f8b7a6353841f320882c6b45db09f5b11e4d3b995"
+    },
+    "final-checkpoint/viewer/reattached.png": {
+      "bytes": 44994,
+      "sha256": "f4c196099dcd3b9ef9ff88d5b31b4aba69dddad301940bcc211989ccc4b897ea"
+    },
+    "final-checkpoint/viewer/receipt.json": {
+      "bytes": 4899,
+      "sha256": "7e07bdba756b05c05967ecfe8e3a1e52dc192ea5ae0cf16d76c46175af41bb8e"
     },
     "integration/app-control/driver.log": {
       "bytes": 119,
@@ -191,6 +239,22 @@
       "bytes": 1744,
       "sha256": "f284026213fba026d7b3f7ce8262c7058f1ac5b21797552166cce36efe6be1cc"
     },
+    "integration/tailnet/gui.log": {
+      "bytes": 660,
+      "sha256": "7dfff32a338b84c102c43650a066c3970c5172fcfb6f5aae9de8875d0aa9f686"
+    },
+    "integration/tailnet/remote-counter.png": {
+      "bytes": 40050,
+      "sha256": "050a29c529ee559cf3cc5a5fd8e8098c075eba754d657083d08e3cc1a56c1229"
+    },
+    "integration/tailnet/result.json": {
+      "bytes": 1072,
+      "sha256": "fbe0bd16121491d60f2368b8bd628c3276b88fcb77d85f2e85dc27d0e983fc30"
+    },
+    "integration/tailnet/route-cleanup.json": {
+      "bytes": 1400,
+      "sha256": "34d0c71f4e4c51e8595dd49e3b146f33e33cb5318e667bb73589b4c2a8378bf5"
+    },
     "integration/toolchains.json": {
       "bytes": 116,
       "sha256": "e7574412d1c15b02d69dcbbd01c2d65e1ec7f675be125112c3886a5faa2e1605"
@@ -239,5 +303,6 @@
       "bytes": 4857,
       "sha256": "570bed64182f22f2d64140249fd9e51f4af2cd3e76477666f723374ef8b4dc5d"
     }
-  }
+  },
+  "latest_rust_source": "76b8db8"
 }

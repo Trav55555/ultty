@@ -39,5 +39,7 @@ graceful close.
 
 RSS and one-second CPU samples in the local viewer receipt characterize one
 local run. They do not establish a performance improvement, production sizing,
-cross-platform support or network resilience. This package contains no
-Tailscale-specific runtime evidence.
+cross-platform support or network resilience. The later
+[Tailscale runtime result](integration/tailnet/result.json) and
+[route/cleanup receipt](integration/tailnet/route-cleanup.json) are recorded
+separately in the integration ledger, with their own source and binary scope.

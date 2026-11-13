@@ -3,7 +3,7 @@
 Worktree: `.worktrees/rex-features`, branch `feat/rex-session-workflows`.
 Starting commit: `ffcf318`. The user authorized the full roadmap in stages on 2026-11-12.
 
-The [implementation plan](rex-tailscale-implementation-plan.md) defines the scope and acceptance gates. The staged implementation is complete in commits `4241115` and `6881bc4`. Local validation and real devbox SSH/GUI gates passed; platform and performance limits are listed below. The feature branch integrates upstream `ba43d2e` in `b61448a`; the main checkout remains unchanged.
+The [implementation plan](rex-tailscale-implementation-plan.md) defines the scope and acceptance gates. The staged implementation is complete in commits `4241115` and `6881bc4`. Local validation and real devbox SSH/GUI gates passed; platform and performance limits are listed below. The feature branch integrates upstream `ba43d2e` in `b61448a` and `f835cc2` in `76b8db8`; the main checkout remains unchanged.
 
 | Stage | Status | Ownership |
 | --- | --- | --- |
@@ -81,7 +81,7 @@ All durable relative artifact paths below are under `/home/travers/projects/tui-
 
 The optional host uses bounded whole-state semantic replacements rather than native/VT byte replay or a delta log. A host restart loses its running applications; viewers never silently switch pinned epochs. Inline native surfaces keep the existing noninteractive contract. Full-scene semantic focus/activation is opt-in and uses acknowledged application handlers; unsupported actions remain unavailable.
 
-Public SSH was exercised on devbox. Tailscale transport, macOS, deployment, a screen-reader session and comparative performance improvements remain unqualified. The temporary Tailscale test enrollment remains pending browser authentication; no successful tailnet route is claimed. Read-only diagnostics are distinct from authorization. Keep the existing in-process route as the rollback path; jobs cannot migrate automatically between owners.
+Public SSH and actual Tailscale SSH/helper/GPU paths were exercised on devbox using the separately identified frozen artifacts. macOS, deployment, a screen-reader session and comparative performance improvements remain unqualified. Read-only diagnostics are distinct from authorization. Keep the existing in-process route as the rollback path; jobs cannot migrate automatically between owners.
 
 The local gates do not constitute a full CI run. The pinned nightly fuzz toolchain and cargo-fuzz were unavailable here; the CI instruction-count comparison was not run. Source and functional validation do not establish a performance improvement over Rex, Tailscale or the previous Ultty build.
 
@@ -109,8 +109,33 @@ assertions. Both logs are retained.
 Devbox's merged ARM64 host and counter build passed using the repository-pinned
 Rust 1.98.1. Its source archive has the same 332 Rust/Cargo paths as `b61448a`;
 the sole difference is a GUI test-only re-export added after staging. The
-actual tailnet test is pending browser authentication for the temporary
-userspace daemon. No public SSH result substitutes for that missing gate.
+actual tailnet SSH/helper/GPU gate passed in 16.71 seconds using those
+separately identified frozen artifacts. The temporary userspace node was
+reached at `100.119.165.66`; both Rust client and GUI used that route with
+strict verification of the existing devbox SSH identity. Tailscale initially
+used DERP and then established a direct path. The gate verified hidden native
+retention and exact mutation replay; its receipt records the exact binaries.
 The remote setup initially invoked rustup proxies accidentally; repairing the
 resulting incomplete stable toolchain updated devbox's `stable` from 1.97.1
 to 1.100.0. The product build uses pinned 1.98.1 directly. Devbox remains up.
+
+### Latest image-cache integration
+
+Commit `76b8db8` integrates upstream `f835cc2`, including the byte-bounded VT
+image cache and Wayland benchmark corrections. VT textures now use terminal
+UID plus image ID; native textures retain their session/region/revision keys.
+Snapshot hydration creates a fresh terminal UID. The GPU regression now
+checks equal-size changed VT pixels, independent pane images, and redraw of a
+previous snapshot while both cache entries remain present. The earlier
+per-pane unconditional upload description applies to the prior checkpoints.
+See the evidence ledger for validation of this final source boundary.
+
+Final source `76b8db8` passed workspace Clippy, the full serial workspace suite,
+headless and Rust 1.90 checks, the expanded software-Vulkan pixel readback test,
+and a fresh GPU viewer lifecycle gate. The latest viewer used SHA-256
+`bdd84923dfb1bcd28ba71dca0731cc86f4cafe335d16c865cc69bbb4d9a9dba2`;
+its host/counter inputs are separately identified in the receipt. Tailnet
+cleanup confirmed the temporary node logged out, daemon stopped, all test
+processes gone and owned staging/helper/credential files removed. Devbox
+remains up. The tailnet gate used the earlier frozen artifacts rather than
+being relabeled as a test of the final cache merge.
