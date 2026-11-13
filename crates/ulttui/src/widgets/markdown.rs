@@ -1834,7 +1834,21 @@ mod tests {
         let narrow: Vec<_> = view.prepared_rows(1).iter().map(text).collect();
         assert_eq!(wide, ["e\u{301}A"]);
         assert_eq!(narrow, ["e\u{301}", "A"]);
-        let emoji = MarkdownView::new("**👩**\u{200d}💻A");
+        let mut emoji = MarkdownView::new("");
+        emoji.blocks = vec![Block::Paragraph {
+            spans: vec![
+                StyledSpan {
+                    text: "👩".into(),
+                    style: Style::new().bold(),
+                    link: None,
+                },
+                StyledSpan {
+                    text: "\u{200d}💻A".into(),
+                    style: Style::new(),
+                    link: None,
+                },
+            ],
+        }];
         let rows: Vec<_> = emoji.prepared_rows(2).iter().map(text).collect();
         assert_eq!(rows, ["👩\u{200d}💻", "A"]);
     }

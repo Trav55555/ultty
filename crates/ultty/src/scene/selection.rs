@@ -305,6 +305,20 @@ mod tests {
     }
 
     #[test]
+    fn raw_url_at_visible_tail_requires_a_known_end() {
+        let mut selection = NativeSelection::default();
+        let partial = "https://example.test/very";
+        assert!(selection.begin(row(0, partial, false), 0));
+        assert_eq!(selection.url_at(0), None);
+        let mut selection = NativeSelection::default();
+        assert!(selection.begin(row(0, "https://example.test/very.", false), 0));
+        assert_eq!(selection.url_at(0), None);
+        let mut selection = NativeSelection::default();
+        assert!(selection.begin(row(0, partial, true), 0));
+        assert_eq!(selection.url_at(0).as_deref(), Some(partial));
+    }
+
+    #[test]
     fn missing_rows_or_changed_revision_never_return_partial_text() {
         let mut selection = NativeSelection::default();
         assert!(selection.begin(row(0, "abc", false), 0));

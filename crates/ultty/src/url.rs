@@ -24,7 +24,12 @@ pub fn url_at_text(text: &str, byte_offset: usize) -> Option<String> {
     url_regex()
         .find_iter(text)
         .find(|item| {
-            item.start() <= byte_offset && byte_offset < item.end() && item.end() < text.len()
+            item.start() <= byte_offset
+                && byte_offset < item.end()
+                && text[item.end()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_whitespace() || ch == ')')
         })
         .map(|item| item.as_str().to_owned())
 }
