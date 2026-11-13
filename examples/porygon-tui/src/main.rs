@@ -21,6 +21,7 @@ mod daemon;
 mod native_stream;
 mod session_ui;
 mod sidebar;
+mod transcript;
 mod types;
 mod views;
 
@@ -95,6 +96,7 @@ fn porygon_theme() -> Theme {
 
 pub(crate) struct PorygonTui {
     pub(crate) messages: Vec<ChatMessage>,
+    pub(crate) transcript: std::cell::RefCell<transcript::Transcript>,
     pub(crate) input: TextInput,
     pub(crate) newline_prefix: bool,
     pub(crate) show_help: bool,
@@ -165,6 +167,7 @@ impl PorygonTui {
             .unwrap_or_default();
 
         Self {
+            transcript: std::cell::RefCell::default(),
             messages: vec![ChatMessage {
                 role: "system".into(),
                 content: "Type a message to start a conversation.\nUse F1 for keys and commands. Your draft stays here while disconnected.".into(),

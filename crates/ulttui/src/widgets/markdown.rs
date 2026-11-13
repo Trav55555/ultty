@@ -4,7 +4,9 @@ use ratatui::style::{Modifier, Style as RStyle};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 use super::View;
 use crate::backend::native_diff::record_unspoken;
@@ -200,6 +202,79 @@ impl MarkdownView {
     pub fn wrap_width_cols(mut self, cols: usize) -> Self {
         self.wrap_width_cols = Some(cols.max(1));
         self
+    }
+
+    /// Prepare styled, cell-wrapped rows for a virtualized transcript.
+    ///
+    /// Call when the source or width changes, then retain the rows and render
+    /// only the visible range. Code and quotes wrap too, so narrow terminals
+    /// can read their complete contents. Wrapping preserves grapheme clusters.
+    pub fn wrapped_rows(&self, width: usize) -> Vec<RichText> {
+        let width = width.max(1);
+        let mut rows = Vec::new();
+        for block in &self.blocks {
+            let mut rich = match block_content(block) {
+                Content::RichText(rich) => rich,
+                Content::Text(text) => RichText::new().span(text.text, Style::default()),
+                _ => continue,
+            };
+            if matches!(block, Block::HorizontalRule) {
+                rich = RichText::new().span("─".repeat(width), Style::default());
+            }
+            if matches!(block, Block::CodeBlock { .. }) {
+                rich.spans.insert(
+                    0,
+                    ultty_protocol::Span {
+                        text: "│ ".into(),
+                        style: Style::default(),
+                    },
+                );
+            }
+            let dim = matches!(block, Block::CodeBlock { .. } | Block::BlockQuote { .. });
+            let mut row = RichText::new();
+            let mut column = 0;
+            for span in rich.spans {
+                let mut style = span.style;
+                style.dim |= dim;
+                for cluster in span.text.graphemes(true) {
+                    if cluster == "\n" || cluster == "\r\n" {
+                        rows.push(std::mem::replace(&mut row, RichText::new()));
+                        column = 0;
+                        continue;
+                    }
+                    let expanded;
+                    let cluster = if cluster == "\t" {
+                        expanded = " ".repeat(8 - column % 8);
+                        expanded.as_str()
+                    } else {
+                        cluster
+                    };
+                    // Expanded tabs may span several narrow rows.
+                    for grapheme in cluster.graphemes(true) {
+                        let cells = grapheme.width();
+                        if column > 0 && column + cells > width {
+                            rows.push(std::mem::replace(&mut row, RichText::new()));
+                            column = 0;
+                        }
+                        if let Some(last) = row.spans.last_mut().filter(|last| last.style == style)
+                        {
+                            last.text.push_str(grapheme);
+                        } else {
+                            row.spans.push(ultty_protocol::Span {
+                                text: grapheme.into(),
+                                style: style.clone(),
+                            });
+                        }
+                        column += cells;
+                    }
+                }
+            }
+            rows.push(row);
+        }
+        if rows.is_empty() {
+            rows.push(RichText::new());
+        }
+        rows
     }
 
     fn push_text_span(
@@ -1199,6 +1274,37 @@ fn convert_color(color: &Color) -> ratatui::style::Color {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn virtual_rows_preserve_unicode_styles_and_code_beyond_canvas_limit() {
+        let rows = super::MarkdownView::new("**a界e\u{301}**\n\n```\nlong-code-value\n```")
+            .wrapped_rows(4);
+        let text: String = rows
+            .iter()
+            .flat_map(|row| &row.spans)
+            .map(|span| span.text.as_str())
+            .collect();
+        assert!(text.contains("a界e\u{301}"));
+        assert!(text.contains("long-code-value"));
+        assert!(rows[0].spans[0].style.bold);
+        for row in &rows {
+            let width: usize = row
+                .spans
+                .iter()
+                .map(|span| unicode_width::UnicodeWidthStr::width(span.text.as_str()))
+                .sum();
+            assert!(width <= 4);
+        }
+        let source = format!("```\n{}\nlast-row\n```", "row\n".repeat(5000));
+        let rows = super::MarkdownView::new(source).wrapped_rows(20);
+        assert!(rows.len() > 4096);
+        assert!(rows
+            .last()
+            .unwrap()
+            .spans
+            .iter()
+            .any(|span| span.text.contains("last-row")));
+    }
+
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;

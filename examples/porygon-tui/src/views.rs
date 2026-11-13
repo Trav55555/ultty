@@ -3,7 +3,7 @@ use ulttui::prelude::*;
 use ulttui::widgets::{parse_unified_diff, DiffKind, RichText, Stack};
 
 use crate::sidebar::sidebar_view;
-use crate::types::{ApprovalRequest, FileTreeEntry, ToolStatus};
+use crate::types::{ApprovalRequest, FileTreeEntry};
 use crate::{Msg, PorygonTui};
 
 const SIDEBAR_MIN_TERMINAL_WIDTH: u16 = 100;
@@ -91,40 +91,14 @@ impl PorygonTui {
             .max(1) as usize
     }
 
-    fn markdown_view(&self, content: &str) -> MarkdownView {
-        MarkdownView::new(content).wrap_width_cols(self.message_content_width_cols())
-    }
-
-    fn estimated_message_card_height(&self, content: &str) -> f32 {
-        let Dimension::Cells(rows) = self.markdown_view(content).constraints().height else {
-            return 2.0;
-        };
-        rows + 1.0
-    }
-
-    fn tool_body(&self, tool: &crate::types::ToolCall) -> String {
-        let mut body = String::new();
-        if !tool.args.is_empty() {
-            body.push_str(&format!("```json\n{}\n```\n", tool.args));
-        }
-        if let Some(result) = &tool.result {
-            body.push_str(&format_tool_result_with_diff(result));
-        }
-        body
-    }
-
     fn transcript_height(&self) -> f32 {
-        let messages: f32 = self
-            .messages
-            .iter()
-            .map(|message| self.estimated_message_card_height(&message.content) + 1.0)
-            .sum();
-        let tools: f32 = self
-            .tool_calls
-            .iter()
-            .map(|tool| self.estimated_message_card_height(&self.tool_body(tool)) + 1.0)
-            .sum();
-        2.0 + messages + tools + if self.waiting_response { 2.0 } else { 0.0 }
+        let mut transcript = self.transcript.borrow_mut();
+        transcript.sync(
+            self.message_content_width_cols(),
+            &self.messages,
+            &self.tool_calls,
+        );
+        transcript.height(self.waiting_response) as f32
     }
 
     fn composer_rows(&self) -> u16 {
@@ -299,61 +273,19 @@ impl PorygonTui {
     }
 
     fn messages_view(&self) -> Column {
-        let mut col = Column::new()
-            .gap(1.0)
-            .padding(1.0)
-            .height(Dimension::Cells(self.transcript_height()))
-            .flex_shrink(0.0)
-            .width(Dimension::Percent(100.0));
-        for (index, message) in self.messages.iter().enumerate() {
-            let (name, color) = match message.role.as_str() {
-                "user" => ("You", Color::Rgb(58, 224, 221)),
-                "assistant" => ("Porygon", Color::Rgb(255, 93, 110)),
-                _ => ("System", Color::Rgb(136, 136, 136)),
-            };
-            let body = self
-                .markdown_view(&message.content)
-                .streaming(self.waiting_response && self.current_response == Some(index));
-            col = col.child(
-                Column::new()
-                    .height(Dimension::Cells(
-                        self.estimated_message_card_height(&message.content),
-                    ))
-                    .flex_shrink(0.0)
-                    .width(Dimension::Percent(100.0))
-                    .child(RichText::new().span(
-                        format!("{name}  {}", message.timestamp),
-                        Style::new().fg(color).bold(),
-                    ))
-                    .child(body),
-            );
-        }
-        for tool in &self.tool_calls {
-            let (state, color) = match tool.status {
-                ToolStatus::Pending => ("pending", Color::Rgb(249, 226, 175)),
-                ToolStatus::Approved => ("approved", Color::Rgb(166, 227, 161)),
-                ToolStatus::Rejected => ("rejected", Color::Rgb(255, 93, 110)),
-                ToolStatus::Running => ("running", Color::Rgb(58, 224, 221)),
-                ToolStatus::Completed => ("completed", Color::Rgb(166, 227, 161)),
-                ToolStatus::Failed => ("failed", Color::Rgb(255, 93, 110)),
-            };
-            let body = self.tool_body(tool);
-            col = col.child(
-                Column::new()
-                    .height(Dimension::Cells(self.estimated_message_card_height(&body)))
-                    .flex_shrink(0.0)
-                    .width(Dimension::Percent(100.0))
-                    .child(RichText::new().span(
-                        format!("{}  {state}", tool.name),
-                        Style::new().fg(color).bold(),
-                    ))
-                    .child(self.markdown_view(&body)),
-            );
-        }
-        if self.waiting_response {
-            col = col.child(Text::new("Working..."));
-        }
-        col
+        let mut transcript = self.transcript.borrow_mut();
+        transcript.sync(
+            self.message_content_width_cols(),
+            &self.messages,
+            &self.tool_calls,
+        );
+        transcript.view(
+            self.chat_scroll.scroll_position().1.max(0.0) as usize,
+            self.terminal_height
+                .saturating_sub(1 + self.bottom_height() + 2)
+                .max(1) as usize,
+            self.waiting_response,
+        )
     }
 
     pub(crate) fn composer_hint(&self) -> &'static str {
@@ -565,14 +497,7 @@ impl PorygonTui {
             .child(Divider::horizontal())
             .child(self.input_view())
             .child(self.status_bar_view());
-        let mut chat_area = ScrollView::new().child(self.messages_view());
-        chat_area.set_content_height(self.transcript_height());
-        chat_area.set_viewport_height(
-            self.terminal_height
-                .saturating_sub(1 + self.bottom_height() + 2)
-                .max(1) as f32,
-        );
-        chat_area.scroll_to(self.chat_scroll.scroll_position().1);
+        let chat_area = self.messages_view();
         let center_content = Column::new()
             .overflow_y_hidden()
             .child(chat_area)
@@ -830,10 +755,12 @@ mod tests {
         let mut app = PorygonTui::new();
         app.terminal_width = 75;
 
-        let short = app.estimated_message_card_height("short line");
-        let long = app.estimated_message_card_height(
-            "- **Project DNA:** AGENTS.md found at /home/travers/projects/tui-terminal/AGENTS.md",
-        );
+        app.messages[0].content = "short line".into();
+        let short = app.transcript_height();
+        app.messages[0].content =
+            "- **Project DNA:** AGENTS.md found at /home/travers/projects/tui-terminal/AGENTS.md"
+                .into();
+        let long = app.transcript_height();
 
         assert!(long > short, "long={long} short={short}");
     }
