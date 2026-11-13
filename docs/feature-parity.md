@@ -33,7 +33,9 @@ Ranked by how much a typical user would notice:
 3. **No Kitty graphics protocol.** Ghostty supports it (1.4 added
    animation). Programs that only speak Kitty's protocol, such as many
    image viewers and some Neovim plugins, show no images. Ultty supports
-   sixel instead, which Ghostty does not.
+   sixel instead, which Ghostty does not. A sliced plan is proposed in
+   [ADR 0026](adr/0026-kitty-graphics.md); its slice 0 (sixel scroll,
+   clear, split-pane and cache fixes) is done.
 4. **Few command-line options.** `ultty` accepts only `--help`, `--version`
    and (added after this audit) `-e command`. There is no
    `--working-directory`, `--config` or per-key override.
