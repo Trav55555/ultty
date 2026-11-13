@@ -14,6 +14,9 @@ gui = [
     "dep:pollster", "dep:arboard", "dep:notify", "dep:open", "dep:png",
     "dep:accesskit", "dep:accesskit_winit", "dep:notify-rust",
 ]
+# Count Rust heap and log it every 10 s (ultty::perf, heap_stats); used by
+# scripts/bench/soak.sh. Costs two atomic operations per allocation.
+heap-stats = []
 
 [lib]
 name = "ultty"

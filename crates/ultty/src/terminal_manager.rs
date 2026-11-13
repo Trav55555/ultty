@@ -173,6 +173,13 @@ pub struct ManagedTerminal {
     program_status_snapshot: ultty_vt::program_status::ProgramStatusSnapshot,
 }
 
+impl Drop for ManagedTerminal {
+    fn drop(&mut self) {
+        // Its scrollback is freed with it (once the PTY thread lets go).
+        crate::heap_trim::request();
+    }
+}
+
 impl ManagedTerminal {
     /// The status to show for the pane: what was set through the control
     /// socket, else what the program's progress reports imply.
