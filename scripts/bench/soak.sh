@@ -49,7 +49,7 @@ case "$session" in
     *) echo "SOAK_SESSION must be xvfb, sway or x11" >&2; exit 2 ;;
 esac
 
-[ -n "${SOAK_NO_BUILD:-}" ] || cargo build -q --release -p ultty --bins
+[ -n "${SOAK_NO_BUILD:-}" ] || cargo build -q --release -p ultty --bins --features heap-stats
 # A private runtime dir holds this Ultty's control socket and no other's,
 # so ulttyctl cannot reach a window on the desktop. Socket paths are short
 # (108 bytes), so it lives directly under /tmp.
@@ -137,18 +137,29 @@ p50_p99() {
                                    p=int(NR*0.99); if (p<1) p=1
                                    print a[int((NR+1)/2)] "," a[p] }'
 }
+# The trace since the last sample, to $out/minute.log; the live log restarts.
+take_log() {
+    sed 's/\x1b\[[0-9;]*m//g' "$out/ultty.log" >"$out/minute.log"
+    : >"$out/ultty.log"
+}
 frame_stats() {
     # frames, total median and p99 us, draw median and p99 us of
-    # pipeline_render_frame since the last call
+    # pipeline_render_frame in the minute's log
     local frames
-    frames=$(sed 's/\x1b\[[0-9;]*m//g' "$out/ultty.log" | grep 'pipeline_render_frame' || true)
-    : >"$out/ultty.log"
-    echo "$(printf '%s\n' "$frames" | grep -c elapsed_us=),$(
+    frames=$(grep 'pipeline_render_frame' "$out/minute.log" || true)
+    echo "$(printf '%s\n' "$frames" | grep -c elapsed_us= || true),$(
         printf '%s\n' "$frames" | grep -o 'elapsed_us=[0-9]*' | cut -d= -f2 | p50_p99),$(
         printf '%s\n' "$frames" | grep -o 'draw_us=[0-9]*' | cut -d= -f2 | p50_p99)"
 }
+heap_kib() {
+    # Live Rust heap from the minute's last heap_stats line (ultty built
+    # with --features heap-stats); empty without it.
+    local bytes
+    bytes=$(grep -o 'heap_live_bytes=[0-9]*' "$out/minute.log" | tail -1 | cut -d= -f2 || true)
+    [ -z "$bytes" ] || echo $((bytes / 1024))
+}
 
-echo "minute,rss_kib,anon_kib,swap_kib,gpu_kib,cpu_s,frames,frame_p50_us,frame_p99_us,draw_p50_us,draw_p99_us,width,height" >"$out/samples.csv"
+echo "minute,rss_kib,anon_kib,swap_kib,gpu_kib,cpu_s,frames,frame_p50_us,frame_p99_us,draw_p50_us,draw_p99_us,width,height,heap_kib" >"$out/samples.csv"
 hz=$(getconf CLK_TCK)
 sizes=("1600 1000" "1200 800" "1920 1150" "1000 700")
 # Start at the first size so every sample's window size is known.
@@ -167,7 +178,8 @@ for minute in $(seq 1 "$minutes"); do
     anon=$(awk '/^RssAnon:/{print $2}' "/proc/$ultty_pid/status")
     swap=$(awk '/^VmSwap:/{print $2}' "/proc/$ultty_pid/status")
     cpu=$(awk -v hz="$hz" '{printf "%.2f", ($14+$15)/hz}' "/proc/$ultty_pid/stat")
-    echo "$minute,$rss,$anon,$swap,$(gpu_kib),$cpu,$(frame_stats),${size/ /,}" >>"$out/samples.csv"
+    take_log
+    echo "$minute,$rss,$anon,$swap,$(gpu_kib),$cpu,$(frame_stats),${size/ /,},$(heap_kib)" >>"$out/samples.csv"
 done
 echo "samples in $out/samples.csv"
 python3 scripts/bench/soak-report.py "$out/samples.csv"

@@ -101,6 +101,8 @@ impl App {
                 "pipeline_render_frame"
             );
         }
+        #[cfg(feature = "heap-stats")]
+        ultty::heap_stats::maybe_log();
 
         // Handle auto-dump countdown
         if self.auto_dump_frames > 0 {

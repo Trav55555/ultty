@@ -6,7 +6,9 @@
 Reports Ultty's own memory, anonymous RSS plus swap (when the CSV has
 anon_kib and swap_kib), at the end of warm-up and at the end, its least-squares trend after warm-up in MiB per
 hour, the peak, and the RSS total, and the frame time median and p99
-across the run (the per-minute p99s' median and worst). With draw times
+across the run (the per-minute p99s' median and worst). With heap_kib
+(ultty built with --features heap-stats), also the live Rust heap and its
+trend, which excludes the GPU driver's and the allocator's memory. With draw times
 and window sizes in the CSV, also the draw time per window size in the
 first and last hour after warm-up. Exits 1 when memory
 grows by more than 1 MiB an hour after warm-up.
@@ -60,7 +62,7 @@ def main():
     parser.add_argument("--warmup", type=int, default=30, help="minutes to skip")
     args = parser.parse_args()
     with open(args.samples) as f:
-        rows = [{k: float(v) for k, v in row.items()} for row in csv.DictReader(f)]
+        rows = [{k: float(v) for k, v in row.items() if v != ""} for row in csv.DictReader(f)]
     if not rows:
         sys.exit("no samples")
     for r in rows:
@@ -87,6 +89,14 @@ def main():
     if max(r.get("swap_kib", 0.0) for r in rows) > 0:
         print(f"swapped out at the end: {rows[-1]['swap_kib'] / 1024:.1f} MiB")
     print(f"memory trend after warm-up: {trend:+.2f} MiB/hour")
+    heap = [r for r in steady if "heap_kib" in r]
+    if len(heap) >= 2:
+        heap_trend = slope([r["minute"] for r in heap],
+                           [r["heap_kib"] / 1024 for r in heap]) * 60
+        print(f"Rust heap (live, counted): {heap[0]['heap_kib'] / 1024:.1f} MiB after warm-up, "
+              f"{heap[-1]['heap_kib'] / 1024:.1f} MiB at the end, "
+              f"peak {max(r['heap_kib'] for r in heap) / 1024:.1f} MiB, "
+              f"trend {heap_trend:+.2f} MiB/hour")
     print(f"GPU memory in host RAM: {rows[-1]['gpu_kib'] / 1024:.1f} MiB at the end")
     print(f"CPU: {rows[-1]['cpu_s'] - rows[0]['cpu_s']:.0f} s over the run")
     if p99s:

@@ -38,6 +38,8 @@ compile_error!(
 );
 
 pub mod a11y;
+#[cfg(feature = "heap-stats")]
+pub mod heap_stats;
 pub mod config;
 pub mod config_watcher;
 pub mod control;

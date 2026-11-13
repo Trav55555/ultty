@@ -14,6 +14,11 @@ use app::StartupCommand;
 /// The log filter when `RUST_LOG` is unset.
 const DEFAULT_LOG_FILTER: &str = "ultty=info,wgpu=warn";
 
+/// Counts Rust heap for soaks; see `ultty::heap_stats`.
+#[cfg(feature = "heap-stats")]
+#[global_allocator]
+static GLOBAL: ultty::heap_stats::Counting = ultty::heap_stats::Counting;
+
 fn main() -> Result<ExitCode> {
     let command = match invocation(std::env::args().skip(1)) {
         Ok(Invocation::Run { command }) => command,
