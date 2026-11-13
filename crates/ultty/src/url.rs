@@ -27,6 +27,7 @@ pub fn url_at_text(text: &str, byte_offset: usize) -> Option<String> {
             item.start() <= byte_offset
                 && byte_offset < item.end()
                 && text[item.end()..]
+                    .trim_start_matches(['.', ',', ';', ':', '!', '?', ']'])
                     .chars()
                     .next()
                     .is_some_and(|ch| ch.is_whitespace() || ch == ')')

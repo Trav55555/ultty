@@ -314,6 +314,9 @@ mod tests {
         assert!(selection.begin(row(0, "https://example.test/very.", false), 0));
         assert_eq!(selection.url_at(0), None);
         let mut selection = NativeSelection::default();
+        assert!(selection.begin(row(0, "https://example.test/very.", true), 0));
+        assert_eq!(selection.url_at(0).as_deref(), Some(partial));
+        let mut selection = NativeSelection::default();
         assert!(selection.begin(row(0, partial, true), 0));
         assert_eq!(selection.url_at(0).as_deref(), Some(partial));
     }
