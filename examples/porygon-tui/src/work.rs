@@ -266,7 +266,10 @@ mod tests {
         app.work.page = Page::Work;
         app.work.runs = vec![run("a"), run("b")];
         app.work.selected = 1;
-        app.handle_update(crate::Msg::WorkRuns(Ok(vec![run("b"), run("a")])));
+        app.handle_update(crate::Msg::WorkRuns(
+            app.work.generation,
+            Ok(vec![run("b"), run("a")]),
+        ));
         assert_eq!(app.work.runs[app.work.selected].id, "b");
     }
 
@@ -299,6 +302,56 @@ mod tests {
         ));
         assert!(app.work.loading);
         assert!(app.work.error.is_none());
+    }
+
+    #[test]
+    fn test_old_list_refresh_cannot_replace_newer_state() {
+        let mut app = crate::PorygonTui::new();
+        app.work.page = Page::Work;
+        app.work.generation = 3;
+        app.work.loading = true;
+        app.handle_update(crate::Msg::WorkRuns(2, Err("stale failure".into())));
+        assert!(app.work.error.is_none());
+        assert!(app.work.loading);
+        app.work.page = Page::Attention;
+        app.handle_update(crate::Msg::WorkAttention(2, Err("stale failure".into())));
+        assert!(app.work.error.is_none());
+        assert!(app.work.loading);
+    }
+
+    #[test]
+    fn test_refresh_failure_is_visible_even_below_the_first_page() {
+        use ulttui::prelude::View;
+        let mut app = crate::PorygonTui::new();
+        app.terminal_width = 80;
+        app.terminal_height = 12;
+        app.work.page = Page::Work;
+        app.work.runs = (0..100)
+            .map(|index| WorkRun {
+                id: format!("r{index}"),
+                objective: format!("objective {index}"),
+                status: "executing".into(),
+                result: None,
+                error: None,
+            })
+            .collect();
+        app.work.selected = 99;
+        app.work.error = Some("request timed out".into());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|frame| crate::work_views::view(&app).render_ansi(frame, frame.area()))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("Refresh failed"), "{screen}");
+        assert!(screen.contains("request timed out"), "{screen}");
+        assert!(screen.contains("objective 99"), "{screen}");
     }
 
     #[test]

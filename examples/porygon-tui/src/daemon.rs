@@ -1067,12 +1067,11 @@ impl PorygonTui {
                 self.work.loading = true;
                 self.work.error = None;
                 self.work.generation = self.work.generation.wrapping_add(1);
+                let generation = self.work.generation;
                 match self.work.page {
-                    crate::work::Page::Work => {
-                        Cmd::spawn(
-                            async move { Msg::WorkRuns(crate::work::runs(connection).await) },
-                        )
-                    }
+                    crate::work::Page::Work => Cmd::spawn(async move {
+                        Msg::WorkRuns(generation, crate::work::runs(connection).await)
+                    }),
                     crate::work::Page::Attention => Cmd::spawn(async move {
                         let result = async {
                             let runs = crate::work::runs(connection.clone()).await?;
@@ -1086,7 +1085,7 @@ impl PorygonTui {
                             Ok((runs, approvals.items))
                         }
                         .await;
-                        Msg::WorkAttention(result)
+                        Msg::WorkAttention(generation, result)
                     }),
                     crate::work::Page::Detail => {
                         let Some(id) = self.work.detail_id.clone() else {
@@ -1105,8 +1104,8 @@ impl PorygonTui {
                     }
                 }
             }
-            Msg::WorkRuns(result) => {
-                if self.work.page != crate::work::Page::Work {
+            Msg::WorkRuns(generation, result) => {
+                if self.work.page != crate::work::Page::Work || generation != self.work.generation {
                     return Cmd::none();
                 }
                 self.work.loading = false;
@@ -1122,8 +1121,10 @@ impl PorygonTui {
                 }
                 Cmd::none()
             }
-            Msg::WorkAttention(result) => {
-                if self.work.page != crate::work::Page::Attention {
+            Msg::WorkAttention(generation, result) => {
+                if self.work.page != crate::work::Page::Attention
+                    || generation != self.work.generation
+                {
                     return Cmd::none();
                 }
                 self.work.loading = false;

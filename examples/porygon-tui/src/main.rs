@@ -267,13 +267,16 @@ enum Msg {
     WeatherFailed,
     OpenWork(work::Page),
     RefreshWork,
-    WorkRuns(Result<Vec<work::WorkRun>, String>),
+    WorkRuns(u64, Result<Vec<work::WorkRun>, String>),
     WorkDetail(
         String,
         u64,
         Result<(work::WorkRun, Vec<work::Report>), String>,
     ),
-    WorkAttention(Result<(Vec<work::WorkRun>, Vec<approval_client::PendingApproval>), String>),
+    WorkAttention(
+        u64,
+        Result<(Vec<work::WorkRun>, Vec<approval_client::PendingApproval>), String>,
+    ),
     PollAttention,
     AttentionNotice(Result<usize, String>),
     AttachWork,

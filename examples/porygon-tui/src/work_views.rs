@@ -29,12 +29,6 @@ fn rows(app: &PorygonTui) -> (Vec<String>, usize) {
     let width = usize::from(app.terminal_width.saturating_sub(2).max(1));
     let mut rows = Vec::new();
     let mut selected_row = 0;
-    if state.loading {
-        rows.extend(wrap("Loading...", width));
-    }
-    if let Some(error) = &state.error {
-        rows.extend(wrap(&format!("Error: {error}"), width));
-    }
     match state.page {
         Page::Work => {
             if state.runs.is_empty() && !state.loading && state.error.is_none() {
@@ -148,22 +142,44 @@ fn rows(app: &PorygonTui) -> (Vec<String>, usize) {
     (rows, selected_row)
 }
 
-pub(crate) fn max_scroll(app: &PorygonTui) -> usize {
-    rows(app)
-        .0
-        .len()
-        .saturating_sub(usize::from(app.terminal_height.saturating_sub(3).max(1)))
-}
-
-pub(crate) fn view(app: &PorygonTui) -> Column {
-    let state = &app.work;
-    let available = usize::from(app.terminal_height.saturating_sub(3).max(1));
-    let title = match state.page {
+fn header(app: &PorygonTui) -> Vec<String> {
+    let title = match app.work.page {
         Page::Work => "Work | Enter review | r refresh | Esc",
         Page::Attention => "Attention | Enter inspect | r refresh | Esc",
         Page::Detail => "Review | a attach | c copy | r refresh | Esc",
         Page::Closed => "",
     };
+    let width = usize::from(app.terminal_width.saturating_sub(2).max(1));
+    let mut header = wrap(title, width);
+    if app.work.loading {
+        header.push("Refreshing...".into());
+    }
+    if let Some(error) = &app.work.error {
+        header.extend(
+            wrap(
+                &format!("Refresh failed; displayed data may be stale: {error}"),
+                width,
+            )
+            .into_iter()
+            .take(3),
+        );
+    }
+    header
+}
+
+pub(crate) fn max_scroll(app: &PorygonTui) -> usize {
+    let available = usize::from(app.terminal_height)
+        .saturating_sub(header(app).len() + 2)
+        .max(1);
+    rows(app).0.len().saturating_sub(available)
+}
+
+pub(crate) fn view(app: &PorygonTui) -> Column {
+    let state = &app.work;
+    let header = header(app);
+    let available = usize::from(app.terminal_height)
+        .saturating_sub(header.len() + 2)
+        .max(1);
     let (rows, selected_row) = rows(app);
     let start = if state.page == Page::Detail {
         state
@@ -175,8 +191,10 @@ pub(crate) fn view(app: &PorygonTui) -> Column {
     let mut column = Column::new()
         .width(Dimension::Percent(100.0))
         .height(Dimension::Percent(100.0))
-        .padding(1.0)
-        .child(Text::new(title));
+        .padding(1.0);
+    for line in header {
+        column = column.child(Text::new(line));
+    }
     for row in rows.into_iter().skip(start).take(available) {
         column = column.child(Text::new(row));
     }
