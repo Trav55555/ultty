@@ -1,0 +1,47 @@
+parse/ascii 4050509
+vt/ascii 21132055
+parse/sgr-dense 50796673
+vt/sgr-dense 89877656
+parse/unicode-mixed 38097015
+vt/unicode-mixed 153864213
+parse/cjk 40684372
+vt/cjk 124865518
+parse/emoji-zwj 25285732
+vt/emoji-zwj 128348953
+parse/combining 55816169
+vt/combining 352973393
+parse/cursor-redraw 19044312
+vt/cursor-redraw 29849939
+parse/scroll 29935712
+vt/scroll 133904528
+parse/scroll-region 10620883
+vt/scroll-region 22877332
+parse/alt-screen 44610507
+vt/alt-screen 70077443
+parse/wide-wrap 1682184
+vt/wide-wrap 18005223
+case                               baseline        current   change
+parse/alt-screen                   44600031       44610507   +0.02%
+parse/ascii                         4050508        4050509   +0.00%
+parse/cjk                          40684371       40684372   +0.00%
+parse/combining                    55816168       55816169   +0.00%
+parse/cursor-redraw                19013255       19044312   +0.16%
+parse/emoji-zwj                    25285731       25285732   +0.00%
+parse/scroll                       29935711       29935712   +0.00%
+parse/scroll-region                10587571       10620883   +0.31%
+parse/sgr-dense                    50794334       50796673   +0.00%
+parse/unicode-mixed                38097014       38097015   +0.00%
+parse/wide-wrap                     1682183        1682184   +0.00%
+vt/alt-screen                      70104715       70077443   -0.04%
+vt/ascii                           21204773       21132055   -0.34%
+vt/cjk                            124951166      124865518   -0.07%
+vt/combining                      352588482      352973393   +0.11%
+vt/cursor-redraw                   29854424       29849939   -0.02%
+vt/emoji-zwj                      128231015      128348953   +0.09%
+vt/scroll                         134701542      133904528   -0.59%
+vt/scroll-region                   22767116       22877332   +0.48%
+vt/sgr-dense                       89924442       89877656   -0.05%
+vt/unicode-mixed                  153866597      153864213   -0.00%
+vt/wide-wrap                       18075817       18005223   -0.39%
+
+icount-gate passed (worst change +0.48%, threshold +3.0%)

@@ -1,0 +1,5 @@
+2026-11-13T02:53:35.926884Z  WARN winit::platform_impl::linux::x11::xdisplay: error setting XSETTINGS; Xft options won't reload automatically
+2026-11-13T02:53:35.957656Z  WARN winit::platform_impl::linux::x11::util::randr: XRandR reported that the display's 0mm in size, which is certifiably insane
+2026-11-13T02:53:35.958115Z  INFO winit::platform_impl::linux::x11::window: Guessed window scale factor: 1
+2026-11-13T02:53:36.106696Z  INFO ultty::renderer: Present mode: AutoVsync
+2026-11-13T02:53:36.355790Z  INFO ultty::renderer::screenshot: Screenshot saved to /home/travers/projects/tui-terminal/target/rex-features/logs/tailnet-gate-02/remote-counter.png

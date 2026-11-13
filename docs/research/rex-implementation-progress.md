@@ -139,3 +139,43 @@ cleanup confirmed the temporary node logged out, daemon stopped, all test
 processes gone and owned staging/helper/credential files removed. Devbox
 remains up. The tailnet gate used the earlier frozen artifacts rather than
 being relabeled as a test of the final cache merge.
+
+## PR 135 CI repair checkpoint
+
+Source `447032b` integrates upstream `97f5688` and fixes both failures from
+Gitea run 1719. The [repair ledger](../releases/evidence/2026-11-12/rex-sessions/pr135-repair/README.md)
+keeps those failures and the subsequent measurements under separate source
+identities.
+
+- The four parser instruction regressions reproduced exactly against the
+  original CI base. Moving the new status actions after existing `Action`
+  variants restored the hot callback's instruction counts without changing
+  serialization or behavior. The final merged source passed all 22 parse/VT
+  cases against `97f5688`; the worst increase was 0.48%, with the unchanged
+  3% threshold.
+- Screenshot checks now reuse the existing standard-library PNG decoder.
+  The inline and native split smokes passed with Python site packages disabled;
+  their pixel thresholds remain unchanged. No runner packages or image were
+  changed.
+- VT snapshot version 2 preserves separate main/alternate image stores and
+  absolute line origins. Hydration validates aggregate image bounds and
+  identities before allocating grids. Reflow and height reduction retain
+  visible picture rows, while images whose last pixels are evicted disappear.
+  The expanded GPU pixel test covers screen isolation and partial clipping.
+- Final workspace tests, Clippy, Rust 1.90, headless builds, memory budgets,
+  GPU viewer lifecycle, persistent automation and PID/MCP isolation passed.
+  The memory gate retained its complete simulated ten-hour workload.
+- A new tailnet SSH/helper/GPU gate passed in 14.65 seconds with matching
+  `447032b` builds and an explicit snapshot-version-2 assertion. The remote
+  source archive matched all 335 Rust/Cargo paths without a delta. SSH kept
+  strict host-key verification and used only the temporary node's tailnet IP.
+  DERP was observed initially and a direct path after the gate. Both builds
+  used pinned Rust 1.98.1; this run left devbox's existing stable toolchain
+  unchanged.
+
+The final cleanup receipt confirms the temporary node logged out and disappeared
+from peer discovery, its daemon stopped, and owned processes, helper, credentials
+and staging files were removed. Devbox remains reachable.
+
+Fresh Gitea CI results are tracked on PR 135 after the repair push. Local
+success is not recorded as a completed server CI run.

@@ -1,0 +1,7 @@
+placed: rows 188..230 (3 rows of 14 px)
+off: no card
+top: rows 188..230
+shifted: rows 104..146, 6 lines up
+split inline: 7481 card pixels in pane at x=400
+split inline: 7481 card pixels in pane at x=600
+inline-surface: ok (/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-inline-01)

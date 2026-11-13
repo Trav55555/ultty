@@ -1,0 +1,51 @@
+parse/ascii 4148053
+vt/ascii 20913840
+parse/sgr-dense 51278397
+vt/sgr-dense 91126691
+parse/unicode-mixed 39514551
+vt/unicode-mixed 155482324
+parse/cjk 42019532
+vt/cjk 126639120
+parse/emoji-zwj 26461604
+vt/emoji-zwj 128345633
+parse/combining 57461509
+vt/combining 356392435
+parse/cursor-redraw 19228912
+vt/cursor-redraw 30167756
+parse/scroll 30998984
+vt/scroll 132842360
+parse/scroll-region 10754127
+vt/scroll-region 22659234
+parse/alt-screen 45027171
+vt/alt-screen 69225887
+parse/wide-wrap 1686144
+vt/wide-wrap 17982230
+case                               baseline        current   change
+parse/alt-screen                   44600031       45027171   +0.96%
+parse/ascii                         4050508        4148053   +2.41%
+parse/cjk                          40684371       42019532   +3.28%  REGRESSED
+parse/combining                    55816168       57461509   +2.95%
+parse/cursor-redraw                19013255       19228912   +1.13%
+parse/emoji-zwj                    25285731       26461604   +4.65%  REGRESSED
+parse/scroll                       29935711       30998984   +3.55%  REGRESSED
+parse/scroll-region                10587571       10754127   +1.57%
+parse/sgr-dense                    50794334       51278397   +0.95%
+parse/unicode-mixed                38097014       39514551   +3.72%  REGRESSED
+parse/wide-wrap                     1682183        1686144   +0.24%
+vt/alt-screen                      69041138       69225887   +0.27%
+vt/ascii                           20889441       20913840   +0.12%
+vt/cjk                            126610411      126639120   +0.02%
+vt/combining                      356385706      356392435   +0.00%
+vt/cursor-redraw                   30060677       30167756   +0.36%
+vt/emoji-zwj                      128335852      128345633   +0.01%
+vt/scroll                         132576529      132842360   +0.20%
+vt/scroll-region                   22588983       22659234   +0.31%
+vt/sgr-dense                       90924222       91126691   +0.22%
+vt/unicode-mixed                  155464665      155482324   +0.01%
+vt/wide-wrap                       17981227       17982230   +0.01%
+
+icount-gate FAILED:
+  parse/cjk: +3.28% instructions (threshold +3.0%)
+  parse/emoji-zwj: +4.65% instructions (threshold +3.0%)
+  parse/scroll: +3.55% instructions (threshold +3.0%)
+  parse/unicode-mixed: +3.72% instructions (threshold +3.0%)

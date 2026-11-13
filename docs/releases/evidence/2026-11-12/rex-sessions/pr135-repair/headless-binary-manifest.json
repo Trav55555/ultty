@@ -1,0 +1,18 @@
+{
+  "source_commit": "447032bc1219812519239b9d889174ca3c5faa56",
+  "source_tree": "7e0eb21f8db24dcf946d3339c39413a4fe7dac41",
+  "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)",
+  "features": {
+    "default_features": false
+  },
+  "binaries": {
+    "ultty-session": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-headless-bin/ultty-session",
+      "sha256": "ba9d44471c266e4f5c77db4ae692422d98e8e30d2e9eec057980fbed376c897d"
+    },
+    "ulttyctl": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-headless-bin/ulttyctl",
+      "sha256": "31b8021b4c814c9370197b5c81b787ab9334d6eec3116f9789b51762572af0f4"
+    }
+  }
+}
