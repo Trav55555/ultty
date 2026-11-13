@@ -130,6 +130,52 @@ class MeasureOrder(unittest.TestCase):
         self.assertEqual(requests_between_key_and_first_frame(probe.log), ["copy"])
 
 
+class StaleProbe(FakeProbe):
+    """The first frame after the key shows a change composited before it
+    (the previous sample's echo landing after the baseline grab); the
+    next one shows this key's echo."""
+
+    def __init__(self):
+        super().__init__()
+        self.stale_sent = False
+
+    def wait(self, frame, deadline):
+        if not frame.done:
+            self.log.append("frame")
+            if not self.stale_sent:
+                self.stale_sent = True
+                frame.buffer = FakeBuffer(b"stale")
+                frame.ready = self.key_time - 0.01
+                frame.received = k2p.now()
+            else:
+                self._complete(frame, b"after")
+        return True
+
+    def key(self, symbol):
+        self.key_time = super().key(symbol)
+        return self.key_time
+
+
+class StaleChange(unittest.TestCase):
+    def test_change_composited_before_the_key_becomes_the_baseline(self):
+        probe = StaleProbe()
+        sample = k2p.measure(probe, (0, 0, 1, 1), "x", gap=0.005, timeout=1.0)
+        self.assertIsNotNone(sample)
+        self.assertGreaterEqual(sample[0], 0)
+        self.assertEqual(probe.log.count("frame"), 2)
+
+    def test_timestamp_after_receipt_is_a_clock_error(self):
+        probe = FakeProbe()
+        complete = probe._complete
+
+        def late(frame, pixels):
+            complete(frame, pixels)
+            frame.ready = frame.received + 1.0
+        probe._complete = late
+        with self.assertRaises(RuntimeError):
+            k2p.measure(probe, (0, 0, 1, 1), "x", gap=0.005, timeout=1.0)
+
+
 class AnonFdTest(unittest.TestCase):
     def roundtrip(self):
         fd = k2p.anon_fd("test")

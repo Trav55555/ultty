@@ -432,9 +432,14 @@ def measure(probe, cell, symbol, gap, timeout, arm_after_key=False):
             # Ask for the next damaged frame before looking at this one.
             probe.copy(armed, slot, damage=True)
             if not current.failed and bytes(current.buffer.map) != baseline:
-                if not start <= current.ready <= current.received:
+                if current.ready > current.received:
                     raise RuntimeError("screencopy timestamps are not on CLOCK_MONOTONIC")
-                return (current.ready - start) * 1e3, (current.received - start) * 1e3
+                if current.ready >= start:
+                    return (current.ready - start) * 1e3, (current.received - start) * 1e3
+                # Composited before the key: the previous sample's echo
+                # finishing after the baseline grab (seen under load with
+                # GNOME Terminal). Not this key's change; it is the baseline.
+                baseline = bytes(current.buffer.map)
             probe.destroy(current)
             current, armed, slot = armed, probe.frame(cell), 1 - slot
     finally:

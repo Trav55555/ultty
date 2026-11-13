@@ -152,7 +152,7 @@ The viewer hydrates read-only replicas through the same GPU renderer as the loca
 
 Publication sequences advance when visible owner state changes. Matching snapshot cursors receive `Unchanged`, avoiding repeated hydration of idle screens. This is bounded whole-state replacement, not a delta stream or process checkpoint format.
 
-Native image caches include session identity and committed scene revision. VT image IDs remain local to each pane, so the renderer currently clears and uploads their textures per pane. This preserves image isolation at an upload cost; no comparative rendering-performance improvement is claimed.
+Native image caches include session identity and committed scene revision. VT textures use a process-local terminal identity plus their image ID, with a 256 MiB LRU byte budget. Hydrating a replacement snapshot creates a fresh terminal identity, so changed pixels cannot reuse an earlier snapshot's texture. The local application prunes closed terminal identities; viewer textures from older snapshots remain until LRU eviction. This removes unconditional uploads on every pane draw, but no comparative rendering-performance improvement is claimed.
 
 Resizing publishes cell and pixel dimensions to each PTY. If a PTY resize fails partway through a multi-pane update, inspect a fresh snapshot before retrying; the operating-system changes are not transactional.
 

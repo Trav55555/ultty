@@ -236,6 +236,9 @@ const MAX_COMMAND_LINE_ROWS: usize = 256;
 pub struct Terminal {
     /// Program records belong to the PTY, not either screen.
     program_status: crate::program_status::ProgramStatusStore,
+    /// Process-unique identity of this terminal, so an embedder can key
+    /// per-terminal caches (image textures) without a handle of its own.
+    uid: u64,
     /// Main screen buffer (with scrollback)
     main: Buffer,
     /// Alternate screen buffer (no scrollback)
@@ -358,8 +361,10 @@ impl Terminal {
 
     /// Create a new terminal with the given dimensions.
     pub fn new(dims: Dimensions) -> Self {
+        static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             program_status: crate::program_status::ProgramStatusStore::default(),
+            uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             main: Buffer::new(dims),
             alternate: Buffer::with_scrollback(dims, 0), // No scrollback for alternate
             using_alternate: false,
@@ -1107,6 +1112,11 @@ impl Terminal {
         })
     }
 
+    /// Process-unique identity of this terminal; see the `uid` field.
+    pub fn uid(&self) -> u64 {
+        self.uid
+    }
+
     /// Get the image store.
     pub fn images(&self) -> &ImageStore {
         &self.images
@@ -1769,6 +1779,13 @@ fn percent_decode(input: &str) -> String {
 mod tests {
     use super::*;
     use crate::grid::ImageId;
+
+    #[test]
+    fn each_terminal_has_its_own_uid() {
+        let a = Terminal::new(Dimensions::new(80, 24));
+        let b = Terminal::new(Dimensions::new(80, 24));
+        assert_ne!(a.uid(), b.uid());
+    }
 
     #[test]
     fn new_terminal() {

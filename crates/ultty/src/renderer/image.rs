@@ -4,6 +4,7 @@
 //! ImageWidget rendering, including pipeline creation, texture upload,
 //! caching, and draw calls.
 
+use super::image_cache::ImageKey;
 use super::{CachedImageTexture, ImagePipeline, NativeResourceKey, Renderer, Vertex};
 use crate::grid::{Terminal, TerminalImage};
 use wgpu::util::DeviceExt;
@@ -153,8 +154,9 @@ impl Renderer {
     }
 
     /// Upload an image to the GPU and cache it.
-    fn upload_image(&mut self, image: &TerminalImage) -> bool {
-        if self.image_cache.contains_key(&image.id) {
+    fn upload_image(&mut self, owner: u64, image: &TerminalImage) -> bool {
+        let key = ImageKey::new(owner, image.id);
+        if self.image_cache.contains(&key) {
             return true;
         }
 
@@ -166,17 +168,6 @@ impl Renderer {
             "terminal image",
         ) {
             return false;
-        }
-
-        // Evict oldest entries if cache exceeds limit (64 textures)
-        const MAX_IMAGE_CACHE: usize = 64;
-        if self.image_cache.len() >= MAX_IMAGE_CACHE {
-            // Remove entries not currently referenced by the terminal
-            let excess = self.image_cache.len() - MAX_IMAGE_CACHE + 1;
-            let keys_to_remove: Vec<_> = self.image_cache.keys().take(excess).copied().collect();
-            for key in keys_to_remove {
-                self.image_cache.remove(&key);
-            }
         }
 
         // Ensure image pipeline exists
@@ -245,7 +236,7 @@ impl Renderer {
         });
 
         self.image_cache.insert(
-            image.id,
+            key,
             CachedImageTexture {
                 texture,
                 bind_group,
@@ -253,6 +244,7 @@ impl Renderer {
                 height: image.height,
                 revision: None,
             },
+            image.data.len(),
         );
 
         true
@@ -389,11 +381,6 @@ impl Renderer {
         origin: (f32, f32),
         scissor: Option<super::native_render::Scissor>,
     ) {
-        // ImageId is allocated per terminal. The single-pane renderer may
-        // switch terminals between frames without a globally unique pane key,
-        // so discard these textures before drawing a different observation.
-        // This conservatively reuploads VT images on every render.
-        self.image_cache.clear();
         if terminal.images().is_empty() {
             return;
         }
@@ -404,11 +391,12 @@ impl Renderer {
         }
 
         // Upload any new image, then render each one with its own texture
+        let owner = terminal.uid();
         for image in terminal.images().images() {
-            if !self.upload_image(image) {
+            if !self.upload_image(owner, image) {
                 continue;
             }
-            let Some(cached) = self.image_cache.get(&image.id) else {
+            let Some(cached) = self.image_cache.get(&ImageKey::new(owner, image.id)) else {
                 continue;
             };
 
@@ -682,6 +670,43 @@ mod tests {
                 sessions: vec![],
             },
         ];
+        let image = pixels(&mut renderer, &panes, &path);
+        assert_eq!(rgb(&image, x, y), [255, 0, 0]);
+        assert_eq!(rgb(&image, 128 + x, y), [0, 0, 255]);
+        assert!(renderer
+            .image_cache
+            .contains(&ImageKey::new(a.uid(), ImageId(0))));
+        assert!(renderer
+            .image_cache
+            .contains(&ImageKey::new(b.uid(), ImageId(0))));
+
+        // A complete attachment replacement keeps its pane/image identities,
+        // but owns a fresh Terminal UID even when image dimensions stay equal.
+        let mut replacement = TerminalSnapshot::capture(&a).unwrap();
+        replacement.images[0].data = vec![0, 255, 0, 255];
+        let updated = replacement.to_view().unwrap();
+        assert_ne!(updated.uid(), a.uid());
+        let updated_panes = [
+            PaneDraw {
+                terminal: &updated,
+                info: PaneInfo::new(0.0, 0.0, 128.0, 96.0, true),
+                sessions: vec![],
+            },
+            PaneDraw {
+                terminal: &b,
+                info: PaneInfo::new(128.0, 0.0, 128.0, 96.0, true),
+                sessions: vec![],
+            },
+        ];
+        let image = pixels(&mut renderer, &updated_panes, &path);
+        assert_eq!(rgb(&image, x, y), [0, 255, 0]);
+        assert_eq!(rgb(&image, 128 + x, y), [0, 0, 255]);
+        assert!(renderer
+            .image_cache
+            .contains(&ImageKey::new(a.uid(), ImageId(0))));
+        assert!(renderer
+            .image_cache
+            .contains(&ImageKey::new(updated.uid(), ImageId(0))));
         let image = pixels(&mut renderer, &panes, &path);
         assert_eq!(rgb(&image, x, y), [255, 0, 0]);
         assert_eq!(rgb(&image, 128 + x, y), [0, 0, 255]);

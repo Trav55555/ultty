@@ -50,6 +50,10 @@ impl App {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        // Tabs and panes close from many places; whatever their images left
+        // in the texture cache goes here.
+        self.renderer
+            .retain_terminal_images(&self.runtime.manager.terminal_uids());
         let drawn = if pane_count > 1 {
             self.render_multi_pane(&view, cursor_cell)
         } else {

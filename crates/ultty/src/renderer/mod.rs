@@ -13,6 +13,7 @@ mod cursor;
 mod decoration;
 mod emoji;
 mod image;
+mod image_cache;
 mod native_render;
 mod overlays;
 mod panes;
@@ -31,7 +32,7 @@ pub use text::TextRenderer;
 use crate::config::{ColorConfig, FontConfig};
 #[cfg(test)]
 use crate::grid::Color;
-use crate::grid::{CellFlags, CursorShape, ImageId, Terminal};
+use crate::grid::{CellFlags, CursorShape, Terminal};
 use crate::tabs::TabBarState;
 use crate::url::DetectedUrl;
 use crate::vim::CopyMode;
@@ -272,7 +273,7 @@ pub struct Renderer {
     /// Window corner radius used by the shader clip mask.
     window_corner_radius: f32,
     /// Cached image textures (terminal sixel images)
-    image_cache: std::collections::HashMap<ImageId, CachedImageTexture>,
+    image_cache: image_cache::ImageCache<CachedImageTexture>,
     /// Cached image textures, scoped to their native application session.
     native_image_cache: std::collections::HashMap<NativeResourceKey, CachedImageTexture>,
     /// Animated progress: region_id -> current displayed value (lerped toward target)
@@ -556,7 +557,7 @@ impl Renderer {
             pane_offset_y: 0.0,
             opacity: 1.0,
             window_corner_radius: DEFAULT_WINDOW_CORNER_RADIUS,
-            image_cache: std::collections::HashMap::new(),
+            image_cache: image_cache::ImageCache::new(),
             native_image_cache: std::collections::HashMap::new(),
             animated_progress: std::collections::HashMap::new(),
             has_animations: false,
@@ -688,7 +689,7 @@ impl Renderer {
             pane_offset_y: 0.0,
             opacity: 1.0,
             window_corner_radius: DEFAULT_WINDOW_CORNER_RADIUS,
-            image_cache: std::collections::HashMap::new(),
+            image_cache: image_cache::ImageCache::new(),
             native_image_cache: std::collections::HashMap::new(),
             animated_progress: std::collections::HashMap::new(),
             has_animations: false,
@@ -947,9 +948,10 @@ impl Renderer {
             .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
     }
 
-    /// Clear cached image textures for terminal images (e.g., on tab close).
-    pub fn clear_image_cache(&mut self) {
-        self.image_cache.clear();
+    /// Drop the cached image textures of terminals that are no longer open
+    /// (closed tabs and panes). `live` holds [`Terminal::uid`]s.
+    pub fn retain_terminal_images(&mut self, live: &std::collections::HashSet<u64>) {
+        self.image_cache.retain_owners(live);
     }
 
     /// Retain only resources belonging to the given live session/region pairs.
