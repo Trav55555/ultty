@@ -1,0 +1,31 @@
+{
+  "passed": true,
+  "unit": "ultty-session-verify-60583c04.service",
+  "source": "d7fafef735a231414d7d19b62d47995967033b1d",
+  "command": [
+    "systemd-run",
+    "--user",
+    "--unit=ultty-session-verify-60583c04.service",
+    "--collect",
+    "--property=Restart=no",
+    "--property=KillMode=control-group",
+    "--property=TimeoutStopSec=15s",
+    "--property=ExecStop=/home/travers/projects/tui-terminal/target/session-daily-use/service-install-01/current/bin/ultty-session stop verify-60583c04",
+    "--setenv=XDG_RUNTIME_DIR=/tmp/usv-ydeps49e",
+    "--setenv=TMPDIR=/tmp/usv-ydeps49e",
+    "/home/travers/projects/tui-terminal/target/session-daily-use/service-install-01/current/bin/ultty-session",
+    "host",
+    "verify-60583c04",
+    "-e",
+    "/bin/sleep",
+    "120"
+  ],
+  "start_result": "Running as unit: ultty-session-verify-60583c04.service; invocation ID: 28de12ac763f450186b7b70ae704752c",
+  "owner_pid": 3378989,
+  "child_pid": 3379002,
+  "unit_properties": "Restart=no\nMainPID=3378989\nExecStop={ path=/home/travers/projects/tui-terminal/target/session-daily-use/service-install-01/current/bin/ultty-session ; argv[]=/home/travers/projects/tui-terminal/target/session-daily-use/service-install-01/current/bin/ultty-session stop verify-60583c04 ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\nKillMode=control-group\n",
+  "binary_sha256": "c2b25ba3758825cae2b76ccd40e8462598077a8f1631583f81fc489c519ce7b1",
+  "owner_stopped": true,
+  "child_stopped": true,
+  "private_runtime_removed": true
+}

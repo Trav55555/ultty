@@ -1,0 +1,13 @@
+{
+  "sha256": {
+    "/home/travers/projects/tui-terminal/target/session-daily-use/bin-d7fafef/ultty": "a9acbd00a76687578b662498ccc71854cca2ed8f062ccd5a373ff43bb6dd292c",
+    "/home/travers/projects/tui-terminal/target/session-daily-use/bin-d7fafef/ultty-session": "e6d4359049ba11adec1e974e4183ac4728b05bfebc887c3f6042785e242e2c45",
+    "/home/travers/projects/tui-terminal/target/session-daily-use/bin-d7fafef/counter-app": "efade8e423e942bcf6692f5867a8ffe729c70032125fd02390a860621414074f",
+    "/home/travers/projects/tui-terminal/.worktrees/session-daily-use/scripts/e2e/session-reconnect.py": "3db27bc23325e759a1ca5ce32dc406204f99816131bcdbfd27b2542069f79004",
+    "/home/travers/projects/tui-terminal/.worktrees/session-daily-use/scripts/e2e/session-host.py": "f2ce3b0c4aae17ae8cebee729aa1e35da1f587f21f412dcd0d8ec27cacc23b64",
+    "/home/travers/projects/tui-terminal/.worktrees/session-daily-use/scripts/e2e/native_split_check.py": "5b22e29b1baf25826bf93d8fdb783de1c1079755a56b058caf5a17a16ae79892",
+    "/home/travers/projects/tui-terminal/.worktrees/session-daily-use/scripts/analyze-inline-surface-screenshots.py": "a27a3f1d01f01c6053667701003980f211cd3902bae30a39bab65cfe181f69fa"
+  },
+  "budget_seconds": 120,
+  "qualification": "local fake SSH relay; real helper, host and GPU viewer"
+}

@@ -38,5 +38,20 @@ explicit stop/start.
 
 ## Verification record
 
-Implementation and final-source results will be recorded here after the gates
-complete. Results from PR 135 remain evidence for that earlier source only.
+Implementation `d7fafef` passed workspace tests, Clippy with warnings denied,
+Rust 1.90 all-target checks, formatting, and package/installer tests. The
+headless deployment CLI built a fresh release bundle from the clean committed
+source. A transient systemd user unit started that installed host, exposed its
+session, then stopped it and reaped its child.
+
+The real GPU recovery gate passed with both the development host and the
+packaged headless release host, in 13.36 and 13.76 seconds respectively. It
+verified exact retained pixels, dropped offline input, both uncertain-mutation
+cases, competing-controller behavior and refusal of a replacement owner before
+any claim or snapshot. All owned processes and credentials were removed.
+The fixture uses a local SSH relay around the production stdio helper; it does
+not constitute another real-network/Tailscale test.
+
+[Receipts, commands, hashes and screenshots](../releases/evidence/2026-11-12/session-daily-use/README.md)
+identify each tested artifact. Fresh branch CI is tracked on the pull request.
+Results from PR 135 remain evidence for that earlier source only.
