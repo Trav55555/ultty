@@ -9,8 +9,10 @@ mod dirty;
 mod errors;
 mod frame;
 mod live_appends;
+mod semantic;
 
 pub use live_appends::LiveChange;
+pub use semantic::MAX_PENDING_SEMANTIC_ACTIONS;
 mod surfaces;
 mod transport;
 
@@ -26,7 +28,7 @@ use ultty_protocol::{
     AppMessage, Dimension, Display, FlexDirection, FrameId, LayoutTrigger, PushedOverride,
     RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_INLINE_SURFACES, CAP_INPUT_CURSOR,
     CAP_LAYOUT_FLEXBOX, CAP_OVERRIDE_PUSH, CAP_REGION_METADATA, CAP_SEMANTICS,
-    CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, PROTOCOL_VERSION,
+    CAP_SEMANTIC_ACTIONS, CAP_STREAM_LIFECYCLE, CAP_WIDGET_SCROLL, PROTOCOL_VERSION,
 };
 #[cfg(test)]
 use ultty_protocol::{Content, Style};
@@ -74,7 +76,8 @@ const TERMINAL_CAPABILITIES: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_REGION_METADATA
     | CAP_SEMANTICS
     | CAP_INPUT_CURSOR
-    | CAP_OVERRIDE_PUSH;
+    | CAP_OVERRIDE_PUSH
+    | CAP_SEMANTIC_ACTIONS;
 
 /// Most `SetOverride`s a session may have unanswered at once; one more is
 /// refused, so an applied push is never mistaken for a lost one.
@@ -129,11 +132,21 @@ pub struct NativeSession {
     read_buf: BytesMut,
     /// Write buffer.
     write_buf: BytesMut,
+    /// A required outbound frame could not be queued; close rather than desynchronize.
+    output_overflow: bool,
     /// Viewport dimensions.
     viewport_width: f32,
     viewport_height: f32,
     /// Current frame being built (if any).
     current_frame: Option<FrameId>,
+    /// Last accepted frame ID for action-capable sessions, including aborted frames.
+    semantic_last_frame: Option<FrameId>,
+    /// Last fully accepted committed frame, used to fence action requests.
+    semantic_committed_frame: Option<FrameId>,
+    /// Next action ID, never reused in this session.
+    semantic_next_request: Option<u32>,
+    semantic_pending: HashSet<u32>,
+    semantic_results: VecDeque<(u32, Option<String>)>,
     /// Operations queued since `BeginFrame`, applied at `EndFrame`.
     pending_frame_ops: Vec<AppMessage>,
     /// Wire bytes represented by `pending_frame_ops`, for bounding memory.
@@ -316,9 +329,15 @@ impl NativeSession {
             peer_pid: None,
             read_buf: BytesMut::with_capacity(8192),
             write_buf: BytesMut::with_capacity(8192),
+            output_overflow: false,
             viewport_width: 80.0,
             viewport_height: 24.0,
             current_frame: None,
+            semantic_last_frame: None,
+            semantic_committed_frame: None,
+            semantic_next_request: Some(1),
+            semantic_pending: HashSet::new(),
+            semantic_results: VecDeque::new(),
             pending_frame_ops: Vec::new(),
             pending_frame_bytes: 0,
             scene_dirty: false,
@@ -372,6 +391,11 @@ impl NativeSession {
 
     pub fn session_id(&self) -> u64 {
         self.session_id
+    }
+
+    /// Last action-capable app frame committed without protocol errors.
+    pub fn committed_frame_id(&self) -> Option<FrameId> {
+        self.semantic_committed_frame
     }
 
     /// A number that changes whenever what the session shows may have
@@ -467,6 +491,12 @@ impl NativeSession {
     /// Read and process incoming messages.
     /// Returns true if the session should continue, false if disconnected.
     pub fn poll(&mut self) -> io::Result<bool> {
+        if self.output_overflow {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "native output queue overflowed",
+            ));
+        }
         // Try to read more data
         match self.read_from_socket() {
             Ok(0) => {
@@ -493,7 +523,14 @@ impl NativeSession {
             }
         }
 
-        // Flush any pending writes
+        // Some error/report paths are best-effort; never continue after a
+        // required frame was refused due to overflow.
+        if self.output_overflow {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "native output queue overflowed",
+            ));
+        }
         self.flush_writes()?;
 
         Ok(true)
@@ -512,7 +549,7 @@ impl NativeSession {
 
     /// Test helper: handle a message as if it had arrived with its encoded size.
     #[cfg(test)]
-    fn handle_message(&mut self, msg: AppMessage) -> io::Result<bool> {
+    pub(crate) fn handle_message(&mut self, msg: AppMessage) -> io::Result<bool> {
         use ultty_protocol::Encode;
         let wire_len = msg.encode_to_bytes().len();
         self.handle_wire_message(msg, wire_len)
@@ -588,6 +625,9 @@ impl NativeSession {
     /// - Ping interval: 30s since last activity → send Ping
     /// - Pong timeout: 10s after ping with no pong → close
     pub fn check_keepalive(&mut self) -> io::Result<bool> {
+        if self.output_overflow {
+            return Ok(false);
+        }
         let now = std::time::Instant::now();
         let idle = now.duration_since(self.last_activity);
 
@@ -712,6 +752,7 @@ impl NativeSession {
             .collect();
         NativeScene {
             session: self.session_id,
+            shown_generation: self.shown_generation(),
             in_band: self.is_in_band(),
             focused: self.focused_region.map(|id| id.0),
             regions: self.describe_tree(RegionId::ROOT),
@@ -1047,29 +1088,7 @@ impl NativeSession {
     /// speculative next layout. Returns `(region_id, region-local x,
     /// region-local y)` in cell coordinates.
     pub fn hit_test(&self, x: f32, y: f32) -> (RegionId, f32, f32) {
-        let mut best = (RegionId::ROOT, x, y);
-        self.hit_test_recursive(self.scene.root(), x, y, &mut best);
-        best
-    }
-
-    fn hit_test_recursive(
-        &self,
-        region_id: RegionId,
-        x: f32,
-        y: f32,
-        best: &mut (RegionId, f32, f32),
-    ) {
-        if let Some(region) = self.scene.get(region_id) {
-            let c = &region.computed;
-            if x >= c.x && x < c.x + c.width && y >= c.y && y < c.y + c.height {
-                *best = (region_id, x - c.x, y - c.y);
-                // Iterate in render order; because matches overwrite `best`,
-                // later siblings win overlapping hit tests.
-                for &child_id in &region.children {
-                    self.hit_test_recursive(child_id, x, y, best);
-                }
-            }
-        }
+        crate::scene::view::hit_test(self, x, y)
     }
 
     /// Check if a region is subscribed to the given event mask.
@@ -1469,6 +1488,42 @@ mod tests {
         assert_eq!(id, RegionId::new(1));
         assert_eq!(lx, 5.0); // 15 - 10
         assert_eq!(ly, 3.0); // 8 - 5
+    }
+
+    #[test]
+    fn test_hit_test_scroll_clip_and_hidden_targets_match_display() {
+        let mut session = make_session();
+        let mut parent = Region::new(RegionId::new(1));
+        parent.parent = Some(RegionId::ROOT);
+        parent.computed = ComputedLayout {
+            x: 2.0,
+            y: 3.0,
+            width: 10.0,
+            height: 5.0,
+            ..Default::default()
+        };
+        parent.constraints.overflow.y = ultty_protocol::OverflowAxis::Scroll;
+        session.scene.insert(parent);
+        let mut child = Region::new(RegionId::new(2));
+        child.parent = Some(RegionId::new(1));
+        child.computed = ComputedLayout {
+            x: 2.0,
+            y: 8.0,
+            width: 6.0,
+            height: 4.0,
+            ..Default::default()
+        };
+        session.scene.insert(child);
+        session.scroll_offsets.insert(RegionId::new(1), (0.0, 2.0));
+        assert_eq!(session.hit_test(3.0, 7.0), (RegionId::new(2), 1.0, 1.0));
+        assert_eq!(session.hit_test(3.0, 9.0).0, RegionId::ROOT);
+        session
+            .scene
+            .get_mut(RegionId::new(1))
+            .unwrap()
+            .style
+            .opacity = 0.0;
+        assert_eq!(session.hit_test(3.0, 7.0).0, RegionId::ROOT);
     }
 
     #[test]
@@ -3635,16 +3690,14 @@ mod tests {
         session.handle_message(AppMessage::Pong).unwrap();
         session.handle_message(subscribe_keys(1)).unwrap();
         session.handle_message(AppMessage::ClipboardGet).unwrap();
+        assert!(!moved(&session), "keepalives, subscriptions, clipboard");
         session
             .handle_message(AppMessage::SetStyle {
                 id: RegionId::new(1),
                 style: Style::default(),
             })
             .unwrap();
-        assert!(
-            !moved(&session),
-            "keepalives, subscriptions, clipboard, style"
-        );
+        assert!(moved(&session), "style can change target visibility");
         session
             .handle_message(AppMessage::SetContent {
                 id: RegionId::new(99),

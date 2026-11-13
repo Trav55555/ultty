@@ -1,0 +1,23 @@
+{
+  "passed": true,
+  "seconds": 2.0547343000071123,
+  "owner": {
+    "pid": 2227014,
+    "epoch": "99c9d58a429ed4ae6c70c53bcd7055c76ee30209499ce55e7ba620d4404c226b"
+  },
+  "shell": 0,
+  "retained_job": 1,
+  "counter": 2,
+  "lua": 3,
+  "sha256": {
+    "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/ultty-session": "ba9d44471c266e4f5c77db4ae692422d98e8e30d2e9eec057980fbed376c897d",
+    "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/ulttyctl": "2ba25cd3e69887cd22763a0f0c4ef363d7ed7191c98d3e17d1048e4f0fd85ed6",
+    "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/counter-app": "7e1296d0fa3a067275798ae75ee46de094484aea6b93fc86e246d326df5bb200",
+    "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/ulttui-lua": "ff3308cb42001697c49b56f2e051d63725f7e4cd9b1c38f9e8f785974284dbed",
+    "/home/travers/projects/tui-terminal/.worktrees/rex-features/dist/shell-integration/ultty.bash": "c6e9dfcee96b43a3a1569bdfaa956018001efcd3c1abde399a9679ed0af97da9",
+    "/home/travers/projects/tui-terminal/.worktrees/rex-features/examples/lua/hello.luau": "c83c4ae7593feea0f89284db00860b7e4ab0bc9d01f8439000138fe8556ba79c",
+    "/home/travers/projects/tui-terminal/.worktrees/rex-features/scripts/e2e/session-control.py": "7809ec27f4749f9a29515f6f0616468f70574f9c87a9fc7d5de6c8da0c3ec87d",
+    "/home/travers/projects/tui-terminal/.worktrees/rex-features/scripts/e2e/control-workflows.py": "2a33247b612a4f1291a1f077465f27ff0ad42d57a2c6e59347c2365d61c07c57",
+    "/home/travers/projects/tui-terminal/.worktrees/rex-features/scripts/e2e/session-host.py": "f2ce3b0c4aae17ae8cebee729aa1e35da1f587f21f412dcd0d8ec27cacc23b64"
+  }
+}

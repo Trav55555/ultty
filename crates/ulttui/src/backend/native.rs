@@ -1,5 +1,6 @@
 //! Native protocol backend for Ultty terminal.
 
+mod actions;
 mod transport;
 
 use std::collections::{HashMap, VecDeque};
@@ -10,9 +11,10 @@ use std::time::{Duration, Instant};
 use bytes::BytesMut;
 use ultty_protocol::{
     AppMessage, ComputedRegionLayout, Content, FrameId, InputEvent, InputType, Key, Modifiers,
-    PushedOverride, RegionId, TerminalMessage, CAP_APPEND_CONTENT, CAP_INPUT_CURSOR,
-    CAP_OVERRIDE_PUSH, CAP_REGION_METADATA, CAP_SEMANTICS, CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY,
-    EVENT_MOUSE, EVENT_SCROLL, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    PushedOverride, RegionId, SemanticActionKind, SemanticActionRequest, TerminalMessage,
+    CAP_APPEND_CONTENT, CAP_INPUT_CURSOR, CAP_OVERRIDE_PUSH, CAP_REGION_METADATA, CAP_SEMANTICS,
+    CAP_SEMANTIC_ACTIONS, CLIENT_DEFAULT_CAPABILITIES, EVENT_KEY, EVENT_MOUSE, EVENT_SCROLL,
+    MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
 };
 
 use crate::event::Event;
@@ -55,7 +57,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 /// pushed overrides (ADR 0023 §9), which it answers through
 /// [`NativeBackend::send_override_result`]. A client that does not answer
 /// `SetOverride` must not ask for that bit.
-pub const REQUESTED_CAPABILITIES: u32 = CLIENT_DEFAULT_CAPABILITIES | CAP_OVERRIDE_PUSH;
+pub const REQUESTED_CAPABILITIES: u32 =
+    CLIENT_DEFAULT_CAPABILITIES | CAP_OVERRIDE_PUSH | CAP_SEMANTIC_ACTIONS;
 
 pub struct NativeBackend {
     stream: Option<UnixStream>,
@@ -81,6 +84,9 @@ pub struct NativeBackend {
     /// Overrides the terminal pushed (ADR 0023 §9), for the runner to
     /// apply and answer.
     pending_overrides: VecDeque<OverridePush>,
+    pending_actions: VecDeque<SemanticActionRequest>,
+    action_targets: HashMap<RegionId, actions::ActionTarget>,
+    presented_frame: Option<FrameId>,
 }
 
 /// A `SetOverride` from the terminal: the request to answer and what to
@@ -105,6 +111,9 @@ impl NativeBackend {
             reported_focus: None,
             pending_events: VecDeque::new(),
             pending_overrides: VecDeque::new(),
+            pending_actions: VecDeque::new(),
+            action_targets: HashMap::new(),
+            presented_frame: None,
         }
     }
 
@@ -133,6 +142,9 @@ impl NativeBackend {
 
     /// Run the handshake over a connected socket and start the session.
     pub(crate) fn connect_socket(&mut self, stream: UnixStream) -> crate::Result<()> {
+        self.pending_actions.clear();
+        self.action_targets.clear();
+        self.presented_frame = None;
         // Blocking writes. Reads only happen once poll(2) says the socket
         // is readable, so they never wait.
         stream.set_nonblocking(false)?;
@@ -162,6 +174,9 @@ impl NativeBackend {
     /// to ANSI, which is right: the outer terminal cannot know where the
     /// pane is.
     fn init_in_band(&mut self) -> crate::Result<()> {
+        self.pending_actions.clear();
+        self.action_targets.clear();
+        self.presented_frame = None;
         let mut tty = in_band::InBandTty::open()?;
         let mut received = Vec::new();
         if !in_band::probe(
@@ -237,7 +252,16 @@ impl NativeBackend {
     /// terminal's reply (its layout) is read when it arrives, through the
     /// event loop's wait; sending a frame never waits for it.
     pub fn render(&mut self, view: &impl View) -> crate::Result<()> {
-        let (frame_messages, notes) = self.collect_frame(view)?;
+        self.render_with_actions(view, |_, _| false, None)
+    }
+
+    pub(crate) fn render_with_actions(
+        &mut self,
+        view: &impl View,
+        mut supports: impl FnMut(&str, SemanticActionKind) -> bool,
+        root_widget: Option<(&str, bool)>,
+    ) -> crate::Result<()> {
+        let (frame_messages, notes) = self.collect_frame(view, root_widget)?;
         let (mut optimized_messages, next_tree) = optimize_frame_messages(
             &self.retained,
             frame_messages,
@@ -251,30 +275,63 @@ impl NativeBackend {
         if self.supports_capability(CAP_REGION_METADATA) {
             name_new_regions(&mut optimized_messages, &next_tree);
         }
-        self.retained = next_tree;
-
+        let supports_actions = self.supports_capability(CAP_SEMANTIC_ACTIONS)
+            && self.supports_capability(CAP_REGION_METADATA);
+        let next_targets = if supports_actions {
+            actions::collect_targets(&next_tree, &mut supports)
+        } else {
+            HashMap::new()
+        };
+        if supports_actions {
+            actions::declare_targets(
+                &mut optimized_messages,
+                &next_tree,
+                &self.action_targets,
+                &next_targets,
+            );
+        }
         if !optimized_messages.is_empty() {
             let frame_id = FrameId(self.next_frame_id);
-            self.next_frame_id += 1;
+            let next_frame_id =
+                self.next_frame_id
+                    .checked_add(1)
+                    .ok_or(crate::Error::NativeUnavailable(
+                        "native frame identity exhausted",
+                    ))?;
             self.send_message(&AppMessage::BeginFrame { frame_id })?;
             for msg in optimized_messages {
                 self.send_message(&msg)?;
             }
             self.send_message(&AppMessage::EndFrame { frame_id })?;
+            self.next_frame_id = next_frame_id;
+            self.presented_frame = Some(frame_id);
         }
 
+        self.retained = next_tree;
+        self.action_targets = next_targets;
         Ok(())
     }
 
-    /// Tell the terminal which region has focus: the one whose native key is
-    /// `widget_id`. Only for the terminal's view of the app (`ulttyctl
+    /// Tell the terminal which region has focus. Semantic sessions resolve
+    /// the exact widget identity; older sessions use its native key.
+    /// Only for the terminal's view of the app (`ulttyctl
     /// regions`); key routing in the app does not depend on it. Sends
     /// nothing while the focused region is unchanged.
     pub fn report_focus(&mut self, widget_id: Option<&str>) -> crate::Result<()> {
         if !self.is_connected() {
             return Ok(());
         }
-        let region = widget_id.and_then(|key| self.retained.region_with_key(key));
+        let region = if self.supports_capability(CAP_SEMANTIC_ACTIONS) {
+            widget_id.and_then(|widget_id| {
+                self.action_targets.iter().find_map(|(id, target)| {
+                    (target.widget_id == widget_id
+                        && target.actions.contains(&SemanticActionKind::Focus))
+                    .then_some(*id)
+                })
+            })
+        } else {
+            widget_id.and_then(|key| self.retained.region_with_key(key))
+        };
         if region == self.reported_focus {
             return Ok(());
         }
@@ -287,10 +344,23 @@ impl NativeBackend {
 
     /// Walk the view tree into provisional-id messages, noting the native
     /// key of every region created along the way.
-    fn collect_frame(&self, view: &impl View) -> crate::Result<(Vec<AppMessage>, FrameNotes)> {
+    fn collect_frame(
+        &self,
+        view: &impl View,
+        root_widget: Option<(&str, bool)>,
+    ) -> crate::Result<(Vec<AppMessage>, FrameNotes)> {
         begin_frame_notes();
         let walked = self.render_view_tree(view);
-        let notes = take_frame_notes();
+        let mut notes = take_frame_notes();
+        if let Some((id, focusable)) = root_widget {
+            notes.widgets.insert(
+                RegionId(1),
+                super::native_diff::WidgetIdentity {
+                    id: id.to_owned(),
+                    focusable,
+                },
+            );
+        }
         walked.map(|messages| (messages, notes))
     }
 
@@ -325,6 +395,9 @@ impl NativeBackend {
             record_native_key(region_id, key);
         }
 
+        if let Some(widget_id) = view.widget_id() {
+            super::native_diff::record_widget(region_id, widget_id, view.is_focusable());
+        }
         let content = view.content();
         crate::widgets::send_semantics(
             &mut |message| {
@@ -378,7 +451,9 @@ impl NativeBackend {
     /// Whether events were read ahead (with a message that carried several,
     /// or an earlier read).
     pub fn has_pending_events(&self) -> bool {
-        !self.pending_events.is_empty() || !self.pending_overrides.is_empty()
+        !self.pending_events.is_empty()
+            || !self.pending_overrides.is_empty()
+            || !self.pending_actions.is_empty()
     }
 
     /// The next override the terminal pushed, if any (ADR 0023 §9).
@@ -531,6 +606,16 @@ impl NativeBackend {
                     Err(crate::Error::Io(err)) if terminal_gone(&err) => {}
                     other => other?,
                 },
+                TerminalMessage::InvokeAction(request) => {
+                    if self.pending_actions.len() >= 64 {
+                        self.send_action_result(
+                            request.request_id,
+                            Some("application action queue is full".into()),
+                        )?;
+                    } else {
+                        self.pending_actions.push_back(request);
+                    }
+                }
                 TerminalMessage::SetOverride { request_id, pushed } => {
                     self.pending_overrides.push_back((request_id, pushed));
                 }
@@ -542,6 +627,9 @@ impl NativeBackend {
             tracing::info!("terminal closed the native connection; quitting");
             self.stream = None;
             self.in_band = None;
+            self.pending_actions.clear();
+            self.action_targets.clear();
+            self.presented_frame = None;
             self.pending_events.push_back(Event::Quit);
         }
 

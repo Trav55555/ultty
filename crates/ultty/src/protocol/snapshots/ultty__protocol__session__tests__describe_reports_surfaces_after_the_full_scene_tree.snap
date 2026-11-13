@@ -4,6 +4,7 @@ expression: scene
 ---
 {
   "session": 1,
+  "shown_generation": 5,
   "in_band": false,
   "focused": null,
   "regions": [

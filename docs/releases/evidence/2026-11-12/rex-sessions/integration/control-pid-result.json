@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "owners": [
+    {
+      "pid": 4042825,
+      "epoch": "22dfa791265fc3f31fc8d0e91702ae2e5a2fa78b91d51ae4e44936f8da161776"
+    },
+    {
+      "pid": 4042863,
+      "epoch": "af8fcbe234fea8bb314efd640b4f7bb21fb02955bed1f19fc28b598dfed90910"
+    }
+  ],
+  "assertions": [
+    "strict env selection",
+    "explicit PID precedence",
+    "MCP owner pin",
+    "MCP token pin",
+    "MCP capabilities",
+    "foreign implicit pane refused",
+    "unavailable selected owner never falls back"
+  ],
+  "cleanup": "owned hosts and MCP processes stopped",
+  "seconds": 1.3517112020635977
+}

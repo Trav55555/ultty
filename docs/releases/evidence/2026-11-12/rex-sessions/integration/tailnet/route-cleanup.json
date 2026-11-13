@@ -1,0 +1,27 @@
+{
+  "peer_tailnet_ipv4": "100.119.165.66",
+  "route_observations": [
+    "DERP iad initially",
+    "direct after upgrade",
+    "direct immediately after gate"
+  ],
+  "ssh_wrapper": "PATH-prepended wrapper invokes /usr/bin/ssh with HostName=100.119.165.66, HostKeyAlias=devbox.traversannan.com, StrictHostKeyChecking=yes",
+  "ssh_wrapper_sha256": "0dff57a20edd4b196990be6b6e1452c1d284fe55c835a0242bc1ddf99fb79445",
+  "strict_ssh_host_key_verified": true,
+  "public_ssh_fallback_in_gate": false,
+  "gate_script_sha256": "404072070d2dd834ad731c97834ad1dc7469d34f22a1e2fe4040a56f198ff776",
+  "source_commit_scope": "b61448a (staged archive differs only in test-only app/control_wait.rs)",
+  "source_archive_sha256": "7d10119564c26ecb0432f1902993af47d9f2a401c4b2ffe32f8924d8f5165b1e",
+  "local_session_binary_sha256": "99c321c69a18d00012703e51aa6b1853231eb5caf857f7bb167776ff42095166",
+  "cleanup": {
+    "owned_host_counter_replay_child_absent": true,
+    "owned_helper_symlink_removed": true,
+    "admin_file_absent": true,
+    "scoped_local_token_files_absent": true,
+    "tailscale_node_logged_out_and_absent_from_local_peers": true,
+    "temporary_daemon_stopped": true,
+    "remote_task_directories_removed": true,
+    "devbox_reachable": true
+  },
+  "known_unintended_change": "first build invoked concurrent rustup proxy updates; stable toolchain repaired to current 1.100.0, previously 1.97.1"
+}

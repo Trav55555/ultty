@@ -1,0 +1,127 @@
+{
+  "base_commit": "97f5688",
+  "head_commit": "447032b",
+  "source_archive_sha256": "ba86cc6e032fcf1480dbeb9feb72b8c24cc30d5cc2171809d4f764d0b7e08bc7",
+  "base_binary_sha256": "ebaff3bce3ca983b403bd4aaf46be7f7dc6584f79f5e78fdb7782bd18af8951b",
+  "head_binary_sha256": "e7ff12d173cb91ec478d74997263924074fc0bb30f71d2eb711f109a5b72c96a",
+  "baseline_json_sha256": "68a28418d500fba03775641b2a23adbd152a25bbcaec177b40ea7fd84ca768ba",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)",
+  "valgrind": "valgrind-3.27.1",
+  "geometry": "120x40",
+  "size_mib": 1,
+  "threshold_percent": 3,
+  "passed": true,
+  "worst_case": "vt/scroll-region",
+  "cases": {
+    "parse/ascii": {
+      "baseline": 4050508,
+      "current": 4050509,
+      "change_percent": 2.468826132417945e-05
+    },
+    "vt/ascii": {
+      "baseline": 21204773,
+      "current": 21132055,
+      "change_percent": -0.3429322256833456
+    },
+    "parse/sgr-dense": {
+      "baseline": 50794334,
+      "current": 50796673,
+      "change_percent": 0.004604844311972833
+    },
+    "vt/sgr-dense": {
+      "baseline": 89924442,
+      "current": 89877656,
+      "change_percent": -0.05202812378863886
+    },
+    "parse/unicode-mixed": {
+      "baseline": 38097014,
+      "current": 38097015,
+      "change_percent": 2.6248776263670948e-06
+    },
+    "vt/unicode-mixed": {
+      "baseline": 153866597,
+      "current": 153864213,
+      "change_percent": -0.001549394115740732
+    },
+    "parse/cjk": {
+      "baseline": 40684371,
+      "current": 40684372,
+      "change_percent": 2.4579463131502166e-06
+    },
+    "vt/cjk": {
+      "baseline": 124951166,
+      "current": 124865518,
+      "change_percent": -0.06854517868204457
+    },
+    "parse/emoji-zwj": {
+      "baseline": 25285731,
+      "current": 25285732,
+      "change_percent": 3.954799643324236e-06
+    },
+    "vt/emoji-zwj": {
+      "baseline": 128231015,
+      "current": 128348953,
+      "change_percent": 0.09197306907380298
+    },
+    "parse/combining": {
+      "baseline": 55816168,
+      "current": 55816169,
+      "change_percent": 1.7915955830005714e-06
+    },
+    "vt/combining": {
+      "baseline": 352588482,
+      "current": 352973393,
+      "change_percent": 0.1091672075663519
+    },
+    "parse/cursor-redraw": {
+      "baseline": 19013255,
+      "current": 19044312,
+      "change_percent": 0.16334394084547288
+    },
+    "vt/cursor-redraw": {
+      "baseline": 29854424,
+      "current": 29849939,
+      "change_percent": -0.01502289911873289
+    },
+    "parse/scroll": {
+      "baseline": 29935711,
+      "current": 29935712,
+      "change_percent": 3.3404919053126036e-06
+    },
+    "vt/scroll": {
+      "baseline": 134701542,
+      "current": 133904528,
+      "change_percent": -0.5916888464424508
+    },
+    "parse/scroll-region": {
+      "baseline": 10587571,
+      "current": 10620883,
+      "change_percent": 0.31463307306274224
+    },
+    "vt/scroll-region": {
+      "baseline": 22767116,
+      "current": 22877332,
+      "change_percent": 0.4841017193394137
+    },
+    "parse/alt-screen": {
+      "baseline": 44600031,
+      "current": 44610507,
+      "change_percent": 0.02348877291138418
+    },
+    "vt/alt-screen": {
+      "baseline": 70104715,
+      "current": 70077443,
+      "change_percent": -0.038901805677404866
+    },
+    "parse/wide-wrap": {
+      "baseline": 1682183,
+      "current": 1682184,
+      "change_percent": 5.9446564382170664e-05
+    },
+    "vt/wide-wrap": {
+      "baseline": 18075817,
+      "current": 18005223,
+      "change_percent": -0.3905438963007879
+    }
+  }
+}

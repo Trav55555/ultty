@@ -1,6 +1,8 @@
 use ulttui::event::{Event, Key};
 use ulttui::prelude::*;
+use ulttui::program_status::{Kind, Report, State};
 use ulttui::widgets::RichText;
+use ulttui::SemanticActionKind;
 
 // ---------------------------------------------------------------------------
 // Field validation
@@ -82,6 +84,7 @@ struct FormApp {
     fields: Vec<FormField>,
     active_field: usize,
     submitted: bool,
+    status_write_failed: bool,
 }
 
 impl FormApp {
@@ -94,6 +97,7 @@ impl FormApp {
             ],
             active_field: 0,
             submitted: false,
+            status_write_failed: false,
         }
     }
 
@@ -112,6 +116,9 @@ enum Message {
     AppendChar(char),
     DeleteChar,
     Submit,
+    Validate,
+    Reset,
+    StatusWritten(ulttui::Result<()>),
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +127,10 @@ enum Message {
 
 impl Application for FormApp {
     type Message = Message;
+
+    fn init(&mut self) -> Cmd<Message> {
+        Self::report(State::Blocked, "Complete the required fields")
+    }
 
     fn update(&mut self, msg: Message) -> Cmd<Message> {
         match msg {
@@ -147,22 +158,64 @@ impl Application for FormApp {
                 self.fields[self.active_field].revalidate();
                 Cmd::none()
             }
-            Message::Submit => {
-                // Validate every field before submitting.
+            Message::Submit => Cmd::batch(vec![
+                Self::report(State::Working, "Validating form"),
+                Cmd::message(Message::Validate),
+            ]),
+            Message::Validate => {
+                // Validation and the result remain application state.
                 for field in &mut self.fields {
                     field.revalidate();
                 }
                 if self.all_valid() {
                     self.submitted = true;
                 }
+                if self.submitted {
+                    Self::report(State::Done, "Form submitted")
+                } else {
+                    Self::report(State::Blocked, "Complete the required fields")
+                }
+            }
+            Message::Reset => {
+                *self = Self::new();
+                Cmd::report_status_with_result(
+                    Report::clear(Some("form".into())),
+                    Message::StatusWritten,
+                )
+            }
+            Message::StatusWritten(result) => {
+                self.status_write_failed = result.is_err();
                 Cmd::none()
             }
         }
     }
 
+    fn supports_action(&self, widget_id: &str, action: SemanticActionKind) -> bool {
+        action == SemanticActionKind::Activate
+            && if self.submitted {
+                widget_id == "reset"
+            } else {
+                widget_id == "submit"
+            }
+    }
+
+    fn on_action(&mut self, widget_id: &str, action: SemanticActionKind) -> Option<Message> {
+        if !self.supports_action(widget_id, action) {
+            return None;
+        }
+        match widget_id {
+            "submit" => Some(Message::Submit),
+            "reset" => Some(Message::Reset),
+            _ => None,
+        }
+    }
+
     fn on_event(&mut self, event: &Event) -> Option<Message> {
         if self.submitted {
-            return None;
+            return match event {
+                Event::Key(key) if key.key == Key::Char('r') => Some(Message::Reset),
+                _ => None,
+            };
         }
         match event {
             Event::Key(key_event) => match key_event.key {
@@ -197,6 +250,18 @@ impl Application for FormApp {
 // ---------------------------------------------------------------------------
 
 impl FormApp {
+    fn report(state: State, message: &str) -> Cmd<Message> {
+        let report = Report {
+            id: Some("form".into()),
+            app: Some("form-app".into()),
+            kind: (state == State::Blocked).then_some(Kind::Question),
+            title: Some("Form".into()),
+            msg: Some(message.into()),
+            ..Report::new(state)
+        };
+        Cmd::report_status_with_result(report, Message::StatusWritten)
+    }
+
     fn form_view(&self) -> Column {
         let mut col = Column::new().flex_grow(1.0).padding(1.0).gap(1.0);
 
@@ -226,6 +291,12 @@ impl FormApp {
             submit_style,
         ));
 
+        col = col.child(Button::new("Submit").id("submit"));
+        if self.status_write_failed {
+            col = col.child(Muted::new(
+                "Terminal status unavailable; the form still works.",
+            ));
+        }
         col = col.child(Muted::new(
             "Tab/Shift+Tab navigate · Enter submit · Ctrl+C quit",
         ));
@@ -291,7 +362,13 @@ impl FormApp {
         }
 
         col = col.child(Divider::horizontal());
-        col = col.child(Muted::new("Press Ctrl+C to quit"));
+        col = col.child(Button::new("Start again").id("reset"));
+        if self.status_write_failed {
+            col = col.child(Muted::new(
+                "Terminal status unavailable; your form was submitted.",
+            ));
+        }
+        col = col.child(Muted::new("Press r to start again or Ctrl+C to quit"));
 
         col
     }
@@ -300,4 +377,71 @@ impl FormApp {
 fn main() -> anyhow::Result<()> {
     FormApp::new().run()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn apply(app: &mut FormApp, cmd: Cmd<Message>, reports: &mut Vec<Report>) {
+        match cmd {
+            Cmd::None => {}
+            Cmd::Batch(commands) => {
+                for command in commands {
+                    apply(app, command, reports);
+                }
+            }
+            Cmd::Message(message) => {
+                let next = app.update(message);
+                apply(app, next, reports);
+            }
+            Cmd::ReportStatus { report, on_result } => {
+                reports.push(report);
+                if let Some(on_result) = on_result {
+                    let next = app.update(on_result(Ok(())));
+                    apply(app, next, reports);
+                }
+            }
+            _ => panic!("unexpected form command"),
+        }
+    }
+
+    #[test]
+    fn test_form_status_validation_success_clear_and_write_failure_are_distinct() {
+        let mut app = FormApp::new();
+        let mut reports = Vec::new();
+        let init = app.init();
+        apply(&mut app, init, &mut reports);
+        assert_eq!(reports.last().unwrap().kind, Some(Kind::Question));
+        let submit = app.update(Message::Submit);
+        apply(&mut app, submit, &mut reports);
+        assert!(!app.submitted);
+        assert_eq!(reports.iter().rev().nth(1).unwrap().state, State::Working);
+        assert_eq!(reports.last().unwrap().state, State::Blocked);
+        for (field, value) in app.fields.iter_mut().zip(["Ada", "ada@example.test", "42"]) {
+            field.value = value.into();
+        }
+        let action = app
+            .on_action("submit", SemanticActionKind::Activate)
+            .unwrap();
+        let submit = app.update(action);
+        apply(&mut app, submit, &mut reports);
+        assert!(app.submitted);
+        assert_eq!(reports.last().unwrap().state, State::Done);
+        app.update(Message::StatusWritten(Err(std::io::Error::other(
+            "test status failure",
+        )
+        .into())));
+        assert!(app.status_write_failed);
+        assert!(
+            app.submitted,
+            "status output failure must not change the form result"
+        );
+        let reset = app.update(Message::Reset);
+        apply(&mut app, reset, &mut reports);
+        assert!(!app.submitted);
+        assert!(app.fields.iter().all(|field| field.value.is_empty()));
+        assert_eq!(reports.last().unwrap().state, State::Clear);
+        assert_eq!(reports.last().unwrap().id.as_deref(), Some("form"));
+    }
 }

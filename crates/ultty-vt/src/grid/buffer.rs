@@ -422,6 +422,27 @@ impl AnchorRuns {
 }
 
 impl Buffer {
+    /// Restore a validated viewer's absolute line origin before anchor hints.
+    pub(super) fn restore_view_line_origin(&mut self, evicted: usize) {
+        self.evicted = evicted;
+    }
+
+    /// Restore validated viewer anchor locations without reserving or erasing rows.
+    pub(super) fn restore_view_anchors(&mut self, anchors: &[(u16, u64, Anchor, usize)]) {
+        self.anchors.clear();
+        for &(tag, serial, anchor, line) in anchors {
+            self.anchors
+                .resize(self.anchors.len().max(usize::from(tag)), None);
+            self.anchors[usize::from(tag) - 1] = Some(AnchorEntry {
+                anchor,
+                serial,
+                first_line: line,
+                settled: false,
+            });
+            self.next_anchor_serial = self.next_anchor_serial.max(serial.saturating_add(1));
+        }
+    }
+
     /// Check the buffer's invariants: the grid's own (see
     /// [`Grid::check_integrity`]), scrollback within its limit, a viewport
     /// offset that points into history, and consistent history rows.
@@ -1170,15 +1191,32 @@ impl Buffer {
             // just because the window got shorter. Whatever is still too
             // much moves from the top into history.
             let cursor_row = self.grid.cursor().position.row as usize;
+            let image_bottom = self
+                .images
+                .images()
+                .filter_map(|image| image.line.checked_add(usize::from(image.cell_height)))
+                .max()
+                .unwrap_or(0)
+                .saturating_sub(self.screen_top_line())
+                .min(old_rows);
             let blank_below = (cursor_row + 1..old_rows)
                 .rev()
                 .take_while(|&row| {
-                    self.grid
-                        .row(row as u16)
-                        .is_some_and(|row| row.is_blank() && row.anchor().is_none())
+                    row >= image_bottom
+                        && self
+                            .grid
+                            .row(row as u16)
+                            .is_some_and(|row| row.is_blank() && row.anchor().is_none())
                 })
                 .count();
             let rows_to_move = (old_rows - new_rows).saturating_sub(blank_below);
+            self.shift_images_for_scroll_up(
+                ScrollRegion {
+                    top: 0,
+                    bottom: old_rows.saturating_sub(1) as u16,
+                },
+                rows_to_move,
+            );
             self.save_top_rows(rows_to_move);
             // Remove those rows from the grid (shift everything up)
             self.grid.remove_top_rows(rows_to_move);
@@ -1329,6 +1367,7 @@ impl Buffer {
         } = out;
         // Rows made but dropped past the history limit.
         let dropped = total - history.len() - screen.len();
+        self.evicted += dropped;
         self.history = history;
         let mut rows: Vec<Row> = screen.into();
         while rows.len() < new_rows {

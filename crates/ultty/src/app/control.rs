@@ -3,16 +3,27 @@
 //! Processes CLI automation requests from ulttyctl and other tools.
 
 use super::control_resize::{PendingResize, RESIZE_NOT_APPLIED};
-use super::control_wait::{find_ignore_case, Condition, PendingControlWait, WaitMatcher};
+#[cfg(test)]
+use super::control_wait::find_ignore_case;
+use super::control_wait::{Condition, PendingControlWait, WaitMatcher};
 use super::App;
 use std::io;
-use std::path::Path;
 use std::time::{Duration, Instant};
+pub(super) use ultty::control::auth::write_auth_token;
+#[cfg(test)]
+use ultty::control::auth::AUTH_TOKEN_BYTES;
+use ultty::control::auth::{control_request_requires_auth, read_auth_token, token_matches};
+#[cfg(test)]
+use ultty::control::common::plain_search_match;
+pub(super) use ultty::control::common::terminal_working_directory;
+use ultty::control::common::{
+    buffer_text, build_command_line, control_pane_snapshot, input_acceptance, job_id,
+    job_is_running, key_to_bytes, pane_infos, process_job_response, program_status_response,
+    resolve_control_target, search_response, send_pty_input, shell_command_response,
+    submit_control_shell_command, terminal_info,
+};
 use ultty::terminal_manager::{SplitDirection, TerminalId};
 use winit::dpi::PhysicalSize;
-
-/// Number of random bytes in a freshly generated control auth token.
-const AUTH_TOKEN_BYTES: usize = 32;
 
 impl App {
     pub(super) fn handle_control_requests(&mut self) {
@@ -28,19 +39,103 @@ impl App {
         let mut responses: Vec<(usize, ControlResponse)> = Vec::new();
         let mut subscriptions: Vec<(usize, Option<u64>)> = Vec::new();
 
-        for (client_key, request) in requests {
-            // `WithToken` authenticates the connection and then behaves
-            // exactly like its inner request (including wait-for deferral).
-            let request = match request {
-                ControlRequest::WithToken { token, request } => {
-                    if let Err(response) = self.authenticate_client(client_key, &token) {
+        'requests: for (client_key, request) in requests {
+            // Unwrap identity/authentication before any deferred or mutating path.
+            let mut request = request;
+            loop {
+                match request {
+                    ControlRequest::WithToken {
+                        token,
+                        request: inner,
+                    } => {
+                        if let Err(response) = self.authenticate_client(client_key, &token) {
+                            responses.push((client_key, response));
+                            continue 'requests;
+                        }
+                        request = *inner;
+                    }
+                    ControlRequest::WithOwner {
+                        owner,
+                        request: inner,
+                    } => {
+                        if let Some(response) = self.owner_error(&owner) {
+                            responses.push((client_key, response));
+                            continue 'requests;
+                        }
+                        request = *inner;
+                    }
+                    _ => break,
+                }
+            }
+
+            if let ControlRequest::SubscribeV2 { ref cursor, target } = request {
+                if let Some(response) = self.auth_error_for_request(client_key, &request) {
+                    responses.push((client_key, response));
+                    continue;
+                }
+                if cursor.is_none() && target.is_some() {
+                    if let Err(response) = resolve_control_target(&self.runtime.manager, target) {
                         responses.push((client_key, response));
                         continue;
                     }
-                    *request
                 }
-                other => other,
-            };
+                let snapshot = if cursor.is_none() {
+                    control_pane_snapshot(&self.runtime.manager, target)
+                } else {
+                    Vec::new()
+                };
+                if let Some(server) = self.control_server.as_mut() {
+                    server.start_subscription_v2(client_key, target, cursor.clone(), snapshot);
+                }
+                continue;
+            }
+
+            if matches!(request, ControlRequest::InvokeAction { .. }) {
+                if let Some(response) = self.relay_semantic_action(client_key, &request) {
+                    responses.push((client_key, response));
+                }
+                continue;
+            }
+
+            if let ControlRequest::WaitJob { job, timeout_ms } = request {
+                if let Some(response) = self.auth_error_for_request(client_key, &request) {
+                    responses.push((client_key, response));
+                    continue;
+                }
+                let response = job_id(job).and_then(|id| {
+                    if timeout_ms == 0 || timeout_ms > 86_400_000 {
+                        return Err(ControlResponse::Error {
+                            code: 4,
+                            message: "Job timeout must be between 1 and 86400000 ms".into(),
+                        });
+                    }
+                    let response = process_job_response(&self.runtime.manager, id);
+                    if job_is_running(&response) {
+                        self.pending_control_waits.push(PendingControlWait::new(
+                            client_key,
+                            id,
+                            Condition::ProcessJob,
+                            Duration::from_millis(timeout_ms),
+                            Instant::now(),
+                        ));
+                        Ok(None)
+                    } else {
+                        Ok(Some(response))
+                    }
+                });
+                match response {
+                    Ok(Some(response)) | Err(response) => responses.push((client_key, response)),
+                    Ok(None) => {}
+                }
+                continue;
+            }
+
+            if matches!(request, ControlRequest::RunCommandAndWait { .. }) {
+                if let Some(response) = self.defer_shell_command(client_key, &request) {
+                    responses.push((client_key, response));
+                }
+                continue;
+            }
 
             if let ControlRequest::Subscribe { target } = request {
                 match self.subscription_target(client_key, &request, target) {
@@ -92,6 +187,17 @@ impl App {
         }
     }
 
+    fn owner_error(
+        &self,
+        owner: &ultty_protocol::control::OwnerRef,
+    ) -> Option<ultty_protocol::control::ControlResponse> {
+        let current = self.control_server.as_ref().map(|server| server.owner());
+        (current != Some(owner)).then(|| ultty_protocol::control::ControlResponse::Error {
+            code: 409,
+            message: "Control owner changed; rediscover explicitly before retrying".into(),
+        })
+    }
+
     /// Check a `subscribe` request: it needs the token, and a `target` must
     /// name an open pane. Returns the pane filter to subscribe with.
     fn subscription_target(
@@ -104,7 +210,7 @@ impl App {
             return Err(response);
         }
         if target.is_some() {
-            resolve_control_target(&self.terminal_manager, target)?;
+            resolve_control_target(&self.runtime.manager, target)?;
         }
         Ok(target)
     }
@@ -116,6 +222,11 @@ impl App {
             .iter()
             .map(PendingControlWait::deadline)
             .chain(self.pending_override_pushes.iter().map(|push| push.expires))
+            .chain(
+                self.pending_semantic_actions
+                    .iter()
+                    .map(|pending| pending.expires),
+            )
             .chain(self.pending_resizes.iter().map(PendingResize::deadline))
             .min()
     }
@@ -231,7 +342,7 @@ impl App {
                 });
             }
         }
-        let pane = match resolve_control_target(&self.terminal_manager, target) {
+        let pane = match resolve_control_target(&self.runtime.manager, target) {
             Ok(pane) => pane,
             Err(response) => return Some(response),
         };
@@ -242,7 +353,8 @@ impl App {
         let request_id = self.next_override_request;
         self.next_override_request = self.next_override_request.wrapping_add(1);
         let sent = self
-            .protocol_server
+            .runtime
+            .protocol
             .as_mut()
             .map(|server| server.send_set_override(session_key, request_id, pushed))
             .unwrap_or_else(|| Err(io::Error::other("no protocol server")));
@@ -264,6 +376,164 @@ impl App {
         None
     }
 
+    fn relay_semantic_action(
+        &mut self,
+        client_key: usize,
+        request: &ultty_protocol::control::ControlRequest,
+    ) -> Option<ultty_protocol::control::ControlResponse> {
+        if let Some(response) = self.auth_error_for_request(client_key, request) {
+            return Some(response);
+        }
+        let ultty_protocol::control::ControlRequest::InvokeAction {
+            target,
+            session,
+            expected_generation,
+            region,
+            widget_id,
+            action,
+        } = request
+        else {
+            return None;
+        };
+        self.submit_semantic_action(
+            Some(client_key),
+            SemanticActionTarget {
+                pane: *target,
+                session: *session,
+                generation: *expected_generation,
+                region: *region,
+                widget_id: widget_id.clone(),
+                action: *action,
+            },
+        )
+        .err()
+    }
+
+    /// Route an action pinned to the accessibility tree that produced it.
+    /// Application replies follow the same correlation path as control calls.
+    pub(super) fn dispatch_accessibility_action(
+        &mut self,
+        pane: u64,
+        session: u64,
+        generation: u64,
+        region: u32,
+        widget_id: String,
+        action: ultty_protocol::SemanticActionKind,
+    ) {
+        if let Err(response) = self.submit_semantic_action(
+            None,
+            SemanticActionTarget {
+                pane,
+                session,
+                generation,
+                region,
+                widget_id,
+                action,
+            },
+        ) {
+            tracing::warn!(?response, "Accessibility action dispatch failed");
+        }
+    }
+
+    fn submit_semantic_action(
+        &mut self,
+        client_key: Option<usize>,
+        target: SemanticActionTarget,
+    ) -> Result<(), ultty_protocol::control::ControlResponse> {
+        use ultty_protocol::control::ControlResponse;
+        if !ultty_protocol::valid_action_widget_id(&target.widget_id) {
+            return Err(ControlResponse::Error {
+                code: 4,
+                message: "Invalid semantic widget identity".into(),
+            });
+        }
+        if self.pending_semantic_actions.len() >= MAX_PENDING_CONTROL_ACTIONS {
+            return Err(ControlResponse::Error {
+                code: INPUT_QUEUE_FULL,
+                message: "Semantic action acknowledgement capacity is full".into(),
+            });
+        }
+        let pane = resolve_control_target(&self.runtime.manager, Some(target.pane))?;
+        let Some(server) = self.runtime.protocol.as_mut() else {
+            return Err(ControlResponse::Error {
+                code: NO_NATIVE_APP,
+                message: "No native protocol server".into(),
+            });
+        };
+        let request_id = server
+            .request_action(
+                target.session,
+                pane,
+                target.generation,
+                ultty_protocol::RegionId(target.region),
+                &target.widget_id,
+                target.action,
+            )
+            .map_err(|error| ControlResponse::Error {
+                code: if error.kind() == io::ErrorKind::WouldBlock {
+                    INPUT_QUEUE_FULL
+                } else {
+                    ACTION_REJECTED
+                },
+                message: format!(
+                    "Semantic action dispatch failed: {error}; reinspect before retrying"
+                ),
+            })?;
+        self.pending_semantic_actions.push(PendingSemanticAction {
+            client_key,
+            session_id: target.session,
+            request_id,
+            expires: Instant::now() + ACTION_REPLY_TIMEOUT,
+        });
+        Ok(())
+    }
+
+    /// Finish actions only after their exact application acknowledgement,
+    /// disconnect, or deadline. Cancelling bookkeeping cannot undo app work.
+    pub(super) fn complete_pending_semantic_actions(&mut self) {
+        if self.pending_semantic_actions.is_empty() {
+            return;
+        }
+        let results = self
+            .runtime
+            .protocol
+            .as_mut()
+            .map(|server| server.take_action_results())
+            .unwrap_or_default();
+        let now = Instant::now();
+        let pending = std::mem::take(&mut self.pending_semantic_actions);
+        let mut responses = Vec::new();
+        for action in pending {
+            let connected = self
+                .runtime
+                .protocol
+                .as_ref()
+                .is_some_and(|server| server.has_session_id(action.session_id));
+            let Some(response) = action.response(&results, connected, now) else {
+                self.pending_semantic_actions.push(action);
+                continue;
+            };
+            if let Some(server) = self.runtime.protocol.as_mut() {
+                server.cancel_action(action.session_id, action.request_id);
+            }
+            if let Some(client_key) = action.client_key {
+                responses.push((client_key, response));
+            } else {
+                tracing::debug!(
+                    session = action.session_id,
+                    request_id = action.request_id,
+                    ?response,
+                    "Accessibility action completed"
+                );
+            }
+        }
+        if let Some(server) = self.control_server.as_mut() {
+            for (key, response) in responses {
+                server.send_response(key, &response);
+            }
+        }
+    }
+
     /// The session an override for `pane` goes to: the native session in
     /// the pane's tab whose process is in the pane's foreground process
     /// group, as key input is routed. Until sessions are bound to panes
@@ -278,8 +548,8 @@ impl App {
             code: NO_NATIVE_APP,
             message,
         };
-        let tab = self.terminal_manager.terminal(pane).map(|t| t.tab_id);
-        let server = self.protocol_server.as_ref().ok_or_else(|| {
+        let tab = self.runtime.manager.terminal(pane).map(|t| t.tab_id);
+        let server = self.runtime.protocol.as_ref().ok_or_else(|| {
             no_app("This Ultty is running without its native protocol server".to_string())
         })?;
         let in_tab: Vec<(usize, &ultty::protocol::NativeSession)> = server
@@ -318,7 +588,7 @@ impl App {
         if self.pending_override_pushes.is_empty() {
             return;
         }
-        let Some(server) = self.protocol_server.as_mut() else {
+        let Some(server) = self.runtime.protocol.as_mut() else {
             return;
         };
         let results = server.take_override_results();
@@ -384,11 +654,20 @@ impl App {
             if wait.pane() != pane || !wait.observe(event, now) {
                 return true;
             }
-            if let Some(event) = super::control_events::control_event(pane, event) {
-                answered.push((
-                    wait.client_key(),
-                    ControlResponse::Data(ControlData::WaitEvent { event }),
-                ));
+            let response = match event {
+                ultty::event_loop::TerminalEvent::ShellCommandFinished {
+                    sequence,
+                    exit_code,
+                } => Some(ControlResponse::Data(ControlData::ShellCommandFinished {
+                    pane: pane.raw() as u64,
+                    sequence: *sequence,
+                    exit_code: *exit_code,
+                })),
+                event => super::control_events::control_event(pane, event)
+                    .map(|event| ControlResponse::Data(ControlData::WaitEvent { event })),
+            };
+            if let Some(response) = response {
+                answered.push((wait.client_key(), response));
             }
             false
         });
@@ -452,7 +731,7 @@ impl App {
             return Some(response);
         }
 
-        let pane = match resolve_control_target(&self.terminal_manager, *target) {
+        let pane = match resolve_control_target(&self.runtime.manager, *target) {
             Ok(pane) => pane,
             Err(response) => return Some(response),
         };
@@ -493,13 +772,78 @@ impl App {
         None
     }
 
+    fn defer_shell_command(
+        &mut self,
+        client_key: usize,
+        request: &ultty_protocol::control::ControlRequest,
+    ) -> Option<ultty_protocol::control::ControlResponse> {
+        use ultty_protocol::control::{ControlRequest, ControlResponse};
+
+        let ControlRequest::RunCommandAndWait {
+            command,
+            timeout_ms,
+            target,
+        } = request
+        else {
+            return Some(ControlResponse::Error {
+                code: 4,
+                message: "Expected a shell submission".to_string(),
+            });
+        };
+        if let Some(response) = self.auth_error_for_request(client_key, request) {
+            return Some(response);
+        }
+        if *timeout_ms == 0 || *timeout_ms > 86_400_000 {
+            return Some(ControlResponse::Error {
+                code: 4,
+                message: "Shell completion timeout must be between 1 and 86400000 ms".to_string(),
+            });
+        }
+        let pane = match resolve_control_target(&self.runtime.manager, *target) {
+            Ok(pane) => pane,
+            Err(response) => return Some(response),
+        };
+        let sequence = match submit_control_shell_command(&mut self.runtime.manager, pane, command)
+        {
+            Ok(sequence) => sequence,
+            Err(response) => return Some(response),
+        };
+        self.pending_control_waits.push(PendingControlWait::new(
+            client_key,
+            pane,
+            Condition::ShellCommand { sequence },
+            Duration::from_millis(*timeout_ms),
+            Instant::now(),
+        ));
+        None
+    }
+
     fn pending_wait_response(
         &self,
         wait: &PendingControlWait,
     ) -> Option<ultty_protocol::control::ControlResponse> {
         use ultty_protocol::control::{ControlData, ControlResponse};
 
-        if self.terminal_manager.terminal(wait.pane()).is_none() {
+        if wait.is_process_job() {
+            let response = process_job_response(&self.runtime.manager, wait.pane());
+            return if !job_is_running(&response) {
+                Some(response)
+            } else if wait.is_expired(Instant::now()) {
+                Some(ControlResponse::Data(ControlData::WaitTimeout))
+            } else {
+                None
+            };
+        }
+
+        if let Some(sequence) = wait.command_sequence() {
+            if let Some(terminal) = self.runtime.manager.terminal(wait.pane()) {
+                if let Some(outcome) = terminal.event_loop.shell_command_result(sequence) {
+                    return Some(shell_command_response(wait.pane(), sequence, outcome));
+                }
+            }
+        }
+
+        if self.runtime.manager.terminal(wait.pane()).is_none() {
             return Some(ControlResponse::Error {
                 code: PANE_NOT_FOUND,
                 message: format!("Pane {} closed while waiting", wait.pane().raw()),
@@ -536,7 +880,7 @@ impl App {
         request: ultty_protocol::control::ControlRequest,
     ) -> ultty_protocol::control::ControlResponse {
         use ultty_protocol::control::{
-            ControlData, ControlRequest, ControlResponse, SearchMatch, TabInfo, VersionInfo,
+            ControlData, ControlRequest, ControlResponse, TabInfo, VersionInfo,
         };
 
         if let Some(response) = self.auth_error_for_request(client_key, &request) {
@@ -545,6 +889,30 @@ impl App {
 
         match request {
             ControlRequest::Ping => ControlResponse::Data(ControlData::Pong),
+            ControlRequest::JobStatus { job } => match job_id(job) {
+                Ok(id) => process_job_response(&self.runtime.manager, id),
+                Err(response) => response,
+            },
+            ControlRequest::WaitJob { .. } | ControlRequest::InvokeAction { .. } => {
+                ControlResponse::Error {
+                    code: 5,
+                    message:
+                        "Deferred jobs and semantic actions cannot be used inside batch requests"
+                            .into(),
+                }
+            }
+            ControlRequest::Describe => self
+                .control_server
+                .as_ref()
+                .map(|server| server.description())
+                .unwrap_or_else(|| ControlResponse::Error {
+                    code: 1,
+                    message: "Control owner unavailable".into(),
+                }),
+            ControlRequest::WithOwner { owner, request } => match self.owner_error(&owner) {
+                Some(response) => response,
+                None => self.process_control_request(client_key, *request),
+            },
 
             ControlRequest::Version => ControlResponse::Data(ControlData::Version(VersionInfo {
                 version: env!("CARGO_PKG_VERSION").to_string(),
@@ -553,13 +921,15 @@ impl App {
             })),
 
             ControlRequest::GetInfo => {
-                if let Some(terminal) = self.terminal_manager.focused_terminal() {
+                if let Some(terminal) = self.runtime.manager.focused_terminal() {
                     let active_idx = self
-                        .terminal_manager
+                        .runtime
+                        .manager
                         .tabs()
                         .iter()
                         .position(|t| {
-                            self.terminal_manager
+                            self.runtime
+                                .manager
                                 .active_tab()
                                 .is_some_and(|a| a.id == t.id)
                         })
@@ -567,7 +937,7 @@ impl App {
                     ControlResponse::Data(ControlData::Info(terminal_info(
                         terminal,
                         active_idx,
-                        self.terminal_manager.tab_count(),
+                        self.runtime.manager.tab_count(),
                     )))
                 } else {
                     ControlResponse::Error {
@@ -578,22 +948,25 @@ impl App {
             }
 
             ControlRequest::ListTabs => {
-                let active_tab_id = self.terminal_manager.active_tab().map(|t| t.id);
+                let active_tab_id = self.runtime.manager.active_tab().map(|t| t.id);
                 let tabs: Vec<TabInfo> = self
-                    .terminal_manager
+                    .runtime
+                    .manager
                     .tabs()
                     .iter()
                     .enumerate()
                     .map(|(i, tab)| TabInfo {
                         index: i,
-                        title: self.terminal_manager.tab_display_title(tab.id),
+                        title: self.runtime.manager.tab_display_title(tab.id),
                         active: Some(tab.id) == active_tab_id,
                         pid: self
-                            .terminal_manager
+                            .runtime
+                            .manager
                             .terminal(tab.focused_terminal)
                             .map(|terminal| terminal.event_loop.child_pid()),
                         cwd: self
-                            .terminal_manager
+                            .runtime
+                            .manager
                             .terminal(tab.focused_terminal)
                             .and_then(terminal_working_directory),
                     })
@@ -602,19 +975,43 @@ impl App {
             }
 
             ControlRequest::ListPanes => ControlResponse::Data(ControlData::Panes {
-                panes: pane_infos(&self.terminal_manager),
+                panes: pane_infos(&self.runtime.manager),
             }),
+
+            ControlRequest::WorkspaceList => match ultty::session::SessionData::workspace_names() {
+                Ok(names) => ControlResponse::Data(ControlData::Workspaces { names }),
+                Err(error) => ControlResponse::Error {
+                    code: 2,
+                    message: format!("Cannot list workspaces: {error}"),
+                },
+            },
+            ControlRequest::WorkspaceSave { name } => {
+                match self.runtime.manager.to_session_data().save_named(&name) {
+                    Ok(()) => ControlResponse::Ok,
+                    Err(error) => ControlResponse::Error {
+                        code: 2,
+                        message: format!("Cannot save workspace: {error}"),
+                    },
+                }
+            }
+
+            ControlRequest::ProgramStatus { target } => {
+                match resolve_control_target(&self.runtime.manager, target) {
+                    Ok(pane) => program_status_response(&self.runtime.manager, pane),
+                    Err(response) => response,
+                }
+            }
 
             ControlRequest::GetText {
                 include_scrollback,
                 scrollback_lines,
                 target,
             } => {
-                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                let pane = match resolve_control_target(&self.runtime.manager, target) {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
-                if let Some(terminal) = self.terminal_manager.terminal(pane) {
+                if let Some(terminal) = self.runtime.manager.terminal(pane) {
                     let term = terminal.event_loop.terminal();
                     let history = if include_scrollback {
                         scrollback_lines.unwrap_or(usize::MAX)
@@ -633,11 +1030,11 @@ impl App {
             }
 
             ControlRequest::LastCommand { tail_lines, target } => {
-                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                let pane = match resolve_control_target(&self.runtime.manager, target) {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
-                let last = self.terminal_manager.terminal(pane).and_then(|terminal| {
+                let last = self.runtime.manager.terminal(pane).and_then(|terminal| {
                     let tail = tail_lines.map(|lines| lines.min(usize::MAX as u64) as usize);
                     terminal.event_loop.terminal().last_command(tail)
                 });
@@ -661,16 +1058,17 @@ impl App {
             }
 
             ControlRequest::Regions { target } => {
-                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                let pane = match resolve_control_target(&self.runtime.manager, target) {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
                 // The sessions drawn in the pane, plus its tab's sessions
                 // that have no pane yet (a background job in a split): still
                 // worth inspecting, drawn nowhere (ADR 0025 §5).
-                let tab = self.terminal_manager.terminal(pane).map(|t| t.tab_id);
+                let tab = self.runtime.manager.terminal(pane).map(|t| t.tab_id);
                 let scenes = self
-                    .protocol_server
+                    .runtime
+                    .protocol
                     .as_ref()
                     .map(|server| {
                         server
@@ -687,42 +1085,36 @@ impl App {
             }
 
             ControlRequest::GetSelection { target } => {
-                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                let pane = match resolve_control_target(&self.runtime.manager, target) {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
                 let text = self
-                    .terminal_manager
+                    .runtime
+                    .manager
                     .terminal(pane)
                     .and_then(|terminal| terminal.event_loop.terminal().selected_text());
                 ControlResponse::Data(ControlData::Selection { text })
             }
 
             ControlRequest::SendText { text, target } => {
-                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                let pane = match resolve_control_target(&self.runtime.manager, target) {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
                 // The pane's native app takes it whether or not its tab is
                 // shown; else it is typed into the pane's PTY.
                 let foreground = self.pane_foreground_pgrp(pane);
-                let tab = self.terminal_manager.terminal(pane).map(|t| t.tab_id);
-                if let (Some(server), Some(tab)) = (self.protocol_server.as_mut(), tab) {
+                let tab = self.runtime.manager.terminal(pane).map(|t| t.tab_id);
+                if let (Some(server), Some(tab)) = (self.runtime.protocol.as_mut(), tab) {
                     if server.has_pane_key_subscribers(tab, pane, foreground) {
-                        server.send_text_input_to_pane(tab, pane, text, foreground);
-                        return ControlResponse::Ok;
+                        return input_acceptance(
+                            server.send_text_input_to_pane(tab, pane, text, foreground),
+                        );
                     }
                 }
 
-                if let Some(terminal) = self.terminal_manager.terminal_mut(pane) {
-                    let _ = terminal.event_loop.send_input(text.as_bytes());
-                    ControlResponse::Ok
-                } else {
-                    ControlResponse::Error {
-                        code: 1,
-                        message: "No active terminal".to_string(),
-                    }
-                }
+                send_pty_input(&mut self.runtime.manager, pane, text.as_bytes())
             }
 
             ControlRequest::SendKey {
@@ -730,37 +1122,29 @@ impl App {
                 modifiers,
                 target,
             } => {
-                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                let pane = match resolve_control_target(&self.runtime.manager, target) {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
                 let foreground = self.pane_foreground_pgrp(pane);
-                let tab = self.terminal_manager.terminal(pane).map(|t| t.tab_id);
-                if let (Some(server), Some(tab)) = (self.protocol_server.as_mut(), tab) {
+                let tab = self.runtime.manager.terminal(pane).map(|t| t.tab_id);
+                if let (Some(server), Some(tab)) = (self.runtime.protocol.as_mut(), tab) {
                     if server.has_pane_key_subscribers(tab, pane, foreground) {
-                        server.send_key_to_pane(tab, pane, key, modifiers, foreground);
-                        return ControlResponse::Ok;
+                        return input_acceptance(
+                            server.send_key_to_pane(tab, pane, key, modifiers, foreground),
+                        );
                     }
                 }
 
-                self.forward_key_to_pty(pane, &key, modifiers);
-                ControlResponse::Ok
+                self.forward_key_to_pty(pane, &key, modifiers)
             }
 
             ControlRequest::SendRaw { data, target } => {
-                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                let pane = match resolve_control_target(&self.runtime.manager, target) {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
-                if let Some(terminal) = self.terminal_manager.terminal_mut(pane) {
-                    let _ = terminal.event_loop.send_input(&data);
-                    ControlResponse::Ok
-                } else {
-                    ControlResponse::Error {
-                        code: 1,
-                        message: "No active terminal".to_string(),
-                    }
-                }
+                send_pty_input(&mut self.runtime.manager, pane, &data)
             }
 
             ControlRequest::NewTab {
@@ -769,6 +1153,9 @@ impl App {
                 args,
                 working_dir,
             } => {
+                if command.is_none() && (!args.is_empty() || working_dir.is_some()) {
+                    return invalid_spawn_options();
+                }
                 let result = if let Some(cmd) = command {
                     self.create_tab_with_command(
                         &cmd,
@@ -779,7 +1166,7 @@ impl App {
                 } else {
                     let result = self.create_tab();
                     if let (Ok(tab_id), Some(title)) = (result.as_ref(), title.as_deref()) {
-                        self.terminal_manager.set_tab_title(*tab_id, title);
+                        self.runtime.manager.set_tab_title(*tab_id, title);
                     }
                     result
                 };
@@ -789,11 +1176,12 @@ impl App {
                         self.clear_tab_width_freeze();
                         self.update_tab_bar();
                         self.needs_redraw = true;
-                        let tabs = self.terminal_manager.tabs();
+                        let tabs = self.runtime.manager.tabs();
                         match tabs.iter().position(|tab| tab.id == tab_id) {
                             Some(tab_index) => ControlResponse::Data(ControlData::TabOpened {
                                 tab_index,
                                 pane: tabs[tab_index].focused_terminal.raw() as u64,
+                                warning: None,
                             }),
                             // The command exited at once and the tab closed.
                             None => ControlResponse::Error {
@@ -816,7 +1204,10 @@ impl App {
                 working_dir,
                 target,
             } => {
-                let target = match resolve_control_target(&self.terminal_manager, target) {
+                if command.is_none() && (!args.is_empty() || working_dir.is_some()) {
+                    return invalid_spawn_options();
+                }
+                let target = match resolve_control_target(&self.runtime.manager, target) {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
@@ -825,20 +1216,21 @@ impl App {
                     ultty_protocol::control::SplitDirection::Down => SplitDirection::Vertical,
                 };
                 let result = match command {
-                    Some(command) => self.terminal_manager.split_pane_with_command(
+                    Some(command) => self.runtime.manager.split_pane_with_command(
                         target,
                         direction,
                         &command,
                         &args,
                         working_dir.as_deref(),
                     ),
-                    None => self.terminal_manager.split_pane(target, direction),
+                    None => self.runtime.manager.split_pane(target, direction),
                 };
                 match result {
                     Ok(Some(pane)) => {
                         self.needs_redraw = true;
                         let tab_index = self
-                            .terminal_manager
+                            .runtime
+                            .manager
                             .tabs()
                             .iter()
                             .position(|tab| tab.terminals.contains(&pane));
@@ -846,6 +1238,7 @@ impl App {
                             Some(tab_index) => ControlResponse::Data(ControlData::PaneOpened {
                                 tab_index,
                                 pane: pane.raw() as u64,
+                                warning: None,
                             }),
                             // The command exited at once and the pane closed.
                             None => ControlResponse::Error {
@@ -866,8 +1259,8 @@ impl App {
             }
 
             ControlRequest::SwitchTab { index } => {
-                if index < self.terminal_manager.tab_count() {
-                    self.terminal_manager.switch_to_tab(index);
+                if index < self.runtime.manager.tab_count() {
+                    self.runtime.manager.switch_to_tab(index);
                     self.update_tab_bar();
                     self.needs_redraw = true;
                     ControlResponse::Ok
@@ -880,20 +1273,21 @@ impl App {
             }
 
             ControlRequest::CloseTab { index } => {
-                let tabs = self.terminal_manager.tabs();
+                let tabs = self.runtime.manager.tabs();
                 let active_idx = tabs
                     .iter()
                     .position(|t| {
-                        self.terminal_manager
+                        self.runtime
+                            .manager
                             .active_tab()
                             .is_some_and(|a| a.id == t.id)
                     })
                     .unwrap_or(0);
                 let idx = index.unwrap_or(active_idx);
-                if self.terminal_manager.tab_count() > 1 && idx < tabs.len() {
+                if self.runtime.manager.tab_count() > 1 && idx < tabs.len() {
                     let tab_id = tabs[idx].id;
                     self.freeze_tab_width_after_close();
-                    self.terminal_manager.close_tab(tab_id);
+                    self.runtime.manager.close_tab(tab_id);
                     self.update_tab_bar();
                     self.needs_redraw = true;
                     ControlResponse::Ok
@@ -910,22 +1304,70 @@ impl App {
                 args,
                 target,
             } => {
-                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                let pane = match resolve_control_target(&self.runtime.manager, target) {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
-                if let Some(terminal) = self.terminal_manager.terminal_mut(pane) {
-                    let cmd_line = if args.is_empty() {
-                        format!("{}\n", command)
-                    } else {
-                        format!("{} {}\n", command, args.join(" "))
-                    };
-                    let _ = terminal.event_loop.send_input(cmd_line.as_bytes());
+                let cmd_line = build_command_line(&command, &args);
+                send_pty_input(&mut self.runtime.manager, pane, cmd_line.as_bytes())
+            }
+
+            ControlRequest::RunCommandAndWait { .. } => ControlResponse::Error {
+                code: 4,
+                message: "run-and-wait cannot be used inside a batch".to_string(),
+            },
+
+            ControlRequest::FocusPane { target } => {
+                let pane = match resolve_control_target(&self.runtime.manager, Some(target)) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                if self.runtime.manager.focus_pane_by_id(pane) {
+                    self.sync_protocol_tabs();
+                    self.update_tab_bar();
+                    self.needs_redraw = true;
                     ControlResponse::Ok
                 } else {
                     ControlResponse::Error {
-                        code: 1,
-                        message: "No active terminal".to_string(),
+                        code: PANE_NOT_FOUND,
+                        message: "The target pane is gone".to_string(),
+                    }
+                }
+            }
+            ControlRequest::ZoomPane { target, zoomed } => {
+                let pane = match resolve_control_target(&self.runtime.manager, Some(target)) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                if self.runtime.manager.set_pane_zoom(pane, zoomed) {
+                    self.sync_protocol_tabs();
+                    self.update_tab_bar();
+                    self.needs_redraw = true;
+                    ControlResponse::Ok
+                } else {
+                    ControlResponse::Error {
+                        code: 4,
+                        message: "Cannot zoom the target pane".to_string(),
+                    }
+                }
+            }
+            ControlRequest::SwapPanes { first, second } => {
+                let first = match resolve_control_target(&self.runtime.manager, Some(first)) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                let second = match resolve_control_target(&self.runtime.manager, Some(second)) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                if self.runtime.manager.swap_panes(first, second) {
+                    self.update_tab_bar();
+                    self.needs_redraw = true;
+                    ControlResponse::Ok
+                } else {
+                    ControlResponse::Error {
+                        code: 4,
+                        message: "Panes must belong to the same tab to swap".to_string(),
                     }
                 }
             }
@@ -966,13 +1408,13 @@ impl App {
             }
 
             ControlRequest::SetPaneStatus { status, target } => {
-                let pane = match resolve_control_target(&self.terminal_manager, target) {
+                let pane = match resolve_control_target(&self.runtime.manager, target) {
                     Ok(pane) => pane,
                     Err(response) => return response,
                 };
                 let status = status.map(|status| status.sanitized());
                 let wants_user = status.as_ref().is_some_and(|status| status.attention);
-                if let Some(terminal) = self.terminal_manager.terminal_mut(pane) {
+                if let Some(terminal) = self.runtime.manager.terminal_mut(pane) {
                     terminal.status = status;
                 }
                 if wants_user && !self.window.has_focus() {
@@ -1000,19 +1442,26 @@ impl App {
                 // Multi-pane tabs capture every pane as the window shows
                 // them. This must run before the focused terminal is locked
                 // below: the capture locks each pane itself.
-                let result = if self.terminal_manager.pane_count() > 1 {
+                let result = if self.runtime.manager.pane_count() > 1 {
                     Some(self.capture_panes_screenshot(&path))
-                } else if let Some(terminal) = self.terminal_manager.focused_terminal() {
+                } else if let Some(terminal) = self.runtime.manager.focused_terminal() {
                     let term = terminal.event_loop.terminal();
                     let overlay_state = self.build_screenshot_overlay_state();
                     let overlay = overlay_state.as_overlay();
 
                     // The pane's sessions, as the window draws them: their
                     // surfaces are anchored in this terminal.
-                    let native_sessions: Vec<&ultty::protocol::NativeSession> = self
-                        .protocol_server
+                    let native_sessions: Vec<&dyn ultty::scene::view::NativeRenderSource> = self
+                        .runtime
+                        .protocol
                         .as_ref()
-                        .map(|s| s.pane_or_unbound_sessions(terminal.id).collect())
+                        .map(|s| {
+                            s.pane_or_unbound_sessions(terminal.id)
+                                .map(|session| {
+                                    session as &dyn ultty::scene::view::NativeRenderSource
+                                })
+                                .collect()
+                        })
                         .unwrap_or_default();
 
                     if let Some(parent) = path.parent() {
@@ -1044,121 +1493,25 @@ impl App {
 
             ControlRequest::Search {
                 pattern,
-                regex: use_regex,
+                regex,
                 case_sensitive,
                 include_scrollback,
                 target,
-            } => {
-                let pane = match resolve_control_target(&self.terminal_manager, target) {
-                    Ok(pane) => pane,
-                    Err(response) => return response,
-                };
-                if let Some(terminal) = self.terminal_manager.terminal(pane) {
-                    let compiled_regex = if use_regex {
-                        let regex_pattern = if case_sensitive {
-                            pattern.clone()
-                        } else {
-                            format!("(?i){}", pattern)
-                        };
-                        match regex::Regex::new(&regex_pattern) {
-                            Ok(re) => Some(re),
-                            Err(e) => {
-                                return ControlResponse::Error {
-                                    code: 4,
-                                    message: format!("Invalid regex: {}", e),
-                                };
-                            }
-                        }
-                    } else {
-                        None
-                    };
+            } => search_response(
+                &self.runtime.manager,
+                pattern,
+                regex,
+                case_sensitive,
+                include_scrollback,
+                target,
+            ),
 
-                    let term = terminal.event_loop.terminal();
-                    let buffer = term.buffer();
-                    let mut matches = Vec::new();
-
-                    let line_count = if include_scrollback {
-                        buffer.total_lines()
-                    } else {
-                        term.dimensions().rows as usize
-                    };
-
-                    for row in 0..line_count {
-                        let row_opt = if include_scrollback {
-                            buffer.row_at(row)
-                        } else {
-                            buffer.visible_row(row as u16)
-                        };
-
-                        if let Some(grid_row) = row_opt {
-                            let text = grid_row.text_trimmed();
-
-                            if let Some(ref re) = compiled_regex {
-                                for m in re.find_iter(&text) {
-                                    let byte_start = m.start();
-                                    let byte_end = m.end();
-                                    let match_text = m.as_str().to_string();
-                                    // Find char-safe context boundaries
-                                    let ctx_start = text[..byte_start]
-                                        .char_indices()
-                                        .rev()
-                                        .nth(19)
-                                        .map(|(i, _)| i)
-                                        .unwrap_or(0);
-                                    let ctx_end = text[byte_end..]
-                                        .char_indices()
-                                        .nth(20)
-                                        .map(|(i, _)| byte_end + i)
-                                        .unwrap_or(text.len());
-                                    let col = text[..byte_start].chars().count();
-                                    matches.push(SearchMatch {
-                                        line: row,
-                                        col,
-                                        text: match_text,
-                                        context_before: text[ctx_start..byte_start].to_string(),
-                                        context_after: text[byte_end..ctx_end].to_string(),
-                                    });
-                                }
-                            } else {
-                                let spans: Vec<(usize, usize, usize)> = if case_sensitive {
-                                    text.match_indices(pattern.as_str())
-                                        .map(|(start, matched)| {
-                                            (
-                                                text[..start].chars().count(),
-                                                start,
-                                                start + matched.len(),
-                                            )
-                                        })
-                                        .collect()
-                                } else {
-                                    let pattern_lower = pattern.to_lowercase();
-                                    find_ignore_case(&text, &pattern_lower)
-                                        .map(|m| (m.char_col, m.byte_start, m.byte_end))
-                                        .collect()
-                                };
-
-                                for (col, byte_start, byte_end) in spans {
-                                    matches.push(plain_search_match(
-                                        &text, row, col, byte_start, byte_end,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-
-                    ControlResponse::Data(ControlData::SearchResults { matches })
-                } else {
-                    ControlResponse::Error {
-                        code: 1,
-                        message: "No active terminal".to_string(),
-                    }
+            ControlRequest::Subscribe { .. } | ControlRequest::SubscribeV2 { .. } => {
+                ControlResponse::Error {
+                    code: 5,
+                    message: "subscribe cannot be used inside batch requests".to_string(),
                 }
             }
-
-            ControlRequest::Subscribe { .. } => ControlResponse::Error {
-                code: 5,
-                message: "subscribe cannot be used inside batch requests".to_string(),
-            },
 
             ControlRequest::WaitFor { .. } => ControlResponse::Error {
                 code: 5,
@@ -1242,7 +1595,8 @@ impl App {
 
     /// Process group in the foreground of `pane`'s PTY.
     fn pane_foreground_pgrp(&self, pane: TerminalId) -> Option<i32> {
-        self.terminal_manager
+        self.runtime
+            .manager
             .terminal(pane)
             .and_then(|terminal| terminal.event_loop.foreground_pgrp())
     }
@@ -1252,9 +1606,12 @@ impl App {
         pane: TerminalId,
         key: &ultty_protocol::Key,
         modifiers: ultty_protocol::Modifiers,
-    ) {
-        let Some(terminal) = self.terminal_manager.terminal_mut(pane) else {
-            return;
+    ) -> ultty_protocol::control::ControlResponse {
+        let Some(terminal) = self.runtime.manager.terminal_mut(pane) else {
+            return input_acceptance(Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the target pane is gone",
+            )));
         };
 
         let ctrl = modifiers.contains(ultty_protocol::Modifiers::CTRL);
@@ -1267,9 +1624,13 @@ impl App {
 
         let bytes = key_to_bytes(key, ctrl, alt, app_cursor);
 
-        if !bytes.is_empty() {
-            let _ = terminal.event_loop.send_input(&bytes);
+        if bytes.is_empty() {
+            return ultty_protocol::control::ControlResponse::Error {
+                code: 4,
+                message: "This key has no supported PTY encoding".to_string(),
+            };
         }
+        input_acceptance(terminal.event_loop.send_input(&bytes))
     }
 
     fn auth_error_for_request(
@@ -1299,7 +1660,7 @@ impl App {
     }
 
     fn find_wait_match(&self, pane: TerminalId, matcher: &WaitMatcher) -> Option<(usize, usize)> {
-        let terminal = self.terminal_manager.terminal(pane)?;
+        let terminal = self.runtime.manager.terminal(pane)?;
         let term = terminal.event_loop.terminal();
         let buffer = term.buffer();
         let total_lines = buffer.total_lines();
@@ -1319,38 +1680,17 @@ impl App {
     }
 }
 
-/// What `ulttyctl info` reports for `terminal`.
-///
-/// The terminal lock is released before the working directory is looked up,
-/// because that lookup takes the lock again; holding it deadlocked the UI
-/// thread on every `info` request.
-fn terminal_info(
-    terminal: &ultty::terminal_manager::ManagedTerminal,
-    current_tab: usize,
-    tab_count: usize,
-) -> ultty_protocol::control::TerminalInfo {
-    let (dims, cursor) = {
-        let term = terminal.event_loop.terminal();
-        (term.grid().dimensions(), term.grid().cursor().position)
-    };
-    ultty_protocol::control::TerminalInfo {
-        cols: dims.cols,
-        rows: dims.rows,
-        cursor_col: cursor.col,
-        cursor_row: cursor.row,
-        current_tab,
-        tab_count,
-        focused: true,
-        cwd: terminal_working_directory(terminal),
-    }
-}
-
 /// Error code for a `target` that names no open pane.
 const PANE_NOT_FOUND: u16 = 6;
 /// No native app to push an override into (or one that cannot take it).
 const NO_NATIVE_APP: u16 = 9;
 /// The app refused the pushed override, or did not answer in time.
 const OVERRIDE_REJECTED: u16 = 10;
+/// The recipient has gone or closed its input.
+#[cfg(test)]
+const INPUT_UNAVAILABLE: u16 = 11;
+/// The recipient's bounded input queue cannot accept more bytes.
+const INPUT_QUEUE_FULL: u16 = 12;
 /// How long an app has to answer `SetOverride`.
 const OVERRIDE_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1360,6 +1700,62 @@ pub(super) struct PendingOverridePush {
     session_key: usize,
     request_id: u32,
     expires: Instant,
+}
+
+/// Maximum application-acknowledgement delay; expiry does not undo an action.
+const ACTION_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Total unresolved action acknowledgements, including accessibility.
+const MAX_PENDING_CONTROL_ACTIONS: usize = 128;
+/// The application refused an action, its target was stale, or its outcome is unknown.
+const ACTION_REJECTED: u16 = 15;
+
+struct SemanticActionTarget {
+    pane: u64,
+    session: u64,
+    generation: u64,
+    region: u32,
+    widget_id: String,
+    action: ultty_protocol::SemanticActionKind,
+}
+
+/// One application acknowledgement awaited by control or accessibility.
+pub(super) struct PendingSemanticAction {
+    client_key: Option<usize>,
+    session_id: u64,
+    request_id: u32,
+    expires: Instant,
+}
+
+impl PendingSemanticAction {
+    fn response(
+        &self,
+        results: &[(u64, u32, Option<String>)],
+        connected: bool,
+        now: Instant,
+    ) -> Option<ultty_protocol::control::ControlResponse> {
+        use ultty_protocol::control::{ControlData, ControlResponse};
+        if let Some((_, _, error)) = results.iter().find(|(session, request, _)| {
+            *session == self.session_id && *request == self.request_id
+        }) {
+            return Some(match error {
+                None => ControlResponse::Data(ControlData::ActionApplied {
+                    session: self.session_id,
+                    request_id: self.request_id,
+                }),
+                Some(error) => ControlResponse::Error {
+                    code: ACTION_REJECTED,
+                    message: format!("Application refused semantic action: {error}"),
+                },
+            });
+        }
+        if !connected || now >= self.expires {
+            return Some(ControlResponse::Error {
+                code: ACTION_REJECTED,
+                message: "Semantic action acknowledgement unavailable; the application may have applied it. Reinspect before retrying".into(),
+            });
+        }
+        None
+    }
 }
 
 /// Why no session can take an override for a pane.
@@ -1420,233 +1816,6 @@ fn is_override_request(request: &ultty_protocol::control::ControlRequest) -> boo
 /// Error code for `last_command` in a pane whose shell marked no command.
 const NO_COMMAND_RECORDED: u16 = 7;
 
-/// The pane a request acts on: `target` (an id from `ListPanes`), or the
-/// focused pane when it is omitted.
-fn resolve_control_target(
-    manager: &ultty::terminal_manager::TerminalManager,
-    target: Option<u64>,
-) -> Result<TerminalId, ultty_protocol::control::ControlResponse> {
-    use ultty_protocol::control::ControlResponse;
-
-    let Some(id) = target else {
-        return manager
-            .focused_terminal_id()
-            .ok_or_else(|| ControlResponse::Error {
-                code: 1,
-                message: "No active terminal".to_string(),
-            });
-    };
-    usize::try_from(id)
-        .ok()
-        .map(TerminalId::new)
-        .filter(|pane| manager.terminal(*pane).is_some())
-        .ok_or_else(|| ControlResponse::Error {
-            code: PANE_NOT_FOUND,
-            message: format!("No pane {id}; `ulttyctl panes` lists them"),
-        })
-}
-
-/// Every pane in every tab: tabs in order, each tab's panes in layout order.
-fn pane_infos(
-    manager: &ultty::terminal_manager::TerminalManager,
-) -> Vec<ultty_protocol::control::PaneInfo> {
-    let active_tab_id = manager.active_tab().map(|tab| tab.id);
-    let mut panes = Vec::new();
-    for (tab_index, tab) in manager.tabs().iter().enumerate() {
-        for &pane_id in &tab.terminals {
-            let Some(terminal) = manager.terminal(pane_id) else {
-                continue;
-            };
-            let active = pane_id == tab.focused_terminal;
-            // Hold the terminal lock only for these reads: the working
-            // directory lookup below takes it again.
-            let (title, dims) = {
-                let term = terminal.event_loop.terminal();
-                (term.title().to_string(), term.grid().dimensions())
-            };
-            panes.push(ultty_protocol::control::PaneInfo {
-                id: pane_id.raw() as u64,
-                tab_index,
-                active,
-                focused: active && Some(tab.id) == active_tab_id,
-                title,
-                foreground: terminal.event_loop.foreground_process_name(),
-                pid: Some(terminal.event_loop.child_pid()),
-                cwd: terminal_working_directory(terminal),
-                cols: dims.cols,
-                rows: dims.rows,
-                status: terminal.shown_status().cloned(),
-            });
-        }
-    }
-    panes
-}
-
-pub(super) fn terminal_working_directory(
-    terminal: &ultty::terminal_manager::ManagedTerminal,
-) -> Option<String> {
-    terminal
-        .event_loop
-        .terminal()
-        .working_directory()
-        .map(str::to_string)
-        .or_else(|| terminal.event_loop.child_working_directory())
-}
-
-/// Generate a fresh random control auth token and write it to `path`.
-///
-/// The file is created with mode 0600 (and its parent directory 0700 when
-/// it has to be created), so only the owning user can talk to the control
-/// socket. Called once per control-server start; a running instance owns
-/// the socket, so rotating the token on start never races another instance.
-pub(super) fn write_auth_token(path: &Path) -> io::Result<String> {
-    use std::io::{Read, Write};
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-
-    let mut random = [0u8; AUTH_TOKEN_BYTES];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
-    let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(parent)?;
-        }
-    }
-
-    // Replace atomically-ish: truncate an existing file rather than leaving
-    // a stale token readable while we write.
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    // `mode` only applies on creation; enforce it for pre-existing files too.
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(token.as_bytes())?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    Ok(token)
-}
-
-/// Read the expected control auth token from `path`.
-fn read_auth_token(path: &Path) -> io::Result<String> {
-    let token = std::fs::read_to_string(path)?;
-    let token = token.trim();
-    if token.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "auth token file is empty",
-        ));
-    }
-    Ok(token.to_string())
-}
-
-/// Compare a presented token with the expected one without early exit on
-/// the first differing byte.
-fn token_matches(presented: &str, expected: &str) -> bool {
-    let presented = presented.trim().as_bytes();
-    let expected = expected.as_bytes();
-    if presented.len() != expected.len() {
-        return false;
-    }
-    presented
-        .iter()
-        .zip(expected)
-        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-        == 0
-}
-
-fn control_request_requires_auth(request: &ultty_protocol::control::ControlRequest) -> bool {
-    use ultty_protocol::control::ControlRequest;
-
-    match request {
-        // Harmless liveness/version probes and the auth handshake itself.
-        ControlRequest::Ping
-        | ControlRequest::Version
-        | ControlRequest::Authenticate { .. }
-        | ControlRequest::WithToken { .. } => false,
-        // Batch members are checked individually when they run.
-        ControlRequest::Batch { .. } => false,
-        // Everything that reads screen content or drives the terminal.
-        ControlRequest::GetInfo
-        | ControlRequest::ListTabs
-        | ControlRequest::ListPanes
-        | ControlRequest::GetText { .. }
-        | ControlRequest::GetSelection { .. }
-        | ControlRequest::LastCommand { .. }
-        | ControlRequest::Regions { .. }
-        | ControlRequest::Search { .. }
-        | ControlRequest::WaitFor { .. }
-        | ControlRequest::Subscribe { .. }
-        | ControlRequest::PushOverride { .. }
-        | ControlRequest::ClearOverride { .. }
-        | ControlRequest::SendText { .. }
-        | ControlRequest::SendKey { .. }
-        | ControlRequest::SendRaw { .. }
-        | ControlRequest::NewTab { .. }
-        | ControlRequest::SplitPane { .. }
-        | ControlRequest::SwitchTab { .. }
-        | ControlRequest::CloseTab { .. }
-        | ControlRequest::RunCommand { .. }
-        | ControlRequest::FocusWindow
-        | ControlRequest::ToggleFullscreen
-        | ControlRequest::Resize { .. }
-        | ControlRequest::SetOpacity { .. }
-        | ControlRequest::SetPaneStatus { .. }
-        | ControlRequest::Screenshot { .. } => true,
-    }
-}
-
-/// The text of `buffer`: up to `history_lines` of the most recent scrollback,
-/// then the screen, one line per row. Each row has one char per column
-/// (wide-char spacers print as spaces) plus the extra codepoints of each
-/// grapheme. This ignores the viewport's scroll position.
-fn buffer_text(buffer: &ultty::grid::Buffer, history_lines: usize) -> String {
-    let history = buffer.history_len();
-    let first = history - history.min(history_lines);
-    let mut text = String::new();
-    for index in first..buffer.total_lines() {
-        if let Some(row) = buffer.row_at(index) {
-            text.push_str(&row.text());
-        }
-        text.push('\n');
-    }
-    text
-}
-
-/// Build a search match for `text[byte_start..byte_end]` with up to 20 chars
-/// of context on each side. Offsets must be char boundaries of `text`.
-fn plain_search_match(
-    text: &str,
-    line: usize,
-    col: usize,
-    byte_start: usize,
-    byte_end: usize,
-) -> ultty_protocol::control::SearchMatch {
-    let ctx_start = text[..byte_start]
-        .char_indices()
-        .rev()
-        .nth(19)
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-    let ctx_end = text[byte_end..]
-        .char_indices()
-        .nth(20)
-        .map(|(i, _)| byte_end + i)
-        .unwrap_or(text.len());
-    ultty_protocol::control::SearchMatch {
-        line,
-        col,
-        text: text[byte_start..byte_end].to_string(),
-        context_before: text[ctx_start..byte_start].to_string(),
-        context_after: text[byte_end..ctx_end].to_string(),
-    }
-}
-
 /// The reply to a resize answered at once: `result` is what
 /// `request_inner_size` returned, `current` the window's size after it.
 /// `None` means the platform resizes later, which only a top-level request
@@ -1680,107 +1849,289 @@ fn resize_control_response(
     }
 }
 
-/// Convert a protocol key (with modifier flags) to the byte sequence expected by a PTY.
-///
-/// `app_cursor` controls whether application cursor key mode (DECCKM) sequences
-/// are emitted for arrow/Home/End keys.
-fn key_to_bytes(key: &ultty_protocol::Key, ctrl: bool, alt: bool, app_cursor: bool) -> Vec<u8> {
-    match key {
-        ultty_protocol::Key::Char(c) => {
-            if ctrl && c.is_ascii_alphabetic() {
-                vec![(c.to_ascii_lowercase() as u8) - b'a' + 1]
-            } else if alt {
-                let mut v = vec![0x1b];
-                let mut buf = [0u8; 4];
-                v.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-                v
-            } else {
-                let mut buf = [0u8; 4];
-                c.encode_utf8(&mut buf).as_bytes().to_vec()
-            }
-        }
-        ultty_protocol::Key::Enter => vec![b'\r'],
-        ultty_protocol::Key::Tab => vec![b'\t'],
-        ultty_protocol::Key::Escape => vec![0x1b],
-        ultty_protocol::Key::Backspace => vec![0x7f],
-        ultty_protocol::Key::Delete => b"\x1b[3~".to_vec(),
-        ultty_protocol::Key::Insert => b"\x1b[2~".to_vec(),
-        ultty_protocol::Key::Home => {
-            if app_cursor {
-                b"\x1bOH".to_vec()
-            } else {
-                b"\x1b[H".to_vec()
-            }
-        }
-        ultty_protocol::Key::End => {
-            if app_cursor {
-                b"\x1bOF".to_vec()
-            } else {
-                b"\x1b[F".to_vec()
-            }
-        }
-        ultty_protocol::Key::PageUp => b"\x1b[5~".to_vec(),
-        ultty_protocol::Key::PageDown => b"\x1b[6~".to_vec(),
-        ultty_protocol::Key::Up => {
-            if app_cursor {
-                b"\x1bOA".to_vec()
-            } else {
-                b"\x1b[A".to_vec()
-            }
-        }
-        ultty_protocol::Key::Down => {
-            if app_cursor {
-                b"\x1bOB".to_vec()
-            } else {
-                b"\x1b[B".to_vec()
-            }
-        }
-        ultty_protocol::Key::Right => {
-            if app_cursor {
-                b"\x1bOC".to_vec()
-            } else {
-                b"\x1b[C".to_vec()
-            }
-        }
-        ultty_protocol::Key::Left => {
-            if app_cursor {
-                b"\x1bOD".to_vec()
-            } else {
-                b"\x1b[D".to_vec()
-            }
-        }
-        ultty_protocol::Key::Function(n) => match n {
-            1 => b"\x1bOP".to_vec(),
-            2 => b"\x1bOQ".to_vec(),
-            3 => b"\x1bOR".to_vec(),
-            4 => b"\x1bOS".to_vec(),
-            5 => b"\x1b[15~".to_vec(),
-            6 => b"\x1b[17~".to_vec(),
-            7 => b"\x1b[18~".to_vec(),
-            8 => b"\x1b[19~".to_vec(),
-            9 => b"\x1b[20~".to_vec(),
-            10 => b"\x1b[21~".to_vec(),
-            11 => b"\x1b[23~".to_vec(),
-            12 => b"\x1b[24~".to_vec(),
-            _ => vec![],
-        },
-    }
-}
-
-/// Format a command and its arguments into a newline-terminated string
-/// suitable for sending to a PTY (as used by RunCommand).
-#[cfg(test)]
-fn build_command_line(command: &str, args: &[String]) -> String {
-    if args.is_empty() {
-        format!("{}\n", command)
-    } else {
-        format!("{} {}\n", command, args.join(" "))
+fn invalid_spawn_options() -> ultty_protocol::control::ControlResponse {
+    ultty_protocol::control::ControlResponse::Error {
+        code: 4,
+        message: "args and working_dir require an explicit command".into(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_semantic_acknowledgement_requires_exact_session_and_request() {
+        use ultty_protocol::control::{ControlData, ControlResponse};
+        let now = Instant::now();
+        let pending = PendingSemanticAction {
+            client_key: Some(1),
+            session_id: 7,
+            request_id: 3,
+            expires: now + Duration::from_secs(5),
+        };
+        assert!(pending.response(&[], true, now).is_none());
+        assert!(pending
+            .response(&[(8, 3, None), (7, 4, None)], true, now)
+            .is_none());
+        assert_eq!(
+            pending.response(&[(7, 3, None)], true, now),
+            Some(ControlResponse::Data(ControlData::ActionApplied {
+                session: 7,
+                request_id: 3
+            }))
+        );
+        assert!(
+            matches!(pending.response(&[(7, 3, Some("stale application frame".into()))], true, now), Some(ControlResponse::Error { code: ACTION_REJECTED, message }) if message.contains("stale application frame"))
+        );
+        for (connected, instant) in [(false, now), (true, pending.expires)] {
+            assert!(
+                matches!(pending.response(&[], connected, instant), Some(ControlResponse::Error { code: ACTION_REJECTED, message }) if message.contains("may have applied"))
+            );
+        }
+        let accessibility = PendingSemanticAction {
+            client_key: None,
+            ..pending
+        };
+        assert_eq!(
+            accessibility.response(&[(7, 3, None)], true, now),
+            Some(ControlResponse::Data(ControlData::ActionApplied {
+                session: 7,
+                request_id: 3
+            }))
+        );
+    }
+
+    #[test]
+    fn test_direct_job_response_retains_exit_after_pane_removal() {
+        use ultty::terminal_manager::{no_tab_env, TerminalManager};
+        use ultty_protocol::control::{ControlData, ControlResponse, ProcessJobOutcome};
+        let mut manager = TerminalManager::with_command_tab(
+            80,
+            24,
+            "/bin/sleep",
+            &["10".into()],
+            &mut no_tab_env,
+        )
+        .unwrap();
+        let tab = manager
+            .create_tab_with_command(
+                "/bin/sh",
+                &["-c".into(), "exit 7".into()],
+                None,
+                None,
+                &mut no_tab_env,
+            )
+            .unwrap();
+        let job = manager
+            .tabs()
+            .iter()
+            .find(|candidate| candidate.id == tab)
+            .unwrap()
+            .focused_terminal;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while job_is_running(&process_job_response(&manager, job)) {
+            assert!(Instant::now() < deadline);
+            manager.process_all().unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(
+            process_job_response(&manager, job),
+            ControlResponse::Data(ControlData::ProcessJob {
+                outcome: ProcessJobOutcome::Exited { status: 7 },
+                ..
+            })
+        ));
+        manager.close_tab(tab);
+        assert!(manager.terminal(job).is_none());
+        assert!(matches!(
+            process_job_response(&manager, job),
+            ControlResponse::Data(ControlData::ProcessJob {
+                outcome: ProcessJobOutcome::Exited { status: 7 },
+                ..
+            })
+        ));
+        assert!(matches!(
+            process_job_response(&manager, TerminalId::new(usize::MAX)),
+            ControlResponse::Error { code: 404, .. }
+        ));
+    }
+
+    #[test]
+    fn test_program_status_query_preserves_records_and_generation() {
+        use ultty::terminal_manager::{no_tab_env, TerminalManager};
+        use ultty_protocol::control::ControlResponse;
+
+        let manager = TerminalManager::with_command_tab(
+            80,
+            24,
+            "/bin/sleep",
+            &["10".to_string()],
+            &mut no_tab_env,
+        )
+        .unwrap();
+        let pane = manager.focused_terminal().unwrap().id;
+        manager.terminal(pane).unwrap().event_loop.write_local(
+            b"\x1b]7501;state=blocked:id=task:app=build:kind=permission:progress=25:msg=QXBwcm92ZT8=\x1b\\"
+        );
+        let source = manager
+            .terminal(pane)
+            .unwrap()
+            .event_loop
+            .terminal()
+            .program_status_snapshot();
+        let response = program_status_response(&manager, pane);
+        let ControlResponse::Data(ultty_protocol::control::ControlData::ProgramStatus {
+            generation,
+            reason,
+            records,
+        }) = response
+        else {
+            panic!("expected a program status snapshot");
+        };
+        let encoded =
+            serde_json::json!({ "generation": generation, "reason": reason, "records": records });
+        assert_eq!(encoded, serde_json::to_value(source).unwrap());
+        assert_eq!(encoded["records"][0]["msg"], "Approve?");
+    }
+
+    #[test]
+    fn test_control_shell_submission_observes_real_fast_completion() {
+        use ultty::terminal_manager::{no_tab_env, TerminalManager};
+        use ultty_protocol::control::{ControlData, ControlResponse};
+
+        let script = "printf '\\033]133;A\\007\\033]133;B\\007'; IFS= read -r line; printf '\\033]133;C\\007'; eval \"$line\"; code=$?; printf '\\033]133;D;%s\\007' \"$code\"";
+        let mut manager = TerminalManager::with_command_tab(
+            80,
+            24,
+            "/bin/sh",
+            &["-c".to_string(), script.to_string()],
+            &mut no_tab_env,
+        )
+        .unwrap();
+        let pane = manager.focused_terminal().unwrap().id;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let sequence = loop {
+            match submit_control_shell_command(&mut manager, pane, "false") {
+                Ok(sequence) => break sequence,
+                Err(ControlResponse::Error {
+                    code: INPUT_QUEUE_FULL,
+                    ..
+                }) => {}
+                Err(response) => panic!("submission failed: {response:?}"),
+            }
+            manager
+                .terminal_mut(pane)
+                .unwrap()
+                .event_loop
+                .wait(Duration::from_millis(10))
+                .unwrap();
+            assert!(
+                Instant::now() < deadline,
+                "shell did not show an idle prompt"
+            );
+        };
+        let outcome = loop {
+            if let Some(outcome) = manager
+                .terminal(pane)
+                .unwrap()
+                .event_loop
+                .shell_command_result(sequence)
+            {
+                break outcome;
+            }
+            manager
+                .terminal_mut(pane)
+                .unwrap()
+                .event_loop
+                .wait(Duration::from_millis(10))
+                .unwrap();
+            assert!(Instant::now() < deadline, "shell did not report completion");
+        };
+        assert_eq!(
+            shell_command_response(pane, sequence, outcome),
+            ControlResponse::Data(ControlData::ShellCommandFinished {
+                pane: pane.raw() as u64,
+                sequence,
+                exit_code: Some(1)
+            })
+        );
+    }
+
+    #[test]
+    fn test_pty_control_input_reports_queue_acceptance_and_refusal() {
+        use ultty::terminal_manager::{no_tab_env, TerminalManager};
+        use ultty_protocol::control::ControlResponse;
+
+        let mut manager = TerminalManager::with_command_tab(
+            80,
+            24,
+            "/bin/sleep",
+            &["10".to_string()],
+            &mut no_tab_env,
+        )
+        .unwrap();
+        let pane = manager.focused_terminal().unwrap().id;
+        assert_eq!(
+            send_pty_input(&mut manager, pane, b"small"),
+            ControlResponse::Ok
+        );
+        let oversized = vec![b'x'; 16 * 1024 * 1024 + 1];
+        assert!(matches!(
+            send_pty_input(&mut manager, pane, &oversized),
+            ControlResponse::Error {
+                code: INPUT_QUEUE_FULL,
+                ..
+            }
+        ));
+        assert!(matches!(
+            send_pty_input(&mut manager, TerminalId::new(999), b"x"),
+            ControlResponse::Error {
+                code: INPUT_UNAVAILABLE,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_pty_control_input_rejects_a_closed_child() {
+        use ultty::event_loop::TerminalEvent;
+        use ultty::terminal_manager::{no_tab_env, TerminalManager};
+        use ultty_protocol::control::ControlResponse;
+
+        let mut manager = TerminalManager::with_command_tab(
+            80,
+            24,
+            "/bin/sh",
+            &["-c".to_string(), "printf finished".to_string()],
+            &mut no_tab_env,
+        )
+        .unwrap();
+        let pane = manager.focused_terminal().unwrap().id;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let events = manager
+                .terminal_mut(pane)
+                .unwrap()
+                .event_loop
+                .wait(Duration::from_millis(50))
+                .unwrap();
+            if events
+                .iter()
+                .any(|event| matches!(event, TerminalEvent::ChildExited { .. }))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "child did not finish");
+        }
+        assert!(matches!(
+            send_pty_input(&mut manager, pane, b"too late"),
+            ControlResponse::Error {
+                code: INPUT_UNAVAILABLE,
+                ..
+            }
+        ));
+    }
 
     /// A 6x2 buffer with five lines written: three in history, two on screen.
     fn buffer_with_history() -> ultty::grid::Buffer {

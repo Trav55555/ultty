@@ -129,7 +129,7 @@ impl<'a> Default for OverlayState<'a> {
 pub struct PaneDraw<'a> {
     pub terminal: &'a Terminal,
     pub info: PaneInfo,
-    pub sessions: Vec<&'a crate::protocol::NativeSession>,
+    pub sessions: Vec<&'a dyn crate::scene::view::NativeRenderSource>,
 }
 
 /// Information about a pane for rendering.
@@ -233,7 +233,11 @@ pub(super) struct CachedImageTexture {
     pub(super) bind_group: wgpu::BindGroup,
     pub(super) width: u32,
     pub(super) height: u32,
+    pub(super) revision: Option<u64>,
 }
+
+/// Image or animation identity scoped to its native application session.
+pub type NativeResourceKey = (u64, ultty_protocol::RegionId);
 
 /// GPU renderer for the terminal.
 pub struct Renderer {
@@ -270,10 +274,10 @@ pub struct Renderer {
     window_corner_radius: f32,
     /// Cached image textures (terminal sixel images)
     image_cache: image_cache::ImageCache<CachedImageTexture>,
-    /// Cached image textures for native protocol ImageWidget, keyed by RegionId
-    native_image_cache: std::collections::HashMap<ultty_protocol::RegionId, CachedImageTexture>,
+    /// Cached image textures, scoped to their native application session.
+    native_image_cache: std::collections::HashMap<NativeResourceKey, CachedImageTexture>,
     /// Animated progress: region_id -> current displayed value (lerped toward target)
-    animated_progress: std::collections::HashMap<ultty_protocol::RegionId, f32>,
+    animated_progress: std::collections::HashMap<NativeResourceKey, f32>,
     /// Whether active animations exist (spinners, animated progress)
     has_animations: bool,
     /// Cached native session GPU buffers.
@@ -342,7 +346,7 @@ impl<T> NativeBufferCache<T> {
 
 /// Deferred native image render request (collected during widget content rendering).
 pub(super) struct DeferredImageRender {
-    region_id: ultty_protocol::RegionId,
+    resource: NativeResourceKey,
     x: f32,
     y: f32,
     w: f32,
@@ -356,32 +360,7 @@ pub(super) struct ImagePipeline {
     pub(super) sampler: wgpu::Sampler,
 }
 
-/// Largest grid size in cells on either axis, whatever the window says.
-pub const MAX_GRID_DIMENSION: u16 = 4096;
-
-/// Compute grid columns/rows from pixel space and cell metrics, clamped to
-/// `1..=MAX_GRID_DIMENSION`. Non-finite or non-positive inputs yield 1.
-pub fn grid_dimensions_for(
-    width_px: f32,
-    height_px: f32,
-    cell_width: f32,
-    cell_height: f32,
-) -> (u16, u16) {
-    fn axis(px: f32, cell: f32) -> u16 {
-        if !px.is_finite() || !cell.is_finite() || cell <= 0.0 || px <= 0.0 {
-            return 1;
-        }
-        let cells = (px / cell).floor();
-        if !cells.is_finite() || cells < 1.0 {
-            1
-        } else if cells >= MAX_GRID_DIMENSION as f32 {
-            MAX_GRID_DIMENSION
-        } else {
-            cells as u16
-        }
-    }
-    (axis(width_px, cell_width), axis(height_px, cell_height))
-}
+pub use crate::geometry::{grid_dimensions_for, MAX_GRID_DIMENSION};
 
 /// The surface size for a `width` x `height` window, with each axis clamped
 /// to the device's largest 2D texture. wgpu treats a larger surface as a
@@ -975,12 +954,14 @@ impl Renderer {
         self.image_cache.retain_owners(live);
     }
 
-    /// Clear cached native image textures, retaining only the given region IDs.
+    /// Retain only resources belonging to the given live session/region pairs.
     pub fn retain_native_images(
         &mut self,
-        live_regions: &std::collections::HashSet<ultty_protocol::RegionId>,
+        live_regions: &std::collections::HashSet<NativeResourceKey>,
     ) {
         self.native_image_cache
+            .retain(|id, _| live_regions.contains(id));
+        self.animated_progress
             .retain(|id, _| live_regions.contains(id));
     }
 
@@ -1133,7 +1114,13 @@ impl Renderer {
         }
 
         // Render images (Sixel, etc.) after backgrounds, before text
-        self.render_images(&mut encoder, view, terminal);
+        self.render_images(
+            &mut encoder,
+            view,
+            terminal,
+            (0.0, self.tab_bar_height),
+            None,
+        );
 
         // Render tab bar if visible
         if !tab_bar_vertices.is_empty() {
@@ -1422,7 +1409,7 @@ impl Renderer {
         view: &wgpu::TextureView,
         terminal: &Terminal,
         overlay: &OverlayState,
-        sessions: impl Iterator<Item = &'a crate::protocol::NativeSession>,
+        sessions: impl Iterator<Item = &'a dyn crate::scene::view::NativeRenderSource>,
         native_search_matches: Option<&[crate::scene::SearchMatch]>,
         native_search_index: usize,
     ) {
@@ -1492,7 +1479,13 @@ impl Renderer {
         let full_scene = sessions.iter().any(|session| session.is_full_scene());
 
         if !full_scene {
-            self.render_images(&mut encoder, view, terminal);
+            self.render_images(
+                &mut encoder,
+                view,
+                terminal,
+                (0.0, self.tab_bar_height),
+                None,
+            );
         }
 
         if !tab_bar_vertices.is_empty() {

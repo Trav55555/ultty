@@ -1,0 +1,8 @@
+native-split: counter-app draws in pane 1 (44x39); the shell pane has no scene
+native-split: keys reach the app
+native-split: resize re-lays the scene out to 55x46
+screenshot 1000x700: 75600 ink pixels inside (512, 60, 992, 690)
+screenshot 1000x700: 18 ink pixels inside (8, 60, 490, 690)
+native-split: screenshot has the app's pane
+native-split: independent in-band panes
+native-split: ok

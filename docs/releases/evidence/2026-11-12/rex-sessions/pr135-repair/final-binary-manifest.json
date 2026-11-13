@@ -1,0 +1,37 @@
+{
+  "source_commit": "447032bc1219812519239b9d889174ca3c5faa56",
+  "binaries": {
+    "ultty": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/ultty",
+      "sha256": "109cb7cefefff8d81138d1aca92eae0be700d6a7ba90bb8a4adc69f4fee531f9"
+    },
+    "ulttyctl": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/ulttyctl",
+      "sha256": "2ba25cd3e69887cd22763a0f0c4ef363d7ed7191c98d3e17d1048e4f0fd85ed6"
+    },
+    "counter-app": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/counter-app",
+      "sha256": "7e1296d0fa3a067275798ae75ee46de094484aea6b93fc86e246d326df5bb200"
+    },
+    "ulttui-lua": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/ulttui-lua",
+      "sha256": "ff3308cb42001697c49b56f2e051d63725f7e4cd9b1c38f9e8f785974284dbed"
+    },
+    "hello-native": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/hello-native",
+      "sha256": "10f55c5e3e37b883331fd8ef61119015f4ee77eca7dd86ff7370f811d28ec68f"
+    },
+    "agent-transcript": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/agent-transcript",
+      "sha256": "e801c65f528dd28b81217fde310d40a225592801419ef72c563ece6b5be9fbf7"
+    },
+    "ultty-session": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/ultty-session",
+      "sha256": "ba9d44471c266e4f5c77db4ae692422d98e8e30d2e9eec057980fbed376c897d"
+    },
+    "inline-surface": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/inline-surface",
+      "sha256": "2acc7ac0ecec8f995437af92e6e7a0f72d30de1cf460cfa9c97f13b3a11247a2"
+    }
+  }
+}

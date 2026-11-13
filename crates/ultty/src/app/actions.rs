@@ -74,11 +74,11 @@ impl App {
         let overlay_state = self.build_screenshot_overlay_state();
         let overlay = overlay_state.as_overlay();
         let locked = super::render::lock_active_panes(
-            &self.terminal_manager,
+            &self.runtime.manager,
             self.renderer.surface_size().into(),
             self.tab_bar.content_top(),
         );
-        let panes = super::render::pane_draws(&locked, self.protocol_server.as_ref());
+        let panes = super::render::pane_draws(&locked, self.runtime.protocol.as_ref());
         self.renderer
             .capture_panes_screenshot(&panes, &overlay, path)
     }
@@ -193,7 +193,7 @@ impl App {
 
     /// Build native protocol status rows for the in-terminal status overlay.
     pub(super) fn build_protocol_status_rows(&self) -> Vec<(String, String)> {
-        Self::format_protocol_status_rows(self.protocol_server.as_ref())
+        Self::format_protocol_status_rows(self.runtime.protocol.as_ref())
     }
 
     pub(super) fn format_protocol_status_rows(
@@ -288,13 +288,17 @@ impl App {
             .set_color_scheme(ultty::renderer::ColorScheme::from_config(
                 &new_config.colors,
             ));
-        self.terminal_manager
+        self.runtime
+            .manager
             .set_theme_colors(new_config.colors.theme_colors());
-        self.terminal_manager
+        self.runtime
+            .manager
             .set_scrollback_lines(new_config.behavior.scrollback_lines);
-        self.terminal_manager
+        self.runtime
+            .manager
             .set_close_on_exit(new_config.behavior.close_on_exit);
-        self.terminal_manager
+        self.runtime
+            .manager
             .set_inherit_working_directory(new_config.behavior.inherit_working_directory);
 
         // Update opacity
@@ -376,7 +380,7 @@ impl App {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        if self.terminal_manager.pane_count() > 1 {
+        if self.runtime.manager.pane_count() > 1 {
             match self.capture_panes_screenshot(&path) {
                 Ok(()) => self.notify_screenshot_saved(&path),
                 Err(e) => tracing::error!("Failed to capture screenshot: {}", e),
@@ -386,7 +390,8 @@ impl App {
 
         // Get terminal reference
         let Some(terminal) = self
-            .terminal_manager
+            .runtime
+            .manager
             .focused_terminal()
             .map(|t| t.event_loop.terminal())
         else {
@@ -397,10 +402,15 @@ impl App {
         let overlay_state = self.build_screenshot_overlay_state();
         let overlay = overlay_state.as_overlay();
 
-        let native_sessions: Vec<&ultty::protocol::NativeSession> = self
-            .protocol_server
+        let native_sessions: Vec<&dyn ultty::scene::view::NativeRenderSource> = self
+            .runtime
+            .protocol
             .as_ref()
-            .map(|s| s.active_tab_sessions().collect())
+            .map(|s| {
+                s.active_tab_sessions()
+                    .map(|session| session as &dyn ultty::scene::view::NativeRenderSource)
+                    .collect()
+            })
             .unwrap_or_default();
 
         match self.renderer.capture_screenshot_with_native(
@@ -527,7 +537,8 @@ impl App {
                 .set_color_scheme(ultty::renderer::ColorScheme::from_config(
                     &self.config.colors,
                 ));
-            self.terminal_manager
+            self.runtime
+                .manager
                 .set_theme_colors(self.config.colors.theme_colors());
 
             self.needs_redraw = true;

@@ -15,6 +15,14 @@ use thiserror::Error;
 /// PTY-related errors.
 #[derive(Debug, Error)]
 pub enum PtyError {
+    /// Child setup or exec failed before the requested program began.
+    #[error("child {stage} failed: {source}")]
+    StartupFailed {
+        /// Setup operation which failed.
+        stage: &'static str,
+        /// OS error captured in the forked child.
+        source: io::Error,
+    },
     #[error("failed to open PTY: {0}")]
     OpenFailed(#[source] nix::Error),
 

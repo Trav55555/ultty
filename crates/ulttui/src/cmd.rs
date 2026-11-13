@@ -7,9 +7,19 @@ use std::time::Duration;
 use crate::screen::Screen;
 use crate::toast::Toast;
 
+/// App-loop callback for a report write, independent of task completion.
+pub type StatusWriteResult<M> = Box<dyn FnOnce(crate::Result<()>) -> M + Send + 'static>;
+
 /// A command representing a side effect to execute after update().
 #[derive(Default)]
 pub enum Cmd<M> {
+    /// Write an optional OSC 7501 report through the backend's owned writer.
+    ReportStatus {
+        /// Report validated before any bytes are written.
+        report: ultty_client::program_status::Report,
+        /// Receive write success/failure; neither implies terminal support.
+        on_result: Option<StatusWriteResult<M>>,
+    },
     /// No side effect.
     #[default]
     None,
@@ -55,6 +65,32 @@ pub enum Cmd<M> {
 }
 
 impl<M> Cmd<M> {
+    /// Report program state without a capability query or input reader.
+    /// Write failures are logged; use `report_status_with_result` to handle them.
+    pub fn report_status(report: ultty_client::program_status::Report) -> Self {
+        Self::ReportStatus {
+            report,
+            on_result: None,
+        }
+    }
+
+    /// Clear a record and its descendants; `None` clears the terminal's records.
+    pub fn clear_status(id: Option<String>) -> Self {
+        Self::report_status(ultty_client::program_status::Report::clear(id))
+    }
+
+    /// Receive the write result as an application message.
+    /// Successful emission does not establish terminal support or task success.
+    pub fn report_status_with_result(
+        report: ultty_client::program_status::Report,
+        on_result: impl FnOnce(crate::Result<()>) -> M + Send + 'static,
+    ) -> Self {
+        Self::ReportStatus {
+            report,
+            on_result: Some(Box::new(on_result)),
+        }
+    }
+
     /// No-op command.
     pub fn none() -> Self {
         Cmd::None
@@ -133,6 +169,7 @@ impl<M> Cmd<M> {
 impl<M> std::fmt::Debug for Cmd<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
+            Cmd::ReportStatus { .. } => "Cmd::ReportStatus",
             Cmd::None => "Cmd::None",
             Cmd::Message(_) => "Cmd::Message",
             Cmd::Batch(_) => "Cmd::Batch",

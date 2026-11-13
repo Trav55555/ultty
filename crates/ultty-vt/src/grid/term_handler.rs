@@ -355,6 +355,10 @@ impl<'a> TerminalHandler<'a> {
             }
 
             // OSC sequences
+            Action::ProgramStatus(report) => self.terminal.apply_program_status(report),
+            Action::ProgramStatusQuery => self
+                .terminal
+                .queue_response(crate::program_status::FEATURE_REPLY.to_vec()),
             Action::SetTitle(title) => {
                 self.terminal.set_title(title);
             }

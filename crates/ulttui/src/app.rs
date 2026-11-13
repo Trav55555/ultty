@@ -22,6 +22,7 @@ use tokio::sync::mpsc;
 
 pub use crate::wake::Proxy;
 use ultty_protocol::{AppMessage, RegionId};
+use ultty_protocol::{SemanticActionKind, SemanticActionRequest};
 
 struct OverlayView<'a> {
     base: &'a dyn View,
@@ -55,6 +56,10 @@ impl View for OverlayView<'_> {
 
     fn semantics(&self) -> ultty_protocol::Semantics {
         self.base.semantics()
+    }
+
+    fn native_key(&self) -> Option<&str> {
+        self.base.native_key()
     }
 
     fn children_count(&self) -> usize {
@@ -138,6 +143,25 @@ pub trait Application: Sized {
     /// the current `focused_id`, then forwards the event here. Rendered `View`
     /// values are treated as output and are not mutated by the runner.
     fn on_event(&mut self, _event: &Event) -> Option<Self::Message> {
+        None
+    }
+
+    /// Explicitly declare activation support for a visible widget ID.
+    ///
+    /// Focus is provided by the runner for unique visible focusable widgets.
+    /// Activation is disabled by default, independent of a widget's role.
+    fn supports_action(&self, _widget_id: &str, _action: SemanticActionKind) -> bool {
+        false
+    }
+
+    /// Dispatch a declared action into the same message/update path as keys.
+    /// Returning `None` refuses the action. Acknowledgment means this dispatch
+    /// was applied, not that any asynchronous work it starts has completed.
+    fn on_action(
+        &mut self,
+        _widget_id: &str,
+        _action: SemanticActionKind,
+    ) -> Option<Self::Message> {
         None
     }
 
@@ -541,6 +565,12 @@ impl<A: Application> App<A> {
             self.backend.report_override_result(request_id, error)?;
         }
 
+        while let Some(request) = self.backend.take_action_request() {
+            let error = self.apply_action(&request, rt).err();
+            self.backend
+                .report_action_result(request.request_id, error)?;
+        }
+
         // 3. Drain message queue (update → Cmd scheduling)
         if self.drain_messages(rt) {
             self.needs_render = true;
@@ -673,6 +703,52 @@ impl<A: Application> App<A> {
     /// Render the current view, managing focus and theme thread-locals.
     ///
     /// Uses an RAII guard so thread-local state is restored even if rendering panics.
+    fn apply_action(
+        &mut self,
+        request: &SemanticActionRequest,
+        rt: &Runtime,
+    ) -> Result<(), String> {
+        if !self.screen_stack.is_empty() {
+            return Err("active screen does not support semantic actions".into());
+        }
+        if self.needs_render || !self.msg_queue.is_empty() {
+            return Err("application has an unpresented update".into());
+        }
+        self.backend.validate_action_request(request)?;
+        match request.action {
+            SemanticActionKind::Focus => {
+                if !self
+                    .focus
+                    .focusable_ids()
+                    .iter()
+                    .any(|id| id == &request.widget_id)
+                {
+                    return Err("widget is no longer focusable".into());
+                }
+                self.needs_render = true;
+                self.focus.focus(request.widget_id.clone());
+                self.backend
+                    .report_focus(self.focus.focused_id())
+                    .map_err(|_| "focus report failed".to_string())?;
+            }
+            SemanticActionKind::Activate => {
+                if !self.app.supports_action(&request.widget_id, request.action) {
+                    return Err("application does not support this activation".into());
+                }
+                // An application callback may mutate state even when it refuses.
+                self.needs_render = true;
+                let message = self
+                    .app
+                    .on_action(&request.widget_id, request.action)
+                    .ok_or_else(|| "application refused activation".to_string())?;
+                let cmd = self.app.update(message);
+                self.process_cmd(cmd, rt);
+            }
+        }
+        self.needs_render = true;
+        Ok(())
+    }
+
     fn render(&mut self) -> crate::Result<()> {
         struct ThreadLocalGuard {
             old_focus: Option<FocusManager>,
@@ -708,13 +784,25 @@ impl<A: Application> App<A> {
             if let Some(screen) = self.screen_stack.last() {
                 let view = screen.view();
                 let composed = OverlayView::new(&view, overlay);
-                FocusManager::register_current_view_tree(&composed);
-                self.backend.render(&composed)?;
+                FocusManager::register_current_app_tree(&view, &composed);
+                self.backend.render_with_actions(
+                    &composed,
+                    |_, _| false,
+                    view.widget_id().map(|id| (id, view.is_focusable())),
+                )?;
             } else {
                 let view = self.app.view();
                 let composed = OverlayView::new(&view, overlay);
-                FocusManager::register_current_view_tree(&composed);
-                self.backend.render(&composed)?;
+                FocusManager::register_current_app_tree(&view, &composed);
+                let app = &self.app;
+                self.backend.render_with_actions(
+                    &composed,
+                    |widget_id, action| {
+                        action == SemanticActionKind::Focus
+                            || app.supports_action(widget_id, action)
+                    },
+                    view.widget_id().map(|id| (id, view.is_focusable())),
+                )?;
             }
             FocusManager::with_current_mut(|fm| fm.end_frame());
             Ok(())
@@ -2554,5 +2642,109 @@ mod async_tests {
             "{error}"
         );
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod semantic_action_tests {
+    use super::*;
+    use crate::backend::mock::MockBackend;
+    use crate::widgets::Button;
+    use ultty_protocol::FrameId;
+
+    struct ActionApp {
+        count: usize,
+        declared: bool,
+        refuse: bool,
+    }
+    impl Application for ActionApp {
+        type Message = ();
+        fn update(&mut self, _: ()) -> Cmd<()> {
+            self.count += 1;
+            Cmd::none()
+        }
+        fn supports_action(&self, id: &str, action: SemanticActionKind) -> bool {
+            self.declared && id == "increment" && action == SemanticActionKind::Activate
+        }
+        fn on_action(&mut self, _: &str, _: SemanticActionKind) -> Option<()> {
+            (!self.refuse).then_some(())
+        }
+        fn view(&self) -> impl View {
+            Button::new("Increment").id("increment")
+        }
+    }
+    struct BlockingScreen;
+    impl Screen for BlockingScreen {
+        fn view(&self) -> Column {
+            Column::new()
+        }
+        fn on_event(&mut self, _: &Event) -> ScreenAction {
+            ScreenAction::Consumed
+        }
+    }
+    fn request(action: SemanticActionKind) -> SemanticActionRequest {
+        SemanticActionRequest {
+            request_id: 1,
+            frame_id: FrameId(1),
+            id: RegionId(1),
+            widget_id: "increment".into(),
+            action,
+        }
+    }
+    fn runner() -> App<ActionApp> {
+        let mut runner = App::new_with_backend(
+            ActionApp {
+                count: 0,
+                declared: true,
+                refuse: false,
+            },
+            Backend::Mock(MockBackend::new(vec![None]).idle_until_quit()),
+        );
+        runner.render().unwrap();
+        runner.needs_render = false;
+        runner
+    }
+    #[test]
+    fn test_semantic_action_applies_update_before_ack_and_focus_is_separate() {
+        let rt = Runtime::new().unwrap();
+        let mut runner = runner();
+        runner
+            .apply_action(&request(SemanticActionKind::Focus), &rt)
+            .unwrap();
+        assert_eq!(runner.focus.focused_id(), Some("increment"));
+        assert_eq!(runner.app.count, 0);
+        runner.needs_render = false;
+        if let Backend::Mock(backend) = &mut runner.backend {
+            backend
+                .action_requests
+                .push_back(request(SemanticActionKind::Activate));
+        }
+        assert!(runner.run_tick(&rt).unwrap());
+        assert_eq!(runner.app.count, 1);
+        if let Backend::Mock(backend) = &runner.backend {
+            assert_eq!(backend.action_results, vec![(1, None)]);
+        }
+    }
+    #[test]
+    fn test_semantic_action_refuses_unpresented_state_overlay_and_no_handler() {
+        let rt = Runtime::new().unwrap();
+        let mut runner = runner();
+        let request = request(SemanticActionKind::Activate);
+        runner.needs_render = true;
+        assert!(runner.apply_action(&request, &rt).is_err());
+        runner.needs_render = false;
+        runner.screen_stack.push(Box::new(BlockingScreen));
+        assert!(runner.apply_action(&request, &rt).is_err());
+        runner.screen_stack.clear();
+        runner.app.declared = false;
+        assert!(runner.apply_action(&request, &rt).is_err());
+        runner.app.declared = true;
+        runner.app.refuse = true;
+        assert!(runner.apply_action(&request, &rt).is_err());
+        assert!(
+            runner.needs_render,
+            "a mutable refusing callback also invalidates the presented app state"
+        );
+        assert_eq!(runner.app.count, 0);
     }
 }

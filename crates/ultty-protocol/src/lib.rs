@@ -40,6 +40,7 @@
 //! exercise large frames). Any crash artifact should be turned into a
 //! regression test in `tests/malformed.rs` or the codec unit tests.
 
+pub mod actions;
 mod codec;
 mod content;
 pub mod control;
@@ -54,6 +55,11 @@ mod semantics;
 mod style;
 mod surface;
 
+pub use actions::{
+    declared_actions, valid_action_widget_id, SemanticActionKind, SemanticActionRequest,
+    ACTION_ACTIVATE, ACTION_FOCUS, MAX_ACTION_ERROR_BYTES, MAX_ACTION_WIDGET_ID_BYTES,
+    REGION_ACTIONS_METADATA_KEY, REGION_WIDGET_ID_METADATA_KEY,
+};
 pub use codec::{
     Decode, Encode, MAX_REGION_COUNT, MAX_SEMANTICS_STRING_LEN, MAX_SEMANTICS_TOTAL_BYTES,
     MAX_SPAN_COUNT,
@@ -128,6 +134,8 @@ pub const CAP_INPUT_CURSOR: u32 = 0x0400;
 /// Capability: the terminal may push a user override into the app
 /// (`SetOverride`, answered with `OverrideResult`; ADR 0023 §9).
 pub const CAP_OVERRIDE_PUSH: u32 = 0x0800;
+/// Capability: correlated semantic actions answered by an application handler.
+pub const CAP_SEMANTIC_ACTIONS: u32 = 0x1000;
 
 /// All capabilities known by this protocol version.
 pub const CAP_ALL_KNOWN: u32 = CAP_LAYOUT_FLEXBOX
@@ -138,14 +146,15 @@ pub const CAP_ALL_KNOWN: u32 = CAP_LAYOUT_FLEXBOX
     | CAP_INLINE_SURFACES
     | CAP_SEMANTICS
     | CAP_INPUT_CURSOR
-    | CAP_OVERRIDE_PUSH;
+    | CAP_OVERRIDE_PUSH
+    | CAP_SEMANTIC_ACTIONS;
 
 /// Default capability request for current clients: every known capability
-/// a client gets by decoding what the terminal sends. `CAP_OVERRIDE_PUSH`
-/// is left out, because a client that negotiates it must answer
-/// `SetOverride` with `OverrideResult`; a client with that code (`ulttui`'s
-/// native backend) adds the bit itself.
-pub const CLIENT_DEFAULT_CAPABILITIES: u32 = CAP_ALL_KNOWN & !CAP_OVERRIDE_PUSH;
+/// a client gets by decoding what the terminal sends. Override pushes and
+/// semantic actions are excluded: a client that negotiates either must dispatch
+/// requests and acknowledge them. Ulttui's native backend adds these bits.
+pub const CLIENT_DEFAULT_CAPABILITIES: u32 =
+    CAP_ALL_KNOWN & !(CAP_OVERRIDE_PUSH | CAP_SEMANTIC_ACTIONS);
 
 /// Negotiate a protocol version for a client/server pair.
 pub const fn negotiate_protocol_version(client_version: u16, server_version: u16) -> Option<u16> {

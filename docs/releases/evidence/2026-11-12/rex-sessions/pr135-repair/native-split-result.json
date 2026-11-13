@@ -1,0 +1,11 @@
+{
+  "source_commit": "447032b",
+  "command": [
+    "bash",
+    "scripts/e2e/native-split.sh",
+    "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-native-split-01"
+  ],
+  "site_packages_disabled": true,
+  "exit_code": 0,
+  "binary_manifest": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/manifest.json"
+}

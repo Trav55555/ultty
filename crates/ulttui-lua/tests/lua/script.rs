@@ -179,7 +179,7 @@ fn app_rejects_unknown_fields_at_the_call() {
     assert_eq!(
         script.error().unwrap(),
         format!(
-            "{}:1: app: unknown app field 'veiw' (expected one of: init, update, view, every)",
+            "{}:1: app: unknown app field 'veiw' (expected one of: init, update, view, every, actions)",
             path.display()
         )
     );
@@ -758,4 +758,42 @@ fn print_goes_to_the_log_not_the_terminal() {
     let logged = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
     assert!(logged.contains("hello\t42\tnil\ttrue"), "{logged}");
     assert!(logged.contains("print.luau:1"), "{logged}");
+}
+
+#[test]
+fn test_semantic_actions_require_declaration_and_share_counter_update() {
+    use ulttui::SemanticActionKind;
+    let source = include_str!("../../../../examples/lua/hello.luau");
+    let mut script = load("semantic-counter", source, ScriptOptions::default());
+    assert!(script.supports_activation("inc"));
+    assert!(!script.supports_activation("count"));
+    script.update(&key("+"));
+    script.update(&ScriptMsg::Action {
+        id: "inc".into(),
+        action: SemanticActionKind::Activate,
+    });
+    script.update(&ScriptMsg::Key {
+        key: "enter".into(),
+        ctrl: false,
+        alt: false,
+        shift: false,
+        focused: Some("inc".into()),
+    });
+    assert_eq!(int(&script, "state.count"), 3);
+    assert!(view_texts(&script).contains(&"Count: 3".to_owned()));
+    let node = script.view().unwrap();
+    let ansi = crate::common::ansi(&ulttui_lua::node::build(&node), 80, 24);
+    assert!(ansi.contains("Count: 3"));
+    let no_actions = load("semantic-no-handler", COUNTER, ScriptOptions::default());
+    assert!(!no_actions.supports_activation("inc"));
+    for (name, declaration) in [
+        ("semantic-invalid-action", "{ inc = 'click' }"),
+        ("semantic-invalid-declaration", "true"),
+    ] {
+        let source = format!(
+            "return app {{ actions = {declaration}, view = function() return text('hello') end }}"
+        );
+        let mut script = Script::new(write(name, &source), ScriptOptions::default()).unwrap();
+        assert_eq!(script.reload(), Reload::Failed);
+    }
 }

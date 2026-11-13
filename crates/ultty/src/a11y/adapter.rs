@@ -1,6 +1,7 @@
 //! The platform accessibility adapter for Ultty's window, and when it is
 //! sent a new tree.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use accesskit_winit::{Event, WindowEvent as AccessKitEvent};
@@ -9,6 +10,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::Window;
 
 use super::live::LiveRegions;
+use super::scene::NativeActionTarget;
 use super::tree::{self, region_node_id, Snapshot};
 
 /// The shortest time between two trees sent to assistive technology
@@ -31,6 +33,8 @@ pub struct Adapter {
     shown: Option<u64>,
     /// Live regions' queues and announcements.
     live: LiveRegions,
+    /// Reverse map of only the native nodes in the last emitted tree.
+    actions: HashMap<accesskit::NodeId, NativeActionTarget>,
 }
 
 impl Adapter {
@@ -56,6 +60,7 @@ impl Adapter {
             rebuilds: Rebuilds::default(),
             shown: None,
             live: LiveRegions::default(),
+            actions: HashMap::new(),
         }
     }
 
@@ -67,7 +72,11 @@ impl Adapter {
 
     /// Answer a request AccessKit sent through the event loop. A tree it
     /// asked for is sent by the next [`Adapter::update`].
-    pub fn handle(&mut self, window: &Window, event: AccessKitEvent) {
+    pub fn handle(
+        &mut self,
+        window: &Window,
+        event: AccessKitEvent,
+    ) -> Option<(NativeActionTarget, ultty_protocol::SemanticActionKind)> {
         match event {
             AccessKitEvent::InitialTreeRequested => {
                 tracing::debug!("Accessibility activated");
@@ -79,6 +88,7 @@ impl Adapter {
                 self.rebuilds.activate();
                 self.shown = None;
                 self.live.clear();
+                self.actions.clear();
             }
             AccessKitEvent::AccessibilityDeactivated => {
                 // Nothing is built or sent until the next
@@ -86,11 +96,19 @@ impl Adapter {
                 tracing::debug!("Accessibility deactivated");
                 self.rebuilds.deactivate();
                 self.live.clear();
+                self.actions.clear();
             }
             AccessKitEvent::ActionRequested(request) => {
-                tracing::debug!(action = ?request.action, "Accessibility action not handled yet");
+                let action = match request.action {
+                    accesskit::Action::Focus => ultty_protocol::SemanticActionKind::Focus,
+                    accesskit::Action::Click => ultty_protocol::SemanticActionKind::Activate,
+                    _ => return None,
+                };
+                let target = self.actions.get(&request.target_node)?;
+                return (target.actions & action.mask() != 0).then(|| (target.clone(), action));
             }
         }
+        None
     }
 
     /// Whether assistive technology is listening. While it is not, the app
@@ -166,6 +184,7 @@ impl Adapter {
         }
         let title = &self.window_title;
         let live = &mut self.live;
+        let actions = &mut self.actions;
         self.inner.update_if_active(|| {
             let started = Instant::now();
             let mut snapshot = snapshot();
@@ -173,6 +192,7 @@ impl Adapter {
                 snapshot.set_announcements(live);
             }
             let update = tree::build(title, &snapshot);
+            *actions = published_actions(&snapshot, &update);
             if !live.is_empty() {
                 let built: std::collections::HashSet<accesskit::NodeId> =
                     update.nodes.iter().map(|(id, _)| *id).collect();
@@ -187,6 +207,43 @@ impl Adapter {
             update
         });
     }
+}
+
+/// Build the reverse map from nodes actually emitted, never by decoding or
+/// guessing a hashed node ID. Omitted, disabled and colliding nodes cannot act.
+fn published_actions(
+    snapshot: &Snapshot,
+    update: &accesskit::TreeUpdate,
+) -> HashMap<accesskit::NodeId, NativeActionTarget> {
+    let emitted: HashMap<_, _> = update.nodes.iter().map(|(id, node)| (*id, node)).collect();
+    let mut result = HashMap::new();
+    let mut collisions = std::collections::HashSet::new();
+    for pane in &snapshot.panes {
+        let surfaces = pane.surfaces.iter().map(|surface| &surface.scene);
+        for target in pane
+            .scenes
+            .iter()
+            .chain(surfaces)
+            .flat_map(|scene| scene.action_targets())
+        {
+            let id = region_node_id(target.session, target.region);
+            let Some(node) = emitted.get(&id) else {
+                continue;
+            };
+            if !node.supports_action(accesskit::Action::Focus)
+                && !node.supports_action(accesskit::Action::Click)
+            {
+                continue;
+            }
+            if result.insert(id, target.clone()).is_some() {
+                collisions.insert(id);
+            }
+        }
+    }
+    for id in collisions {
+        result.remove(&id);
+    }
+    result
 }
 
 /// Whether and when to rebuild the tree: only while assistive technology

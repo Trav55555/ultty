@@ -4,6 +4,7 @@ expression: session.describe()
 ---
 {
   "session": 1,
+  "shown_generation": 8,
   "in_band": false,
   "focused": 3,
   "regions": [

@@ -120,7 +120,7 @@ fn region_background(
 /// `cell_height` high; see [`Renderer::visible_surfaces`].
 fn visible_surfaces(
     terminal: &crate::grid::Terminal,
-    sessions: &[&crate::protocol::NativeSession],
+    sessions: &[&dyn crate::scene::view::NativeRenderSource],
     grid_top: f32,
     cell_height: f32,
 ) -> Vec<(u64, SurfaceOrigin)> {
@@ -159,7 +159,7 @@ impl Renderer {
     pub(crate) fn visible_surfaces(
         &self,
         terminal: &crate::grid::Terminal,
-        sessions: &[&crate::protocol::NativeSession],
+        sessions: &[&dyn crate::scene::view::NativeRenderSource],
     ) -> Vec<(u64, SurfaceOrigin)> {
         visible_surfaces(terminal, sessions, self.tab_bar_height, self.cell_height)
     }
@@ -174,7 +174,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         terminal: &crate::grid::Terminal,
-        sessions: &[&crate::protocol::NativeSession],
+        sessions: &[&dyn crate::scene::view::NativeRenderSource],
         surfaces: &[(u64, SurfaceOrigin)],
         search: Option<(&[crate::scene::SearchMatch], usize)>,
     ) {
@@ -188,7 +188,7 @@ impl Renderer {
             let mut vertices = self.native_vertices_for(region_count);
             for session in sessions {
                 self.build_native_session_vertices(
-                    session,
+                    *session,
                     origin,
                     None,
                     matches,
@@ -214,7 +214,7 @@ impl Renderer {
                 .map(|&(_, origin)| origin)
                 .collect();
             if !origins.is_empty() {
-                self.render_native_surfaces(encoder, view, session, &origins, pane);
+                self.render_native_surfaces(encoder, view, *session, &origins, pane);
             }
         }
     }
@@ -286,7 +286,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_native_session_vertices(
         &mut self,
-        session: &crate::protocol::NativeSession,
+        session: &dyn crate::scene::view::NativeRenderSource,
         origin: (f32, f32),
         bounds: Option<PaneBounds>,
         search_matches: Option<&[crate::scene::SearchMatch]>,
@@ -341,7 +341,7 @@ impl Renderer {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        session: &crate::protocol::NativeSession,
+        session: &dyn crate::scene::view::NativeRenderSource,
         surfaces: &[SurfaceOrigin],
         pane: (f32, f32, f32, f32),
     ) {
@@ -385,7 +385,9 @@ impl Renderer {
                 &mut vertices,
             );
         }
-        self.draw_native_vertices(encoder, view, vertices, None);
+        if let Some(scissor) = scissor_for(pane, self.surface_size()) {
+            self.draw_native_vertices(encoder, view, vertices, Some(scissor));
+        }
     }
 
     /// Append the vertices of the tree under `root`, laid out from pixel
@@ -393,7 +395,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)]
     fn build_tree_vertices(
         &mut self,
-        session: &crate::protocol::NativeSession,
+        session: &dyn crate::scene::view::NativeRenderSource,
         root: ultty_protocol::RegionId,
         (origin_x, origin_y): (f32, f32),
         scroll_adjustments: &geometry::ScrollAdjustments,
@@ -740,7 +742,8 @@ impl Renderer {
                 Content::Widget(widget) => {
                     self.render_widget_content(
                         widget,
-                        region.id,
+                        (session.session_id(), region.id),
+                        session.revision(),
                         cx,
                         cy,
                         w,

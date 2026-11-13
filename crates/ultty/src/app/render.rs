@@ -19,7 +19,7 @@ impl App {
         self.frames_drawn = self.frames_drawn.saturating_add(1);
 
         let trace_start = pipeline_trace_enabled().then(Instant::now);
-        let pane_count = self.terminal_manager.pane_count();
+        let pane_count = self.runtime.manager.pane_count();
         // Where the cursor is, read before the frame is acquired and the
         // terminals are locked for drawing.
         let cursor_cell = self.cursor_cell_rect();
@@ -53,7 +53,7 @@ impl App {
         // Tabs and panes close from many places; whatever their images left
         // in the texture cache goes here.
         self.renderer
-            .retain_terminal_images(&self.terminal_manager.terminal_uids());
+            .retain_terminal_images(&self.runtime.manager.terminal_uids());
         let drawn = if pane_count > 1 {
             self.render_multi_pane(&view, cursor_cell)
         } else {
@@ -74,11 +74,11 @@ impl App {
         let presented_at = trace_start.map(|_| Instant::now());
 
         // Clear dirty flags after successful render
-        self.terminal_manager.clear_dirty();
+        self.runtime.manager.clear_dirty();
         // Clear render dirty flags of the sessions that were just
         // drawn so the renderer can reuse cached GPU buffers. Hidden
         // tabs' sessions stay dirty until they are shown.
-        if let Some(ref mut server) = self.protocol_server {
+        if let Some(ref mut server) = self.runtime.protocol {
             for session in server.active_tab_sessions_mut() {
                 session.clear_render_dirty();
                 session.clear_scroll_dirty();
@@ -117,11 +117,12 @@ impl App {
     fn cursor_cell_rect(&self) -> Option<CellRect> {
         let (width, height) = self.renderer.cell_dimensions();
         let top = self.renderer.tab_bar_height();
-        let (origin_x, origin_y) = if self.terminal_manager.pane_count() > 1 {
+        let (origin_x, origin_y) = if self.runtime.manager.pane_count() > 1 {
             let size = self.window.inner_size();
-            let focused = self.terminal_manager.focused_terminal_id()?;
+            let focused = self.runtime.manager.focused_terminal_id()?;
             let (_, (x, y, _, _)) = self
-                .terminal_manager
+                .runtime
+                .manager
                 .active_pane_rects(size.width as f32, size.height as f32 - top)
                 .into_iter()
                 .find(|(id, _)| *id == focused)?;
@@ -176,7 +177,8 @@ impl App {
         cursor_cell: Option<CellRect>,
     ) -> bool {
         let Some((pane, terminal)) = self
-            .terminal_manager
+            .runtime
+            .manager
             .focused_terminal()
             .map(|t| (t.id, t.event_loop.terminal()))
         else {
@@ -230,7 +232,7 @@ impl App {
         // ones of this pane or not bound yet: a session in a background
         // tab, or bound to a pane that closed under it, must not paint over
         // what the user is looking at.
-        if let Some(ref server) = self.protocol_server {
+        if let Some(ref server) = self.runtime.protocol {
             if server.pane_or_unbound_sessions(pane).next().is_some() {
                 let search_matches =
                     if self.native_search_active && !self.native_search_matches.is_empty() {
@@ -242,17 +244,20 @@ impl App {
                 // Collect live region IDs (across all tabs and surfaces, so
                 // switching tabs does not evict images of hidden sessions)
                 // for cache eviction.
-                let live_regions: std::collections::HashSet<ultty_protocol::RegionId> = server
-                    .sessions()
-                    .flat_map(|s| s.scene().iter_all().map(|r| r.id))
-                    .collect();
+                let live_regions: std::collections::HashSet<ultty::renderer::NativeResourceKey> =
+                    server
+                        .sessions()
+                        .flat_map(|s| s.scene().iter_all().map(move |r| (s.session_id(), r.id)))
+                        .collect();
                 self.renderer.retain_native_images(&live_regions);
 
                 self.renderer.render_with_native_sessions(
                     view,
                     &terminal,
                     &overlay,
-                    server.pane_or_unbound_sessions(pane),
+                    server
+                        .pane_or_unbound_sessions(pane)
+                        .map(|session| session as &dyn ultty::scene::view::NativeRenderSource),
                     search_matches,
                     self.native_search_index,
                 );
@@ -276,7 +281,7 @@ impl App {
         // panes through these guards; locking a pane's terminal again here
         // would deadlock.
         let locked = lock_active_panes(
-            &self.terminal_manager,
+            &self.runtime.manager,
             self.renderer.surface_size().into(),
             self.tab_bar.content_top(),
         );
@@ -284,7 +289,7 @@ impl App {
             return false;
         }
 
-        let panes = pane_draws(&locked, self.protocol_server.as_ref());
+        let panes = pane_draws(&locked, self.runtime.protocol.as_ref());
 
         // Check if bell is still active
         let bell_active = self
@@ -352,8 +357,12 @@ pub(super) fn pane_draws<'a>(
         .map(|pane| PaneDraw {
             terminal: &pane.terminal,
             info: pane.info,
-            sessions: server
-                .map_or_else(Vec::new, |server| server.pane_sessions(pane.id).collect()),
+            sessions: server.map_or_else(Vec::new, |server| {
+                server
+                    .pane_sessions(pane.id)
+                    .map(|session| session as &dyn ultty::scene::view::NativeRenderSource)
+                    .collect()
+            }),
         })
         .collect()
 }

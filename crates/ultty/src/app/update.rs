@@ -27,13 +27,15 @@ impl App {
                 .as_ref()
                 .and_then(|watcher| watcher.next_deadline()),
             native_sessions: self
-                .protocol_server
+                .runtime
+                .protocol
                 .as_ref()
                 .map_or(0, |server| server.session_count()),
             control_wait: self.next_control_wait_deadline(),
             search_pending: self.search_job.is_some(),
             anchor_release: self
-                .protocol_server
+                .runtime
+                .protocol
                 .as_ref()
                 .and_then(|server| server.next_pairing_deadline()),
             accessibility: self
@@ -42,132 +44,6 @@ impl App {
                 .and_then(|adapter| adapter.next_deadline()),
         }
         .next_wake(now)
-    }
-
-    /// Move in-band protocol data between each tab's PTY and the protocol
-    /// server (ADR 0018).
-    ///
-    /// Only a tab with a single pane can host an in-band session: the
-    /// native scene covers the whole tab, and a pane's app cannot own it.
-    /// Data from any other pane is answered with nothing, which releases the
-    /// held query replies so the app's probe sees DA1 first and falls back
-    /// to ANSI.
-    fn pump_in_band(&mut self) {
-        let tabs: Vec<(
-            ultty::terminal_manager::TabId,
-            Vec<ultty::terminal_manager::TerminalId>,
-        )> = self
-            .terminal_manager
-            .tabs()
-            .iter()
-            .map(|tab| (tab.id, tab.terminals.clone()))
-            .collect();
-        for (tab_id, terminals) in tabs {
-            let single = terminals.len() == 1;
-            for terminal_id in terminals {
-                let Some(terminal) = self.terminal_manager.terminal(terminal_id) else {
-                    continue;
-                };
-                let event_loop = &terminal.event_loop;
-                let Some(input) = event_loop.take_in_band() else {
-                    continue;
-                };
-                let reply = match self.protocol_server.as_mut() {
-                    Some(server) if single => {
-                        server.in_band_input(
-                            tab_id,
-                            event_loop.foreground_pgrp(),
-                            || event_loop.foreground_pids(),
-                            &input.bytes,
-                            input.broken,
-                        );
-                        server.take_tab_in_band_output(tab_id)
-                    }
-                    _ => Vec::new(),
-                };
-                if let Err(e) = event_loop.finish_in_band(&reply) {
-                    tracing::warn!(
-                        "Failed to answer in-band data on tab {}: {}",
-                        tab_id.raw(),
-                        e
-                    );
-                }
-            }
-        }
-
-        let Some(server) = self.protocol_server.as_mut() else {
-            return;
-        };
-        for tab_id in server.in_band_tabs() {
-            let terminal = self
-                .terminal_manager
-                .tabs()
-                .iter()
-                .find(|tab| tab.id == tab_id)
-                .filter(|tab| tab.terminals.len() == 1)
-                .and_then(|tab| self.terminal_manager.terminal(tab.terminals[0]));
-            let Some(terminal) = terminal else {
-                // The tab was split or closed under the session.
-                server.end_in_band_session(tab_id);
-                continue;
-            };
-            let event_loop = &terminal.event_loop;
-            server.end_in_band_if_app_gone(tab_id, event_loop.foreground_pgrp());
-            let out = server.take_tab_in_band_output(tab_id);
-            if let Err(e) = event_loop.send_in_band(&out) {
-                tracing::warn!("Failed to send in-band data to tab {}: {}", tab_id.raw(), e);
-                server.end_in_band_session(tab_id);
-            }
-        }
-    }
-
-    /// Pair native sessions' inline surfaces with the anchors in their
-    /// tabs' output (ADR 0020). A terminal gets a pass when it had output
-    /// (`with_output`) or still has surfaces to place or follow; the pass
-    /// also tells apps when a surface scrolls off or back onto the screen.
-    /// Returns whether a surface was written into the focused pane's rows,
-    /// which changes what a screen reader is shown.
-    fn pair_inline_surfaces(
-        &mut self,
-        with_output: &[ultty::terminal_manager::TerminalId],
-        now: Instant,
-    ) -> bool {
-        let Some(server) = self.protocol_server.as_mut() else {
-            return false;
-        };
-        let focused = self.terminal_manager.focused_terminal().map(|t| t.id);
-        let mut focused_written = false;
-        let active = self.terminal_manager.active_tab().map(|tab| tab.id);
-        for tab in self.terminal_manager.tabs() {
-            let single_pane = tab.terminals.len() == 1;
-            for &terminal_id in &tab.terminals {
-                if !with_output.contains(&terminal_id) && !server.needs_pairing(tab.id, terminal_id)
-                {
-                    continue;
-                }
-                let Some(managed) = self.terminal_manager.terminal(terminal_id) else {
-                    continue;
-                };
-                let mut terminal = managed.event_loop.terminal();
-                let wrote = server.pair_inline_surfaces(
-                    tab.id,
-                    terminal_id,
-                    &mut terminal,
-                    single_pane,
-                    single_pane && Some(tab.id) == active,
-                    now,
-                );
-                focused_written |= wrote && Some(terminal_id) == focused;
-            }
-        }
-        server.expire_unplaced_surfaces(now);
-        let terminal_manager = &self.terminal_manager;
-        server.retain_pairings(|terminal_id| terminal_manager.terminal(terminal_id).is_some());
-        // A surface placed or dropped just now is drawn in this frame.
-        if server.active_tab_sessions().any(|s| s.is_render_dirty()) {
-            self.needs_redraw = true;
-        }
-        focused_written
     }
 
     /// Whether the focused pane's cursor should blink: the config allows
@@ -183,7 +59,8 @@ impl App {
     }
 
     fn sync_update_active(&self) -> bool {
-        self.terminal_manager
+        self.runtime
+            .manager
             .focused_terminal()
             .map(|t| t.event_loop.terminal().modes().synchronized_update)
             .unwrap_or(false)
@@ -198,8 +75,6 @@ impl App {
         }
         self.refresh_runtime_wakeup_fds();
 
-        self.advance_search();
-
         // Check for config file changes (hot-reload)
         if let Some(ref mut watcher) = self.config_watcher {
             if watcher.poll(Instant::now()) {
@@ -208,44 +83,23 @@ impl App {
             }
         }
 
-        // Poll native protocol server for TUI app messages
-        if let Some(ref mut server) = self.protocol_server {
-            if let Err(e) = server.poll(Some(Duration::ZERO)) {
-                tracing::warn!("Protocol server poll error: {}", e);
-            }
-            // Tick scroll animations
-            if server.update_animations() {
-                self.needs_redraw = true;
-            }
-            // Redraw when a visible native session has new content
-            if server.active_tab_sessions().any(|s| s.is_render_dirty()) {
-                self.needs_redraw = true;
-            }
-            // Check keepalive timeouts
-            server.check_keepalives();
-
-            // Handle clipboard operations from native sessions
-            let gets = server.pending_clipboard_gets();
-            for key in gets {
+        match self.runtime.poll_native() {
+            Ok(redraw) => self.needs_redraw |= redraw,
+            Err(error) => tracing::warn!(%error, "Protocol server poll error"),
+        }
+        if let Some(server) = self.runtime.protocol.as_mut() {
+            for key in server.pending_clipboard_gets() {
                 let text = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok());
                 server.send_clipboard_content(key, text);
             }
-            let sets = server.pending_clipboard_sets();
-            for (_key, text) in sets {
+            for (_key, text) in server.pending_clipboard_sets() {
                 if let Some(ref mut cb) = self.clipboard {
-                    if let Err(e) = cb.set_text(text) {
-                        tracing::warn!("Failed to set clipboard from native session: {}", e);
+                    if let Err(error) = cb.set_text(text) {
+                        tracing::warn!(%error, "Failed to set clipboard from native session");
                     }
                 }
             }
         }
-
-        // Sessions that just connected learn their pane; panes that were
-        // laid out again since the last update size their sessions.
-        self.bind_native_sessions();
-        self.sync_native_viewports_if_panes_changed();
-
-        self.pump_in_band();
 
         if let Some(ref mut server) = self.control_server {
             if let Err(e) = server.poll(Some(Duration::ZERO)) {
@@ -265,41 +119,35 @@ impl App {
         }
 
         // Get the focused terminal ID for title updates
-        let focused_id = self.terminal_manager.focused_terminal().map(|t| t.id);
+        let focused_id = self.runtime.manager.focused_terminal().map(|t| t.id);
         let tab_state_before_cleanup = (
-            self.terminal_manager.tab_count(),
-            self.terminal_manager.active_tab().map(|tab| tab.id),
+            self.runtime.manager.tab_count(),
+            self.runtime.manager.active_tab().map(|tab| tab.id),
         );
 
         // Process all terminals
-        match self.terminal_manager.process_all() {
+        match self.runtime.manager.process_all() {
             Ok(all_events) => {
                 let mut content_changed = false;
                 let mut tab_titles_changed = false;
                 let mut with_output = Vec::new();
                 // What a screen reader is shown changed (ADR 0021 §3).
                 let mut shown_changed = false;
-                let subscribed = self
-                    .control_server
-                    .as_ref()
-                    .is_some_and(|server| server.has_subscribers());
                 for (terminal_id, events) in all_events {
                     for event in events {
                         self.observe_control_wait_event(terminal_id, &event);
-                        if subscribed {
-                            if let (Some(server), Some(control_event)) = (
-                                self.control_server.as_mut(),
-                                super::control_events::control_event(terminal_id, &event),
-                            ) {
-                                server.publish(&control_event);
-                            }
+                        if let (Some(server), Some(control_event)) = (
+                            self.control_server.as_mut(),
+                            super::control_events::control_event(terminal_id, &event),
+                        ) {
+                            server.publish(&control_event);
                         }
                         match event {
                             TerminalEvent::Redraw => {
                                 with_output.push(terminal_id);
                                 // A background tab's output is drawn when
                                 // the tab is shown.
-                                if self.terminal_manager.is_on_screen(terminal_id) {
+                                if self.runtime.manager.is_on_screen(terminal_id) {
                                     self.needs_redraw = true;
                                 }
                                 // Output may come with a new foreground
@@ -382,7 +230,7 @@ impl App {
                             }
                             TerminalEvent::Progress(progress) => {
                                 if let Some(terminal) =
-                                    self.terminal_manager.terminal_mut(terminal_id)
+                                    self.runtime.manager.terminal_mut(terminal_id)
                                 {
                                     terminal.progress = progress_status(progress);
                                     tab_titles_changed = true;
@@ -392,23 +240,34 @@ impl App {
                                 // A program that died mid-way leaves its
                                 // progress behind; the prompt clears it.
                                 if let Some(terminal) =
-                                    self.terminal_manager.terminal_mut(terminal_id)
+                                    self.runtime.manager.terminal_mut(terminal_id)
                                 {
                                     tab_titles_changed |= terminal.progress.take().is_some();
                                 }
                             }
                             // Only subscribers hear of this (above).
+                            TerminalEvent::ProgramStatusChanged { .. } => {
+                                tab_titles_changed = true;
+                            }
+                            TerminalEvent::ShellCommandFinished { .. } => {}
                             TerminalEvent::CommandStarted => {}
                         }
                     }
                 }
 
                 // Clean up exited terminals
-                self.terminal_manager.cleanup_exited();
-                shown_changed |= self.pair_inline_surfaces(&with_output, now);
+                self.runtime.cleanup_exited();
+                shown_changed |= self.runtime.pair_inline_surfaces(&with_output, now);
+                if self.runtime.protocol.as_ref().is_some_and(|server| {
+                    server
+                        .active_tab_sessions()
+                        .any(|session| session.is_render_dirty())
+                }) {
+                    self.needs_redraw = true;
+                }
                 let tab_state_after_cleanup = (
-                    self.terminal_manager.tab_count(),
-                    self.terminal_manager.active_tab().map(|tab| tab.id),
+                    self.runtime.manager.tab_count(),
+                    self.runtime.manager.active_tab().map(|tab| tab.id),
                 );
                 let tab_structure_changed = tab_state_before_cleanup != tab_state_after_cleanup;
                 if tab_title_refresh_due(
@@ -421,7 +280,7 @@ impl App {
                 }
 
                 // Check if all terminals have exited
-                if self.terminal_manager.all_exited() {
+                if self.runtime.manager.all_exited() {
                     tracing::info!("All terminals exited");
                     return true;
                 }
@@ -442,9 +301,11 @@ impl App {
             }
         }
 
+        self.advance_search();
         self.publish_pane_changes();
         self.complete_pending_control_waits();
         self.complete_pending_override_pushes();
+        self.complete_pending_semantic_actions();
         self.expire_pending_resizes();
 
         // Check if bell animation needs to continue
@@ -470,6 +331,7 @@ impl App {
 
     /// Draw a frame for `WindowEvent::RedrawRequested`, if one is due.
     pub(super) fn redraw(&mut self) {
+        self.reconcile_copy_mode_pane();
         let now = Instant::now();
         let due = self.frame_due(now);
         if !self.frame_pacing.should_draw(due.is_some()) {

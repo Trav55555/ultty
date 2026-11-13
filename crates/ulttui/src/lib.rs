@@ -39,6 +39,8 @@ compile_error!(
 pub mod app;
 pub mod backend;
 pub mod cmd;
+/// Optional terminal program-status reporting, shared with low-level clients.
+pub use ultty_client::program_status;
 pub mod edit;
 pub mod event;
 pub mod focus;
@@ -83,3 +85,6 @@ pub mod prelude {
     // Vim types
     pub use crate::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator};
 }
+
+/// Application-owned semantic action vocabulary.
+pub use ultty_protocol::SemanticActionKind;

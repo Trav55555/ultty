@@ -1,0 +1,26 @@
+{
+  "passed": true,
+  "budget_seconds": 180,
+  "qualification": "actual SSH network; Rust connect_ssh plus exact framed helper replay",
+  "remote_binary_sha256": "4d92c384d3565fd44ada32458c164dbafd07e8d5f94757798b5e9fd2d91e9930",
+  "owner": {
+    "pid": 27182,
+    "epoch": "317cc6774e18bd80b022d800820ccb9b1bfad6f03d9a2ad9117d8eacfd476cd3"
+  },
+  "counter_pid": 27183,
+  "native_session": 1,
+  "gui": {
+    "binary": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-bin/ultty",
+    "binary_sha256": "ed2fe21a2250861b8d0a7246fd69423bdb64757f5fec4e65033c9f1725e1686f",
+    "oracle_sha256": "f56c9cc3172ca554112f0d52fbfc4d363f2ac9481992f73243ef286b2b08d26c",
+    "file": "remote-counter.png",
+    "sha256": "050a29c529ee559cf3cc5a5fd8e8098c075eba754d657083d08e3cc1a56c1229",
+    "width": 1000,
+    "height": 700,
+    "interior_ink": 206480
+  },
+  "hidden_native_retained": true,
+  "replayed_child_pid": 27336,
+  "cleanup": "temporary grants revoked; scoped token files removed; owned test host confirmed stopped",
+  "seconds": 16.7102025130298
+}

@@ -1,0 +1,13 @@
+{
+  "source_commit": "447032b",
+  "command": [
+    "bash",
+    "scripts/e2e/inline-surface.sh",
+    "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-inline-01"
+  ],
+  "python": "/home/travers/projects/porygon-ai/porygon-ai/.venv/bin/python3",
+  "site_packages_disabled": true,
+  "python_wrapper_sha256": "58f9109f394ef0350468132079ec8cac942bfea2d74802a36fe23d5917e09392",
+  "exit_code": 0,
+  "binary_manifest": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/manifest.json"
+}

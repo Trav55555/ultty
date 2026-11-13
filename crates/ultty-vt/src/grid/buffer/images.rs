@@ -123,6 +123,8 @@ impl Buffer {
 /// The images of a screen while [`Buffer::reflow_all`] rewraps its rows:
 /// they are followed to the row that holds their top-left corner.
 pub(super) struct ImagesInReflow {
+    /// Image tops already evicted while their lower pixels remain retained.
+    partial: Vec<TerminalImage>,
     /// Sorted by line; the slot of an image is its index here.
     images: Vec<TerminalImage>,
     /// The first image not yet reached.
@@ -134,10 +136,20 @@ pub(super) struct ImagesInReflow {
 impl ImagesInReflow {
     pub(super) fn new(buffer: &mut Buffer) -> Self {
         let evicted = buffer.evicted;
-        let mut images = buffer.images.take_all();
-        images.retain(|image| image.line >= evicted);
+        let (mut partial, mut images): (Vec<_>, Vec<_>) = buffer
+            .images
+            .take_all()
+            .into_iter()
+            .partition(|image| image.line < evicted);
+        partial.retain(|image| {
+            image
+                .line
+                .checked_add(usize::from(image.cell_height))
+                .is_some_and(|bottom| bottom > evicted)
+        });
         images.sort_by_key(|image| image.line);
         Self {
+            partial,
             images,
             next: 0,
             evicted,
@@ -176,6 +188,18 @@ impl ImagesInReflow {
             .collect();
         moved.sort_unstable();
         let evicted = buffer.evicted;
+        for mut image in self.partial {
+            // Its lost top precedes row zero of the reflow. Newly dropped
+            // rows advance the origin and crop it further, never move it down.
+            if image
+                .line
+                .checked_add(usize::from(image.cell_height))
+                .is_some_and(|bottom| bottom > evicted)
+            {
+                image.start_col = image.start_col.min(max_col);
+                buffer.images.add(image);
+            }
+        }
         let mut images: Vec<Option<TerminalImage>> = self.images.into_iter().map(Some).collect();
         for (slot, made) in moved {
             let Some(mut image) = images.get_mut(slot).and_then(Option::take) else {

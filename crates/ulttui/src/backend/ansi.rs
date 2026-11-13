@@ -3,7 +3,7 @@
 mod input;
 
 use std::fs::File;
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Once;
 
@@ -35,6 +35,14 @@ enum Input {
 }
 
 impl AnsiBackend {
+    /// Serialize reports with the ratatui writer on the app loop.
+    pub(super) fn write_status(&mut self, wire: &[u8]) -> crate::Result<()> {
+        let terminal = self.terminal.as_mut().ok_or(crate::Error::NotInitialized)?;
+        terminal.backend_mut().write_all(wire)?;
+        terminal.backend_mut().flush()?;
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self {
             terminal: None,

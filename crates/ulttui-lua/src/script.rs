@@ -157,6 +157,11 @@ pub enum ScriptMsg {
         value: String,
         cursor: usize,
     },
+    /// An explicitly declared semantic action was dispatched.
+    Action {
+        id: String,
+        action: ulttui::SemanticActionKind,
+    },
     /// A widget was clicked (native mode).
     Click { id: String },
     /// A named timer from the app's `every` table fired.
@@ -179,9 +184,10 @@ struct AppFns {
     update: Option<Function>,
     view: Function,
     every: Vec<(String, Duration)>,
+    actions: std::collections::HashSet<String>,
 }
 
-const APP_KEYS: &[&str] = &["init", "update", "view", "every"];
+const APP_KEYS: &[&str] = &["init", "update", "view", "every", "actions"];
 
 /// What a reload did.
 #[derive(Debug, PartialEq, Eq)]
@@ -367,6 +373,13 @@ impl Script {
         Ok((app, state, commands, view))
     }
 
+    /// Whether the loaded app explicitly declares activation for this ID.
+    pub fn supports_activation(&self, widget_id: &str) -> bool {
+        self.app
+            .as_ref()
+            .is_some_and(|app| app.actions.contains(widget_id))
+    }
+
     /// Run `update(state, msg)`. On error the state value is kept; changes
     /// the update made to it in place before failing stay.
     pub fn update(&mut self, msg: &ScriptMsg) -> Vec<Command> {
@@ -536,11 +549,32 @@ fn app_fns(value: Value) -> Result<AppFns, String> {
             ))
         }
     }
+    let mut actions = std::collections::HashSet::new();
+    match table
+        .get::<Value>("actions")
+        .map_err(|error| error.to_string())?
+    {
+        Value::Nil => {}
+        Value::Table(declarations) => {
+            for pair in declarations.pairs::<String, String>() {
+                let (widget_id, action) = pair.map_err(|error| error.to_string())?;
+                if !ultty_protocol::valid_action_widget_id(&widget_id)
+                    || action != "activate"
+                    || actions.len() >= ultty_protocol::MAX_REGION_COUNT
+                {
+                    return Err("app.actions must map bounded widget IDs to 'activate'".into());
+                }
+                actions.insert(widget_id);
+            }
+        }
+        _ => return Err("app.actions must be a table mapping widget IDs to 'activate'".into()),
+    }
     Ok(AppFns {
         init: function("init")?,
         update: function("update")?,
         view,
         every,
+        actions,
     })
 }
 
@@ -619,6 +653,11 @@ fn msg_table(lua: &Lua, msg: &ScriptMsg) -> mlua::Result<Table> {
             t.set("id", id.as_str())?;
             t.set("value", value.as_str())?;
             t.set("cursor", *cursor)?;
+        }
+        ScriptMsg::Action { id, action } => {
+            t.set("type", "action")?;
+            t.set("id", id.as_str())?;
+            t.set("action", action.as_str())?;
         }
         ScriptMsg::Click { id } => {
             t.set("type", "click")?;

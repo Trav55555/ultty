@@ -1,0 +1,12 @@
+{
+  "historical_feature_checkpoint": "6881bc4",
+  "qualification": "actual SSH via devbox DNS/public path; Tailscale absent",
+  "source_archive_sha256": "a9af2504eceff70b94b2c86365548f9fe0c4bb04571d67be147b2b8ae289cf9b",
+  "remote_counter_sha256": "cdb55a4411362209364876c73549f507db9b7bf262a73904718aef97f7f1c7b1",
+  "remote_compiler": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "local_helper_and_harness_sha256": {
+    "/home/travers/projects/tui-terminal/target/rex-vt-check/debug/ultty-session": "c80619207ef9e1d913f2c345a0fe105650284fcf52f50370616599d55c4005cd",
+    "/home/travers/projects/tui-terminal/.worktrees/rex-features/scripts/e2e/session-ssh.py": "404072070d2dd834ad731c97834ad1dc7469d34f22a1e2fe4040a56f198ff776"
+  },
+  "remote_host_sha256": "c92b5cef303f86efcd25a519e4c3b133726297b07082231f8ef684cfb17d0683"
+}

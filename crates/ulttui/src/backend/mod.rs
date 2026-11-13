@@ -31,6 +31,22 @@ pub enum Backend {
 }
 
 impl Backend {
+    /// Write optional status through the backend's own output, without reading input.
+    pub fn report_status(
+        &mut self,
+        report: &ultty_client::program_status::Report,
+    ) -> crate::Result<()> {
+        let wire = report
+            .encode()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        match self {
+            Backend::Native(backend) => backend.write_status(&wire),
+            Backend::Ansi(backend) => backend.write_status(&wire),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(backend) => backend.write_status(&wire),
+        }
+    }
+
     /// Detect and create the appropriate backend.
     ///
     /// This creates a backend based on environment detection, but the actual
@@ -112,6 +128,57 @@ impl Backend {
             Backend::Ansi(b) => b.render(view),
             #[cfg(any(test, feature = "test-utils"))]
             Backend::Mock(b) => b.render(view),
+        }
+    }
+
+    pub(crate) fn render_with_actions(
+        &mut self,
+        view: &impl View,
+        supports: impl FnMut(&str, ultty_protocol::SemanticActionKind) -> bool,
+        root_widget: Option<(&str, bool)>,
+    ) -> crate::Result<()> {
+        match self {
+            Backend::Native(backend) => backend.render_with_actions(view, supports, root_widget),
+            _ => self.render(view),
+        }
+    }
+
+    /// Take a native request for explicit application dispatch.
+    pub fn take_action_request(&mut self) -> Option<ultty_protocol::SemanticActionRequest> {
+        match self {
+            Backend::Native(backend) => backend.take_action_request(),
+            Backend::Ansi(_) => None,
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(backend) => backend.action_requests.pop_front(),
+        }
+    }
+
+    pub(crate) fn validate_action_request(
+        &self,
+        request: &ultty_protocol::SemanticActionRequest,
+    ) -> Result<(), String> {
+        match self {
+            Backend::Native(backend) => backend.validate_action_request(request),
+            Backend::Ansi(_) => Err("semantic actions require a native connection".into()),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(_) => Ok(()),
+        }
+    }
+
+    /// Report whether an action was applied by its handler or refused.
+    pub fn report_action_result(
+        &mut self,
+        request_id: u32,
+        error: Option<String>,
+    ) -> crate::Result<()> {
+        match self {
+            Backend::Native(backend) => backend.send_action_result(request_id, error),
+            Backend::Ansi(_) => Ok(()),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(backend) => {
+                backend.action_results.push((request_id, error));
+                Ok(())
+            }
         }
     }
 
