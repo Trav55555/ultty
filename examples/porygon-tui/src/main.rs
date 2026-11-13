@@ -121,6 +121,7 @@ pub(crate) struct PorygonTui {
     pub(crate) started: bool,
     pub(crate) pending_approval: Option<ApprovalRequest>,
     pub(crate) show_approval_modal: bool,
+    pub(crate) approval_scroll: usize,
     pub(crate) weather: Option<WeatherData>,
     /// Opt-in flag for the weather panel (see the crate docs).
     pub(crate) weather_enabled: bool,
@@ -204,6 +205,7 @@ impl PorygonTui {
             started: false,
             pending_approval: None,
             show_approval_modal: false,
+            approval_scroll: 0,
             weather: None,
             weather_enabled: weather_enabled_from_env(),
             clock_text: format_clock(),

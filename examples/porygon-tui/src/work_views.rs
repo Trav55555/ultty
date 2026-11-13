@@ -4,7 +4,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::work::{attention, category, AttentionItem, Page};
 use crate::PorygonTui;
 
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut rows = Vec::new();
     for line in text.split('\n') {
@@ -24,16 +24,9 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     rows
 }
 
-pub(crate) fn view(app: &PorygonTui) -> Column {
+fn rows(app: &PorygonTui) -> (Vec<String>, usize) {
     let state = &app.work;
     let width = usize::from(app.terminal_width.saturating_sub(2).max(1));
-    let available = usize::from(app.terminal_height.saturating_sub(3).max(1));
-    let title = match state.page {
-        Page::Work => "Work | Enter review | r refresh | Esc",
-        Page::Attention => "Attention | Enter inspect | r refresh | Esc",
-        Page::Detail => "Review | a attach | r refresh | Esc",
-        Page::Closed => "",
-    };
     let mut rows = Vec::new();
     let mut selected_row = 0;
     if state.loading {
@@ -152,6 +145,26 @@ pub(crate) fn view(app: &PorygonTui) -> Column {
         }
         Page::Closed => {}
     }
+    (rows, selected_row)
+}
+
+pub(crate) fn max_scroll(app: &PorygonTui) -> usize {
+    rows(app)
+        .0
+        .len()
+        .saturating_sub(usize::from(app.terminal_height.saturating_sub(3).max(1)))
+}
+
+pub(crate) fn view(app: &PorygonTui) -> Column {
+    let state = &app.work;
+    let available = usize::from(app.terminal_height.saturating_sub(3).max(1));
+    let title = match state.page {
+        Page::Work => "Work | Enter review | r refresh | Esc",
+        Page::Attention => "Attention | Enter inspect | r refresh | Esc",
+        Page::Detail => "Review | a attach | r refresh | Esc",
+        Page::Closed => "",
+    };
+    let (rows, selected_row) = rows(app);
     let start = if state.page == Page::Detail {
         state
             .detail_scroll

@@ -170,64 +170,59 @@ impl PorygonTui {
         }
     }
 
-    fn approval_modal_view(&self, req: &ApprovalRequest) -> Column {
-        let risk_pct = if req.risk_score < 0.0 {
+    fn approval_rows(&self, request: &ApprovalRequest) -> Vec<String> {
+        let width = usize::from(self.terminal_width.saturating_sub(2).max(1));
+        let risk = if request.risk_score < 0.0 {
             "unknown".into()
         } else {
-            format!("{:.0}%", req.risk_score * 100.0)
+            format!("{:.0}%", request.risk_score * 100.0)
         };
-        let risk_color = if req.risk_score < 0.0 {
-            Color::Rgb(136, 136, 136)
-        } else if req.risk_score >= 0.7 {
-            Color::Rgb(255, 93, 110)
-        } else if req.risk_score >= 0.3 {
-            Color::Rgb(249, 226, 175)
+        let scope = if self.approval_is_stream {
+            "current stream"
         } else {
-            Color::Rgb(166, 227, 161)
+            "durable request"
         };
-        let reversible_text = match req.reversible {
-            Some(true) => "yes",
-            Some(false) => "no",
-            None => "unknown",
-        };
+        let content = format!("Request: {}\nScope: {scope}\nTool: {}\nReason: {}\nRisk: {risk}\nAffected scope: {}\nReversible: {}\nArguments:\n{}",
+            request.id, request.tool_name, request.reasoning, request.blast_radius,
+            match request.reversible {Some(true)=>"yes",Some(false)=>"no",None=>"unknown"},
+            serde_json::to_string_pretty(&request.params).unwrap_or_else(|error| format!("Could not display arguments: {error}")));
+        crate::work_views::wrap(&content, width)
+    }
 
-        let params_str = serde_json::to_string_pretty(&req.params)
-            .unwrap_or_else(|_| format!("{:?}", req.params));
+    fn approval_max_scroll(&self) -> usize {
+        self.pending_approval
+            .as_ref()
+            .map(|request| self.approval_rows(request).len())
+            .unwrap_or(0)
+            .saturating_sub(usize::from(self.terminal_height.saturating_sub(5).max(1)))
+    }
 
-        Column::new()
-            .gap(0.5)
+    fn approval_page_view(&self, request: &ApprovalRequest) -> Column {
+        let available = usize::from(self.terminal_height.saturating_sub(5).max(1));
+        let rows = self.approval_rows(request);
+        let start = self
+            .approval_scroll
+            .min(rows.len().saturating_sub(available));
+        let mut page = Column::new()
             .width(Dimension::Percent(100.0))
-            .child(
-                RichText::new()
-                    .span("Tool: ", Style::new().fg(Color::Rgb(136, 136, 136)))
-                    .span(
-                        &req.tool_name,
-                        Style::new().fg(Color::Rgb(58, 224, 221)).bold(),
-                    )
-                    .fill_width(),
-            )
-            .child(
-                RichText::new()
-                    .span("Risk: ", Style::new().fg(Color::Rgb(136, 136, 136)))
-                    .span(&risk_pct, Style::new().fg(risk_color).bold())
-                    .span("  Blast: ", Style::new().fg(Color::Rgb(136, 136, 136)))
-                    .span(&req.blast_radius, Style::default())
-                    .span("  Reversible: ", Style::new().fg(Color::Rgb(136, 136, 136)))
-                    .span(reversible_text, Style::default())
-                    .fill_width(),
-            )
-            .child(
-                RichText::new()
-                    .span(
-                        &req.reasoning,
-                        Style {
-                            dim: true,
-                            ..Style::new()
-                        },
-                    )
-                    .fill_width(),
-            )
-            .child(MarkdownView::new(format!("```json\n{}\n```", params_str)))
+            .height(Dimension::Percent(100.0))
+            .padding(1.0)
+            .child(Text::new("Approval details | Esc back"))
+            .child(Text::new(if self.approval_in_flight {
+                "Decision unconfirmed | r refresh"
+            } else {
+                "y approve once | n deny | r refresh"
+            }))
+            .child(Text::new(format!(
+                "Up/Down PgUp/PgDn | rows {}-{} of {}",
+                start + 1,
+                (start + available).min(rows.len()),
+                rows.len()
+            )));
+        for row in rows.into_iter().skip(start).take(available) {
+            page = page.child(Text::new(row));
+        }
+        page
     }
 
     pub(crate) fn hex_gauge(&self) -> String {
@@ -271,7 +266,13 @@ impl PorygonTui {
             )
             .child(Spacer)
             .child(RichText::new().span(
-                format!(" F1 help F2 sessions F3 work F4 attention {} ", self.work.notice.map(|n| n.to_string()).unwrap_or_else(|| "?".into())),
+                format!(
+                        " F1 help F2 sessions F3 work F4 attention {} ",
+                        self.work
+                            .notice
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "?".into())
+                    ),
                 Style::default(),
             ))
     }
@@ -381,10 +382,41 @@ impl PorygonTui {
             return None;
         }
         if self.show_approval_modal {
+            self.approval_scroll = self.approval_scroll.min(self.approval_max_scroll());
             return match event {
                 Event::Quit => Some(Msg::AbortStream),
                 Event::Key(ke) => match ke.key {
-                    Key::Escape => Some(Msg::DismissApproval),
+                    Key::Escape => {
+                        self.approval_scroll = 0;
+                        Some(Msg::DismissApproval)
+                    }
+                    Key::Up | Key::PageUp => {
+                        self.approval_scroll =
+                            self.approval_scroll.saturating_sub(if ke.key == Key::Up {
+                                1
+                            } else {
+                                usize::from(self.terminal_height.saturating_sub(5).max(1))
+                            });
+                        None
+                    }
+                    Key::Down | Key::PageDown => {
+                        self.approval_scroll =
+                            self.approval_scroll.saturating_add(if ke.key == Key::Down {
+                                1
+                            } else {
+                                usize::from(self.terminal_height.saturating_sub(5).max(1))
+                            });
+                        self.approval_scroll = self.approval_scroll.min(self.approval_max_scroll());
+                        None
+                    }
+                    Key::Home => {
+                        self.approval_scroll = 0;
+                        None
+                    }
+                    Key::End => {
+                        self.approval_scroll = self.approval_max_scroll();
+                        None
+                    }
                     Key::Char('r') => Some(Msg::RefreshApproval),
                     Key::Char('y') if !self.approval_in_flight => Some(Msg::ApprovalDecision(true)),
                     Key::Char('n') if !self.approval_in_flight => {
@@ -396,6 +428,10 @@ impl PorygonTui {
             };
         }
         if self.work.page != crate::work::Page::Closed && !matches!(event, Event::Quit) {
+            self.work.detail_scroll = self
+                .work
+                .detail_scroll
+                .min(crate::work_views::max_scroll(self));
             if let Event::Key(ke) = event {
                 match ke.key {
                     Key::Escape => {
@@ -405,11 +441,32 @@ impl PorygonTui {
                             crate::work::Page::Closed
                         };
                     }
-                    Key::Up if self.work.page == crate::work::Page::Detail => {
-                        self.work.detail_scroll = self.work.detail_scroll.saturating_sub(1)
+                    Key::Up | Key::PageUp if self.work.page == crate::work::Page::Detail => {
+                        self.work.detail_scroll =
+                            self.work
+                                .detail_scroll
+                                .saturating_sub(if ke.key == Key::Up {
+                                    1
+                                } else {
+                                    usize::from(self.terminal_height.saturating_sub(3).max(1))
+                                });
                     }
-                    Key::Down if self.work.page == crate::work::Page::Detail => {
-                        self.work.detail_scroll = self.work.detail_scroll.saturating_add(1)
+                    Key::Down | Key::PageDown if self.work.page == crate::work::Page::Detail => {
+                        self.work.detail_scroll = self
+                            .work
+                            .detail_scroll
+                            .saturating_add(if ke.key == Key::Down {
+                                1
+                            } else {
+                                usize::from(self.terminal_height.saturating_sub(3).max(1))
+                            })
+                            .min(crate::work_views::max_scroll(self));
+                    }
+                    Key::Home if self.work.page == crate::work::Page::Detail => {
+                        self.work.detail_scroll = 0;
+                    }
+                    Key::End if self.work.page == crate::work::Page::Detail => {
+                        self.work.detail_scroll = crate::work_views::max_scroll(self);
                     }
                     Key::Up => self.work.selected = self.work.selected.saturating_sub(1),
                     Key::Down => {
@@ -587,7 +644,8 @@ impl PorygonTui {
                 "Shift+Enter: newline when terminal supports it.",
                 "Paste: insert text without sending.",
                 "Ctrl+C: stop active work.",
-                "Ctrl+C when idle: save draft and quit (press twice with draft).",
+                "Ctrl+C when idle: save draft and quit.",
+                "With a draft, press Ctrl+C twice to quit.",
                 "PgUp/PgDn: history. Ctrl+End: latest output.",
                 "Type / for commands. Ctrl+Space: complete.",
                 "/reconnect: inspect. /attach ID: read a run.",
@@ -601,17 +659,7 @@ impl PorygonTui {
         }
         if self.show_approval_modal {
             if let Some(req) = &self.pending_approval {
-                return Stack::new().child(main_content).child(
-                    Modal::new()
-                        .title("Tool Approval Required")
-                        .body_view(self.approval_modal_view(req))
-                        .buttons(if self.approval_in_flight {
-                            vec!["Decision unconfirmed", "R:refresh Esc:close"]
-                        } else {
-                            vec!["Approve once (y)", "Deny (n)", "Esc:close"]
-                        })
-                        .visible(true),
-                );
+                return Stack::new().child(self.approval_page_view(req));
             }
         }
         Stack::new().child(main_content)
@@ -633,6 +681,53 @@ mod tests {
             },
             focused_id: Some("chat-input".into()),
         })
+    }
+
+    #[test]
+    fn long_approval_is_readable_and_enter_cannot_decide() {
+        let mut app = PorygonTui::new();
+        app.terminal_width = 40;
+        app.terminal_height = 12;
+        app.pending_approval = Some(ApprovalRequest {
+            id: "approval-scoped-1".into(),
+            tool_name: "write_file".into(),
+            params: serde_json::json!({"content": format!("{}TAIL-ARGUMENT", "long value ".repeat(80))}),
+            risk_score: -1.0,
+            reasoning: "Inspect the complete request".into(),
+            blast_radius: "unknown".into(),
+            reversible: None,
+        });
+        app.show_approval_modal = true;
+        assert!(app.handle_event(&composer_key(Key::Enter, false)).is_none());
+        app.handle_event(&composer_key(Key::End, false));
+        assert!(app.approval_scroll > 20);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                app.approval_page_view(app.pending_approval.as_ref().unwrap())
+                    .render_ansi(frame, frame.area())
+            })
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("TAIL-ARGUMENT"), "{screen}");
+        let end = app.approval_scroll;
+        for _ in 0..20 {
+            app.handle_event(&composer_key(Key::Down, false));
+        }
+        assert_eq!(app.approval_scroll, end);
+        app.handle_event(&composer_key(Key::Up, false));
+        assert_eq!(app.approval_scroll, end - 1);
+        assert!(matches!(
+            app.handle_event(&composer_key(Key::Char('n'), false)),
+            Some(Msg::ApprovalDecision(false))
+        ));
     }
 
     #[test]
@@ -762,7 +857,7 @@ mod tests {
                 "F2: conversations; search, Enter to open, Ctrl+N new.",
                 "back to your draft",
                 "Ctrl+X then Enter: newline.",
-                "confirm to discard draft.",
+                "save draft and quit.",
                 "/attach ID: read a run.",
             ] {
                 assert!(
