@@ -158,8 +158,8 @@ impl<'a> TerminalHandler<'a> {
 
             // Erase operations
             Action::EraseInDisplay(mode) => match mode {
-                0 => self.terminal.grid_mut().erase_below(),
-                1 => self.terminal.grid_mut().erase_above(),
+                0 => self.terminal.buffer_mut().erase_below(),
+                1 => self.terminal.buffer_mut().erase_above(),
                 // Foot's `term_erase` drops the sixels on the erased rows
                 // too. Every image of the screen is on a visible row.
                 2 => {
@@ -171,17 +171,12 @@ impl<'a> TerminalHandler<'a> {
                 _ => {}
             },
             Action::EraseInLine(mode) => match mode {
-                0 => self.terminal.grid_mut().erase_line_right(),
-                1 => self.terminal.grid_mut().erase_line_left(),
-                2 => self.terminal.grid_mut().erase_line(),
+                0 => self.terminal.buffer_mut().erase_line_right(),
+                1 => self.terminal.buffer_mut().erase_line_left(),
+                2 => self.terminal.buffer_mut().erase_line(),
                 _ => {}
             },
-            Action::EraseCharacters(n) => {
-                let pos = self.terminal.grid().cursor().position;
-                self.terminal
-                    .grid_mut()
-                    .erase_cells(pos.row, pos.col, pos.col.saturating_add(n));
-            }
+            Action::EraseCharacters(n) => self.terminal.buffer_mut().erase_characters(n),
 
             // Line operations
             Action::InsertLines(n) => {
@@ -503,6 +498,8 @@ impl<'a> TerminalHandler<'a> {
             // Screen alignment pattern (DECALN — ESC # 8)
             Action::ScreenAlignmentPattern => {
                 self.terminal.grid_mut().fill_with_char('E');
+                // Foot overwrites the whole screen's sixels here too.
+                self.terminal.images_mut().clear();
                 self.terminal.grid_mut().reset_scroll_region();
                 self.terminal.grid_mut().cursor_mut().position =
                     crate::grid::CursorPosition::origin();
@@ -554,6 +551,7 @@ impl<'a> TerminalHandler<'a> {
             25 => grid.cursor().visible,
             40 => modes.allow_column_mode_switch,
             47 | 1047 | 1049 => terminal.is_alternate_screen(),
+            80 => modes.sixel_scrolling_disabled,
             1000 => modes.mouse_mode == MouseMode::Normal,
             1002 => modes.mouse_mode == MouseMode::ButtonEvent,
             1003 => modes.mouse_mode == MouseMode::AnyEvent,
@@ -816,9 +814,11 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.request_column_resize(columns);
                 // Clear the screen when switching column modes (per DECCOLM spec)
                 self.terminal.grid_mut().clear();
+                self.terminal.images_mut().clear();
                 self.terminal.grid_mut().cursor_mut().position =
                     crate::grid::CursorPosition::origin();
             }
+            Mode::SixelDisplay => self.terminal.modes_mut().sixel_scrolling_disabled = enabled,
             Mode::AlternateScreen => {
                 if enabled {
                     self.terminal.enter_alternate_screen();

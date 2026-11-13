@@ -471,8 +471,8 @@ fn private_mode_status(term: &mut Terminal, mode: u16) -> String {
 fn decrqm_reports_every_private_mode_it_implements() {
     // Modes whose set and reset forms are plain toggles.
     for mode in [
-        1u16, 5, 6, 7, 9, 12, 25, 40, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 2004, 2026,
-        2027,
+        1u16, 5, 6, 7, 9, 12, 25, 40, 80, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 2004,
+        2026, 2027,
     ] {
         let mut term = run(10, 3, format!("\x1b[?{mode}h").as_bytes());
         assert_eq!(private_mode_status(&mut term, mode), "1", "mode {mode} set");
@@ -1223,4 +1223,271 @@ fn invalid_utf8_shows_replacement_characters() {
     );
     // The truncated E2 82 at the end is still pending.
     assert_eq!(cursor, (0, 13));
+}
+
+// ---------------------------------------------------------------------------
+// Inline images under erases and text, and sixel scrolling
+// ---------------------------------------------------------------------------
+
+/// A red sixel `cols` cells wide and `rows` cells high at the default 8x16
+/// cell size. `rows` must be a multiple of 3: 48 pixels are eight bands.
+fn sixel_cells(cols: u16, rows: u16) -> Vec<u8> {
+    assert_eq!(rows % 3, 0);
+    let band = format!("#0!{}~", u32::from(cols) * 8);
+    let bands = vec![band; usize::from(rows / 3 * 8)];
+    format!("\x1bPq#0;2;100;0;0{}\x1b\\", bands.join("-")).into_bytes()
+}
+
+/// Each image of the active screen as `(row, col, cells wide, cells high)`,
+/// top first; the row is negative above the screen.
+fn pieces(term: &Terminal) -> Vec<(isize, u16, u16, u16)> {
+    let buffer = term.buffer();
+    let mut pieces: Vec<_> = term
+        .images()
+        .images()
+        .map(|image| {
+            (
+                buffer.screen_row_of_line(image.line),
+                image.start_col,
+                image.cell_width,
+                image.cell_height,
+            )
+        })
+        .collect();
+    pieces.sort_unstable();
+    pieces
+}
+
+/// A 20x10 terminal holding a 4 x 3 cell image at rows 2..=4, columns 4..=7.
+/// The cursor is left on (row 4, col 4).
+fn term_with_image() -> Terminal {
+    let mut term = run(20, 10, b"");
+    feed(&mut term, b"\x1b[3;5H");
+    feed(&mut term, &sixel_cells(4, 3));
+    assert_eq!(pieces(&term), [(2, 4, 4, 3)]);
+    term
+}
+
+/// Move to 1-based `row`, `col`, then feed `bytes`.
+fn at(term: &mut Terminal, row: u16, col: u16, bytes: &[u8]) {
+    feed(term, format!("\x1b[{row};{col}H").as_bytes());
+    feed(term, bytes);
+}
+
+#[test]
+fn erase_in_line_removes_the_cells_it_covers_from_an_image() {
+    // foot splits a sixel into the rectangles an erase leaves
+    // (sixel_overwrite_by_row); ED and EL both go through it.
+    let mut term = term_with_image();
+    at(&mut term, 4, 1, b"\x1b[2K");
+    assert_eq!(pieces(&term), [(2, 4, 4, 1), (4, 4, 4, 1)], "EL 2");
+
+    let mut term = term_with_image();
+    at(&mut term, 4, 7, b"\x1b[K");
+    assert_eq!(
+        pieces(&term),
+        [(2, 4, 4, 1), (3, 4, 2, 1), (4, 4, 4, 1)],
+        "EL 0 from col 7 erases the right two cells of the middle row"
+    );
+
+    let mut term = term_with_image();
+    at(&mut term, 4, 6, b"\x1b[1K");
+    assert_eq!(
+        pieces(&term),
+        [(2, 4, 4, 1), (3, 6, 2, 1), (4, 4, 4, 1)],
+        "EL 1 through col 6 keeps the right two cells of the middle row"
+    );
+}
+
+#[test]
+fn erase_characters_remove_the_cells_they_cover_from_an_image() {
+    let mut term = term_with_image();
+    at(&mut term, 4, 6, b"\x1b[2X");
+    assert_eq!(
+        pieces(&term),
+        [(2, 4, 4, 1), (3, 4, 1, 1), (3, 7, 1, 1), (4, 4, 4, 1)]
+    );
+}
+
+#[test]
+fn erase_in_display_removes_the_cells_it_covers_from_an_image() {
+    // ED 0 from the middle row's col 6 (0-based 5): its left two cells stay.
+    let mut term = term_with_image();
+    at(&mut term, 4, 6, b"\x1b[J");
+    assert_eq!(pieces(&term), [(2, 4, 4, 1), (3, 4, 1, 1)], "ED 0");
+
+    // ED 1 through the middle row's col 6: the right two cells and the
+    // bottom row stay.
+    let mut term = term_with_image();
+    at(&mut term, 4, 6, b"\x1b[1J");
+    assert_eq!(pieces(&term), [(3, 6, 2, 1), (4, 4, 4, 1)], "ED 1");
+
+    // An erase that misses the image leaves it whole.
+    let mut term = term_with_image();
+    at(&mut term, 4, 1, b"\x1b[1K\x1b[3;3H\x1b[1K");
+    assert_eq!(pieces(&term), [(2, 4, 4, 3)]);
+}
+
+#[test]
+fn a_cropped_piece_shows_the_same_part_of_the_picture() {
+    // The picture is stretched over its cells, so the middle row of three
+    // keeps a third of the pixels. Give each band its own colour to see
+    // which rows survive.
+    let colours = ["100;0;0", "0;100;0", "0;0;100"];
+    let mut sixel = b"\x1bPq".to_vec();
+    for (i, rgb) in colours.iter().enumerate() {
+        sixel.extend_from_slice(format!("#{i};2;{rgb}").as_bytes());
+    }
+    for band in 0..24 {
+        let colour = band / 8;
+        sixel.extend_from_slice(format!("#{colour}!8~").as_bytes());
+        sixel.push(if band < 23 { b'-' } else { b'\x1b' });
+    }
+    sixel.push(b'\\');
+    let mut term = run(20, 10, b"");
+    feed(&mut term, &sixel);
+    let whole = term.images().images().next().expect("image").clone();
+    assert_eq!((whole.cell_width, whole.cell_height), (1, 9));
+    // Erase rows 0, 1, 2 and 6, 7, 8: the three middle rows stay.
+    for row in [1, 2, 3, 7, 8, 9] {
+        at(&mut term, row, 1, b"\x1b[2K");
+    }
+    let piece = term.images().images().next().expect("a piece stays");
+    assert_eq!(term.images().len(), 1);
+    assert_eq!((piece.cell_height, piece.height), (3, whole.height / 3));
+    assert_ne!(piece.id, whole.id, "a piece is a new image");
+    let first_pixel = &piece.data[..4];
+    assert_eq!(first_pixel, &whole.data[whole.data.len() / 3..][..4]);
+}
+
+#[test]
+fn printing_over_an_image_removes_the_cells_under_the_text() {
+    // foot: term_print -> sixel_overwrite_at_cursor.
+    let mut term = term_with_image();
+    at(&mut term, 4, 6, b"X");
+    assert_eq!(
+        pieces(&term),
+        [(2, 4, 4, 1), (3, 4, 1, 1), (3, 6, 2, 1), (4, 4, 4, 1)]
+    );
+
+    // A span of ASCII covers each of its cells.
+    let mut term = term_with_image();
+    at(&mut term, 4, 5, b"abc");
+    assert_eq!(pieces(&term), [(2, 4, 4, 1), (3, 7, 1, 1), (4, 4, 4, 1)]);
+
+    // A wide character covers two.
+    let mut term = term_with_image();
+    at(&mut term, 4, 6, "\u{3042}".as_bytes());
+    assert_eq!(
+        pieces(&term),
+        [(2, 4, 4, 1), (3, 4, 1, 1), (3, 7, 1, 1), (4, 4, 4, 1)]
+    );
+}
+
+#[test]
+fn printing_that_wraps_removes_the_cells_on_the_next_row() {
+    let mut term = run(10, 6, b"");
+    feed(&mut term, b"\x1b[2;1H");
+    feed(&mut term, &sixel_cells(10, 3));
+    assert_eq!(pieces(&term), [(1, 0, 10, 3)]);
+    // Fill the image's middle row (3) to its end and print one more
+    // character: it wraps onto the image's bottom row, column 0.
+    feed(&mut term, b"\x1b[3;1H0123456789!");
+    assert_eq!(pieces(&term), [(1, 0, 10, 1), (3, 1, 9, 1)]);
+}
+
+#[test]
+fn text_that_misses_an_image_leaves_it_whole() {
+    let mut term = term_with_image();
+    at(&mut term, 4, 1, b"abc");
+    at(&mut term, 4, 9, "xyz\u{3042}".as_bytes());
+    at(&mut term, 1, 1, b"\x1b[Kabc");
+    assert_eq!(pieces(&term), [(2, 4, 4, 3)]);
+}
+
+#[test]
+fn other_screen_clears_delete_the_images_on_screen() {
+    let mut term = term_with_image();
+    feed(&mut term, b"\x1b#8");
+    assert!(term.images().is_empty(), "DECALN fills the screen");
+
+    let mut term = term_with_image();
+    feed(&mut term, b"\x1b[?40h\x1b[?3h");
+    assert!(term.images().is_empty(), "DECCOLM clears the screen");
+}
+
+#[test]
+fn a_tall_sixel_scrolls_the_screen_to_fit() {
+    // xterm and foot scroll as for line feeds until the image fits; the
+    // cursor ends on its last row. 6 rows on a 5-row screen: the top row of
+    // the image goes into scrollback.
+    let mut term = run(20, 5, b"\x1b[4;3H");
+    feed(&mut term, &sixel_cells(2, 6));
+    assert_eq!(pieces(&term), [(-1, 2, 2, 6)]);
+    assert_eq!(term.grid().cursor().position.row, 4);
+    assert_eq!(term.grid().cursor().position.col, 2);
+    assert_eq!(term.buffer().history_len(), 4, "four rows scrolled off");
+
+    // An image that fits below the cursor does not scroll.
+    let mut term = run(20, 8, b"\x1b[2;1H");
+    feed(&mut term, &sixel_cells(2, 6));
+    assert_eq!(pieces(&term), [(1, 0, 2, 6)]);
+    assert_eq!(term.buffer().history_len(), 0);
+}
+
+#[test]
+fn a_tall_sixel_scrolls_the_alternate_screen_too() {
+    // No scrollback there: the rows that leave are gone, and the image
+    // moves up with the screen.
+    let mut term = run(20, 5, b"\x1b[?1049h\x1b[4;1H");
+    feed(&mut term, &sixel_cells(2, 3));
+    assert_eq!(pieces(&term), [(2, 0, 2, 3)]);
+    assert_eq!(term.grid().cursor().position.row, 4);
+
+    // Taller than the screen: only the rows that exist are kept.
+    let mut term = run(20, 5, b"\x1b[?1049h");
+    feed(&mut term, &sixel_cells(2, 6));
+    assert_eq!(pieces(&term), [(0, 0, 2, 5)]);
+}
+
+#[test]
+fn sixel_scrolling_off_draws_at_the_top_left_without_moving_anything() {
+    // DECSDM set: foot's `!term->sixel.scrolling`.
+    let mut term = run(20, 5, b"\x1b[?80h");
+    assert_eq!(private_mode_status(&mut term, 80), "1");
+    at(&mut term, 4, 6, &sixel_cells(2, 3));
+    assert_eq!(pieces(&term), [(0, 0, 2, 3)]);
+    assert_eq!(term.grid().cursor().position.row, 3);
+    assert_eq!(term.grid().cursor().position.col, 5);
+
+    // Taller than the screen: cut to the screen's rows.
+    feed(&mut term, &sixel_cells(2, 9));
+    assert_eq!(
+        pieces(&term).iter().map(|p| p.3).max(),
+        Some(5),
+        "no row past the screen"
+    );
+    assert_eq!(term.buffer().history_len(), 0, "nothing scrolled");
+
+    // Reset puts scrolling back.
+    feed(&mut term, b"\x1b[?80l");
+    assert_eq!(private_mode_status(&mut term, 80), "2");
+}
+
+#[test]
+fn reflow_puts_an_image_on_the_row_of_its_cell_after_wide_characters() {
+    // Three wide characters (a cell and a spacer each), then ZZ with the
+    // image on the second. At 3 columns the second wide character does not
+    // fit after the first one's cells, so each takes a row of its own; the
+    // third leaves room for the first Z and the second Z is on row 3.
+    // Counting cells from the start of the line (seven before the image,
+    // 7 / 3) says row 2.
+    let mut term = run(10, 10, "\u{3042}\u{3042}\u{3042}ZZ".as_bytes());
+    feed(&mut term, b"\x1b[1;8H");
+    feed(&mut term, SIXEL);
+    assert_eq!(pieces(&term)[0].0, 0);
+    term.resize(Dimensions::new(3, 10));
+    let (screen, _) = snapshot(&term);
+    assert_eq!(&screen[..4], ["\u{3042}", "\u{3042}", "\u{3042} Z", "Z"]);
+    assert_eq!(pieces(&term)[0].0, 3);
 }

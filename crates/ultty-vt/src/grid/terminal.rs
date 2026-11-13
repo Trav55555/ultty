@@ -3,8 +3,8 @@
 pub mod snapshot;
 
 use super::{
-    Anchor, AnchorRefusal, Buffer, CursorPosition, Dimensions, Grid, ImageId, ImageStore, Palette,
-    RowMarks, TerminalImage, ThemeColors,
+    Anchor, AnchorRefusal, Buffer, CursorPosition, Dimensions, Grid, ImageId, ImageIds, ImageStore,
+    Palette, RowMarks, TerminalImage, ThemeColors,
 };
 
 /// Most anchor events kept for the embedder; past it the oldest go.
@@ -137,6 +137,10 @@ pub struct TerminalModes {
     pub allow_column_mode_switch: bool,
     /// 132-column mode (DECCOLM, mode 3) was last set.
     pub column_mode_132: bool,
+    /// Sixel display mode (DECSDM, mode 80) is set: sixel images go to the
+    /// top-left of the screen and do not scroll it. Not part of snapshots.
+    #[serde(skip)]
+    pub sixel_scrolling_disabled: bool,
 }
 
 impl Default for TerminalModes {
@@ -161,6 +165,7 @@ impl Default for TerminalModes {
             linefeed_newline: false,
             allow_column_mode_switch: false,
             column_mode_132: false,
+            sixel_scrolling_disabled: false,
         }
     }
 }
@@ -271,7 +276,7 @@ pub struct Terminal {
     shell_integration: ShellIntegration,
     /// The id the next inline image gets. One counter for both screens, so
     /// an id names one image whichever screen it is on.
-    next_image_id: u32,
+    image_ids: ImageIds,
     /// Pending responses to send back to PTY
     pending_responses: Vec<Vec<u8>>,
     /// Hyperlink ID to URI mapping (OSC 8)
@@ -366,7 +371,7 @@ impl Terminal {
     /// Create a new terminal with the given dimensions.
     pub fn new(dims: Dimensions) -> Self {
         static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        Self {
+        let mut terminal = Self {
             program_status: crate::program_status::ProgramStatusStore::default(),
             uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             main: Buffer::new(dims),
@@ -382,7 +387,7 @@ impl Terminal {
             cell_pixel_size: None,
             palette: Palette::default(),
             shell_integration: ShellIntegration::default(),
-            next_image_id: 0,
+            image_ids: ImageIds::default(),
             pending_responses: Vec::new(),
             hyperlinks: std::collections::HashMap::new(),
             hyperlink_ids: std::collections::HashMap::new(),
@@ -398,7 +403,9 @@ impl Terminal {
             queued_refusals: 0,
             anchor_events_overflowed: false,
             inline_anchors: false,
-        }
+        };
+        terminal.share_image_ids();
+        terminal
     }
 
     /// Tell the terminal which `TERM` its program was started with, so
@@ -1137,9 +1144,14 @@ impl Terminal {
 
     /// A fresh image id, unique across both screens.
     pub fn allocate_image_id(&mut self) -> ImageId {
-        let id = ImageId(self.next_image_id);
-        self.next_image_id += 1;
-        id
+        self.image_ids.allocate()
+    }
+
+    /// Make both screens draw the ids of the images they split from this
+    /// terminal's counter.
+    fn share_image_ids(&mut self) {
+        self.main.set_image_ids(self.image_ids.clone());
+        self.alternate.set_image_ids(self.image_ids.clone());
     }
 
     // === Hyperlink support (OSC 8) ===
@@ -1270,43 +1282,63 @@ impl Terminal {
         self.modes.kitty_keyboard_flags != 0
     }
 
-    /// Add a Sixel image at the current cursor position.
+    /// Place a Sixel image on the active screen.
     ///
-    /// The image will be placed starting at the cursor position.
-    /// The cursor advances past the image after placement.
-    pub fn add_image(&mut self, image: TerminalImage) {
-        let cell_width = image.cell_width;
-        let cell_height = image.cell_height;
-        let start_col = image.start_col;
-
-        self.images_mut().add(image);
-
+    /// With sixel scrolling on (DECSDM reset, the default) it starts at the
+    /// cursor. The screen scrolls, as for line feeds, until the image fits,
+    /// and the cursor ends on the image's last row at its first column, as
+    /// in xterm and foot. A one-row image leaves the cursor after it.
+    ///
+    /// With DECSDM set (mode 80) it starts at the top-left of the screen,
+    /// cut to the screen's rows, and neither the cursor nor the screen
+    /// moves (foot: `sixel_unhook`, `!term->sixel.scrolling`).
+    pub fn add_image(&mut self, mut image: TerminalImage) {
         let dims = self.dimensions();
-        let cursor = self.grid_mut().cursor_mut();
-
-        if cell_height <= 1 {
-            let new_col = cursor.position.col.saturating_add(cell_width);
-            cursor.position.col = new_col.min(dims.cols.saturating_sub(1));
-        } else {
-            let new_row = cursor
-                .position
-                .row
-                .saturating_add(cell_height.saturating_sub(1));
-            if new_row >= dims.rows {
-                cursor.position.row = dims.rows.saturating_sub(1);
-            } else {
-                cursor.position.row = new_row;
-            }
-            cursor.position.col = start_col;
+        if self.modes.sixel_scrolling_disabled {
+            image.start_col = 0;
+            image.line = self.buffer().screen_top_line();
+            let Some(shown) =
+                image.crop(image.id, 0..image.cell_height.min(dims.rows), 0..dims.cols)
+            else {
+                return;
+            };
+            self.images_mut().add(shown);
+            return;
         }
 
-        tracing::debug!(
-            "Added image: {}x{} cells, cursor now at ({}, {})",
-            cell_width,
-            cell_height,
-            cursor.position.col,
-            cursor.position.row
-        );
+        let (cell_width, cell_height, start_col) =
+            (image.cell_width, image.cell_height, image.start_col);
+        if cell_height <= 1 {
+            self.images_mut().add(image);
+            let cursor = self.grid_mut().cursor_mut();
+            let new_col = cursor.position.col.saturating_add(cell_width);
+            cursor.position.col = new_col.min(dims.cols.saturating_sub(1));
+            return;
+        }
+
+        // Line feeds bring the cursor to the image's last row, scrolling
+        // the region when it is at its bottom.
+        for _ in 1..cell_height {
+            self.buffer_mut().newline();
+        }
+        self.grid_mut().cursor_mut().position.col = start_col;
+        // The rows above the first line that exists are lost.
+        let last_line = self
+            .buffer()
+            .line_of_screen_row(self.grid().cursor().position.row);
+        let top_line = last_line as isize - ((cell_height as isize) - 1);
+        let lost = top_line.min(0).unsigned_abs() as u16;
+        image.line = top_line.max(0) as usize;
+        if lost > 0 {
+            let Some(mut shown) = image.crop(image.id, lost..cell_height, 0..cell_width) else {
+                return;
+            };
+            // `crop` counts from the image's own top line; the first row
+            // that is left is line 0.
+            shown.line = 0;
+            image = shown;
+        }
+        self.images_mut().add(image);
     }
 
     /// Resize the terminal.

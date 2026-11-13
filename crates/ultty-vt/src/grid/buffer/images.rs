@@ -6,8 +6,10 @@
 //! operations that move rows on the screen without saving them, and reflow,
 //! renumber or remove the images; this module holds those rules.
 
+use std::ops::{Range, RangeInclusive};
+
 use super::{Buffer, Rewrap, ScrollRegion};
-use crate::grid::TerminalImage;
+use crate::grid::{ImageId, TerminalImage};
 
 impl Buffer {
     /// The line number of screen row `row`.
@@ -23,6 +25,79 @@ impl Buffer {
     /// The screen row of `line`, negative above the screen (in scrollback).
     pub fn screen_row_of_line(&self, line: usize) -> isize {
         line as isize - self.screen_top_line() as isize
+    }
+
+    /// Cells `cols` of the screen rows `rows` are being erased or written
+    /// over: the images under them lose those cells. As in foot
+    /// (`sixel_overwrite_by_row`, `sixel_overwrite_by_rectangle`), an image
+    /// that is only partly covered is split into the cell rectangles that
+    /// remain, each cropped from the picture and given a fresh id, rather
+    /// than deleted whole.
+    pub fn overwrite_images(&mut self, rows: RangeInclusive<u16>, cols: Range<u16>) {
+        if self.images.is_empty() || cols.is_empty() {
+            return;
+        }
+        let top = self.screen_top_line();
+        let first = top + usize::from(*rows.start());
+        let last = top + usize::from(*rows.end());
+        let under: Vec<ImageId> = self
+            .images
+            .images()
+            .filter(|image| {
+                image.line <= last
+                    && image.line + usize::from(image.cell_height) > first
+                    && image.start_col < cols.end
+                    && u32::from(image.start_col) + u32::from(image.cell_width)
+                        > u32::from(cols.start)
+            })
+            .map(|image| image.id)
+            .collect();
+        for id in under {
+            let Some(image) = self.images.remove(id) else {
+                continue;
+            };
+            let (width, height) = (image.cell_width, image.cell_height);
+            let row_cell = |line: usize| line.saturating_sub(image.line).min(usize::from(height));
+            // The covered cells of the image, from its own top-left cell.
+            let covered_rows = row_cell(first) as u16..row_cell(last + 1) as u16;
+            let covered_cols = cols.start.saturating_sub(image.start_col).min(width)
+                ..cols.end.saturating_sub(image.start_col).min(width);
+            let remaining = [
+                (0..covered_rows.start, 0..width),
+                (covered_rows.end..height, 0..width),
+                (covered_rows.clone(), 0..covered_cols.start),
+                (covered_rows.clone(), covered_cols.end..width),
+            ];
+            for (piece_rows, piece_cols) in remaining {
+                if piece_rows.is_empty() || piece_cols.is_empty() {
+                    continue;
+                }
+                if let Some(piece) = image.crop(self.image_ids.allocate(), piece_rows, piece_cols) {
+                    self.images.add(piece);
+                }
+            }
+        }
+        self.prune_evicted_images();
+    }
+
+    /// `cells` columns were just written ending at the cursor (counting a
+    /// pending wrap as past the last column): the images under them lose
+    /// those cells, as foot's `sixel_overwrite_at_cursor` does.
+    #[cold]
+    pub(super) fn overwrite_images_under_print(&mut self, cells: Option<u16>) {
+        let cursor = self.grid.cursor();
+        let (row, end) = (
+            cursor.position.row,
+            cursor.position.col + u16::from(cursor.wrap_pending),
+        );
+        let Some(last) = end.checked_sub(1) else {
+            return;
+        };
+        let cells = cells.unwrap_or_else(|| match self.grid.cell(last, row) {
+            Some(cell) if cell.is_wide_spacer() => 2,
+            _ => 1,
+        });
+        self.overwrite_images(row..=row, end.saturating_sub(cells)..end);
     }
 
     /// Remove the images whose last line has left scrollback.

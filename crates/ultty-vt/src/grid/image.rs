@@ -1,6 +1,8 @@
 //! Image storage and Sixel decoding for terminal inline images.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 /// Maximum width or height in pixels of a decoded Sixel image.
 pub const MAX_SIXEL_DIM: u32 = 16384;
@@ -17,6 +19,24 @@ pub const MAX_IMAGE_STORE_COUNT: usize = 1024;
 /// Unique identifier for terminal images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ImageId(pub u32);
+
+/// The source of fresh [`ImageId`]s. Both screens of a terminal draw from
+/// one, so an id names one image whichever screen holds it; clones share
+/// the counter.
+#[derive(Debug, Clone, Default)]
+pub struct ImageIds(Arc<AtomicU32>);
+
+impl ImageIds {
+    /// The next unused id.
+    pub fn allocate(&self) -> ImageId {
+        ImageId(self.0.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Make `next` the id [`ImageIds::allocate`] returns next.
+    pub fn set_next(&self, next: u32) {
+        self.0.store(next, Ordering::Relaxed);
+    }
+}
 
 /// A decoded terminal image.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -39,6 +59,57 @@ pub struct TerminalImage {
     pub cell_width: u16,
     /// Height in cells
     pub cell_height: u16,
+}
+
+impl TerminalImage {
+    /// The part of the image on cells `rows` x `cols`, counted from its
+    /// top-left cell, as a new image `id`. The picture is stretched over
+    /// its cells, so a cell range is the same share of the pixels. `None`
+    /// when the range holds no pixel.
+    pub fn crop(
+        &self,
+        id: ImageId,
+        rows: std::ops::Range<u16>,
+        cols: std::ops::Range<u16>,
+    ) -> Option<TerminalImage> {
+        let (cell_width, cell_height) = (u64::from(self.cell_width), u64::from(self.cell_height));
+        if cell_width == 0 || cell_height == 0 || rows.end > self.cell_height {
+            return None;
+        }
+        let cols = cols.start..cols.end.min(self.cell_width);
+        if rows.is_empty() || cols.is_empty() {
+            return None;
+        }
+        let pixel = |cell: u16, cells: u64, pixels: u32| {
+            (u64::from(cell) * u64::from(pixels) / cells) as usize
+        };
+        let (x0, x1) = (
+            pixel(cols.start, cell_width, self.width),
+            pixel(cols.end, cell_width, self.width),
+        );
+        let (y0, y1) = (
+            pixel(rows.start, cell_height, self.height),
+            pixel(rows.end, cell_height, self.height),
+        );
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let stride = self.width as usize * 4;
+        let mut data = Vec::with_capacity((x1 - x0) * (y1 - y0) * 4);
+        for y in y0..y1 {
+            data.extend_from_slice(self.data.get(y * stride + x0 * 4..y * stride + x1 * 4)?);
+        }
+        Some(TerminalImage {
+            id,
+            width: (x1 - x0) as u32,
+            height: (y1 - y0) as u32,
+            data,
+            start_col: self.start_col.checked_add(cols.start)?,
+            line: self.line + usize::from(rows.start),
+            cell_width: cols.end - cols.start,
+            cell_height: rows.end - rows.start,
+        })
+    }
 }
 
 /// Storage for terminal images.

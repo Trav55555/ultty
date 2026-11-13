@@ -334,11 +334,14 @@ impl TerminalSnapshot {
         for &(index, rgb) in &self.palette {
             terminal.palette.set(index, rgb);
         }
-        terminal.next_image_id = image_ids
-            .iter()
-            .map(|id| id.0)
-            .max()
-            .map_or(0, |id| id.saturating_add(1));
+        terminal.share_image_ids();
+        terminal.image_ids.set_next(
+            image_ids
+                .iter()
+                .map(|id| id.0)
+                .max()
+                .map_or(0, |id| id.saturating_add(1)),
+        );
         for (id, uri) in &self.hyperlinks {
             if *id == 0
                 || uri.len() > 65536
