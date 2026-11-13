@@ -80,6 +80,8 @@ jobs:
           RUST_MIN_STACK: 8388608
       - name: Snapshot tests
         run: cargo test --locked -p ulttui --test snapshots
+      - name: Session deployment packaging
+        run: python3 -S -m unittest discover -s scripts/deploy -p 'test_*.py'
       - name: install.sh against a fake release
         run: scripts/install-sh-test.sh
 
