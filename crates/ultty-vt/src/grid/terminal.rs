@@ -2007,7 +2007,7 @@ mod tests {
             height: 1,
             data: vec![0; 4],
             start_col: 0,
-            start_row: 0,
+            line: 0,
             cell_width: 1,
             cell_height: 1,
         };
@@ -2063,7 +2063,7 @@ mod tests {
             height: 16,
             data: vec![0; 24 * 16 * 4],
             start_col: 4,
-            start_row: 0,
+            line: 0,
             cell_width: 3,
             cell_height: 1,
         };
@@ -2084,7 +2084,7 @@ mod tests {
             height: 64,
             data: vec![0; 32 * 64 * 4],
             start_col: 9,
-            start_row: 2,
+            line: 2,
             cell_width: 4,
             cell_height: 4,
         };

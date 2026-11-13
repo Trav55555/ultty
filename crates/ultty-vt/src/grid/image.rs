@@ -31,8 +31,10 @@ pub struct TerminalImage {
     pub data: Vec<u8>,
     /// Position where the image starts (column)
     pub start_col: u16,
-    /// Position where the image starts (row)
-    pub start_row: u16,
+    /// The text line the image's top row sits on, numbered as
+    /// `evicted + absolute index` (ADR 0020): it scrolls with the text,
+    /// into scrollback, and follows reflow.
+    pub line: usize,
     /// Width in cells
     pub cell_width: u16,
     /// Height in cells
@@ -104,6 +106,30 @@ impl ImageStore {
         self.total_bytes -= removed.data.len();
         self.order.retain(|&existing| existing != id);
         Some(removed)
+    }
+
+    /// Let `update` change each image in place; the images it returns
+    /// `false` for are removed.
+    pub fn retain_mut(&mut self, mut update: impl FnMut(&mut TerminalImage) -> bool) {
+        let mut freed = 0;
+        self.images.retain(|_, image| {
+            let keep = update(image);
+            if !keep {
+                freed += image.data.len();
+            }
+            keep
+        });
+        self.total_bytes -= freed;
+        let images = &self.images;
+        self.order.retain(|id| images.contains_key(id));
+    }
+
+    /// Remove and return every image, oldest first.
+    pub fn take_all(&mut self) -> Vec<TerminalImage> {
+        let order = std::mem::take(&mut self.order);
+        let mut images = std::mem::take(&mut self.images);
+        self.total_bytes = 0;
+        order.iter().filter_map(|id| images.remove(id)).collect()
     }
 
     /// Clear all images.
@@ -621,7 +647,7 @@ mod tests {
             height: 1,
             data: vec![0; bytes],
             start_col: 0,
-            start_row: 0,
+            line: 0,
             cell_width: 1,
             cell_height: 1,
         }

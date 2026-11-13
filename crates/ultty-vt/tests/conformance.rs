@@ -760,6 +760,132 @@ fn ris_deletes_the_images_of_both_screens() {
     assert!(term.images().is_empty(), "alternate screen after RIS");
 }
 
+/// The screen rows (negative above the screen, in scrollback) of the active
+/// screen's images, top first.
+fn image_rows(term: &Terminal) -> Vec<isize> {
+    let buffer = term.buffer();
+    let mut rows: Vec<isize> = term
+        .images()
+        .images()
+        .map(|image| buffer.screen_row_of_line(image.line))
+        .collect();
+    rows.sort_unstable();
+    rows
+}
+
+/// A cursor-position escape to 1-based `row`, column 1.
+fn goto(row: u16) -> Vec<u8> {
+    format!("\x1b[{row};1H").into_bytes()
+}
+
+fn place_sixel_at(term: &mut Terminal, row: u16) {
+    feed(term, &goto(row));
+    feed(term, SIXEL);
+}
+
+#[test]
+fn images_scroll_into_scrollback_with_their_text() {
+    let mut term = run(20, 5, b"");
+    place_sixel_at(&mut term, 2);
+    assert_eq!(image_rows(&term), [1]);
+    feed(&mut term, &goto(5));
+    feed(&mut term, b"\n\n\n");
+    assert_eq!(image_rows(&term), [-2], "three lines scrolled off");
+    feed(&mut term, b"\n\n\n");
+    assert_eq!(image_rows(&term), [-5]);
+}
+
+#[test]
+fn images_below_a_top_region_move_with_their_text() {
+    // Rows 1..=3 scroll (SU) and their lines go to scrollback; the image
+    // below the region stays on its screen row, which is a new line.
+    let mut term = run(20, 8, b"\x1b[1;3r");
+    place_sixel_at(&mut term, 6);
+    feed(&mut term, b"\x1b[2S");
+    assert_eq!(image_rows(&term), [5]);
+}
+
+#[test]
+fn images_in_a_lower_region_scroll_out_and_are_removed() {
+    let mut term = run(20, 8, b"\x1b[3;6r");
+    place_sixel_at(&mut term, 4);
+    feed(&mut term, b"\x1b[1S");
+    assert_eq!(image_rows(&term), [2], "up one row with its text");
+    feed(&mut term, b"\x1b[1S");
+    assert!(term.images().is_empty(), "pushed out of the region");
+
+    let mut term = run(20, 8, b"\x1b[3;6r");
+    place_sixel_at(&mut term, 4);
+    feed(&mut term, b"\x1b[1T");
+    assert_eq!(image_rows(&term), [4], "down one row");
+    feed(&mut term, b"\x1b[2T");
+    assert!(term.images().is_empty(), "pushed past the region's bottom");
+}
+
+#[test]
+fn insert_and_delete_lines_move_the_images_below_the_cursor() {
+    let mut term = run(20, 8, b"");
+    place_sixel_at(&mut term, 4);
+    feed(&mut term, &goto(2));
+    feed(&mut term, b"\x1b[2L");
+    assert_eq!(image_rows(&term), [5]);
+    feed(&mut term, b"\x1b[1M");
+    assert_eq!(image_rows(&term), [4]);
+    // Deleting the image's own row deletes the image.
+    feed(&mut term, &goto(5));
+    feed(&mut term, b"\x1b[1M");
+    assert!(term.images().is_empty());
+}
+
+#[test]
+fn scrolling_the_alternate_screen_moves_its_images() {
+    let mut term = run(20, 5, b"\x1b[?1049h");
+    place_sixel_at(&mut term, 3);
+    feed(&mut term, &goto(5));
+    feed(&mut term, b"\n");
+    assert_eq!(image_rows(&term), [1]);
+    feed(&mut term, b"\n\n");
+    assert!(term.images().is_empty(), "scrolled off, with no scrollback");
+}
+
+#[test]
+fn ed_3_deletes_the_images_in_scrollback_only() {
+    let mut term = run(20, 5, b"");
+    place_sixel_at(&mut term, 1);
+    feed(&mut term, &goto(5));
+    feed(&mut term, b"\n\n");
+    place_sixel_at(&mut term, 4);
+    assert_eq!(image_rows(&term), [-2, 3]);
+    feed(&mut term, b"\x1b[3J");
+    assert_eq!(image_rows(&term), [3]);
+}
+
+#[test]
+fn images_follow_their_row_through_reflow() {
+    // Row 0 wraps to two rows at 5 columns, the blank row stays one, so the
+    // image's row becomes row 3. It sits on the last row, which reflow
+    // trims as blank unless it counts the image as content.
+    let mut term = run(10, 8, b"aaaaaaaaaa\r\n");
+    place_sixel_at(&mut term, 3);
+    assert_eq!(image_rows(&term), [2]);
+    term.resize(Dimensions::new(5, 8));
+    assert_eq!(image_rows(&term), [3]);
+    term.resize(Dimensions::new(10, 8));
+    assert_eq!(image_rows(&term), [2]);
+}
+
+#[test]
+fn images_keep_their_line_when_the_screen_gets_shorter() {
+    let mut term = run(10, 8, b"");
+    place_sixel_at(&mut term, 4);
+    // The four blank rows below the cursor go first; the two top rows of
+    // the rest move into scrollback, and the image with its row stays on
+    // line 3.
+    term.resize(Dimensions::new(10, 2));
+    assert_eq!(image_rows(&term), [1]);
+    assert_eq!(term.buffer().history_len(), 2);
+}
+
 /// A sixel of `bytes` data bytes: one 100-pixel red run redrawn over itself (`$`), so it decodes to a
 /// 6-pixel-high image however long the string is.
 fn long_sixel(bytes: usize) -> Vec<u8> {
