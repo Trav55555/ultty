@@ -1,0 +1,2 @@
+# Keep the selected smoke logs with their release evidence.
+!*.log

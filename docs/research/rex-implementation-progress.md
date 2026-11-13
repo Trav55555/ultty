@@ -3,7 +3,7 @@
 Worktree: `.worktrees/rex-features`, branch `feat/rex-session-workflows`.
 Starting commit: `ffcf318`. The user authorized the full roadmap in stages on 2026-11-12.
 
-The [implementation plan](rex-tailscale-implementation-plan.md) defines the scope and acceptance gates. The staged implementation is complete in commits `4241115` and `6881bc4`. Local validation and real devbox SSH/GUI gates passed; platform and performance limits are listed below. Main remains unchanged.
+The [implementation plan](rex-tailscale-implementation-plan.md) defines the scope and acceptance gates. The staged implementation is complete in commits `4241115` and `6881bc4`. Local validation and real devbox SSH/GUI gates passed; platform and performance limits are listed below. The feature branch integrates upstream `ba43d2e` in `b61448a`; the main checkout remains unchanged.
 
 | Stage | Status | Ownership |
 | --- | --- | --- |
@@ -17,7 +17,7 @@ The [implementation plan](rex-tailscale-implementation-plan.md) defines the scop
 | Local persistent host and bounded viewer attachment | Implemented; final GPU lifecycle and authority gates passed | Terra + root + Sol |
 | SSH attachment and separate remote capabilities/diagnostics | Implemented; local helper and real devbox SSH/GUI gates passed | Sol control |
 
-The receipts below identify tested artifacts and commit boundaries. The user explicitly authorized starting the existing devbox for SSH tests; no new infrastructure, Tailscale enrollment or public listener was added. No merge or push was performed.
+The receipts below identify tested artifacts and commit boundaries. The initial gates used the existing devbox over public SSH. The user subsequently authorized a branch push and Gitea PR, plus testing through a temporary Tailscale node; see the integration checkpoint below for that later state.
 
 ## Initial verification
 
@@ -81,6 +81,36 @@ All durable relative artifact paths below are under `/home/travers/projects/tui-
 
 The optional host uses bounded whole-state semantic replacements rather than native/VT byte replay or a delta log. A host restart loses its running applications; viewers never silently switch pinned epochs. Inline native surfaces keep the existing noninteractive contract. Full-scene semantic focus/activation is opt-in and uses acknowledged application handlers; unsupported actions remain unavailable.
 
-Public SSH was exercised on devbox. Tailscale transport, macOS, deployment, a screen-reader session and comparative performance improvements remain unqualified. Devbox had no Tailscale installation; no enrollment or network configuration was performed. Read-only diagnostics are distinct from authorization. Keep the existing in-process route as the rollback path; jobs cannot migrate automatically between owners.
+Public SSH was exercised on devbox. Tailscale transport, macOS, deployment, a screen-reader session and comparative performance improvements remain unqualified. The temporary Tailscale test enrollment remains pending browser authentication; no successful tailnet route is claimed. Read-only diagnostics are distinct from authorization. Keep the existing in-process route as the rollback path; jobs cannot migrate automatically between owners.
 
 The local gates do not constitute a full CI run. The pinned nightly fuzz toolchain and cargo-fuzz were unavailable here; the CI instruction-count comparison was not run. Source and functional validation do not establish a performance improvement over Rex, Tailscale or the previous Ultty build.
+
+## Upstream integration and PR checkpoint
+
+Source commit `b61448a` integrates `origin/main` at `ba43d2e`. Conflict resolution
+preserves explicit PID targeting and strict environment discovery, current font
+configuration, PTY pixel dimensions and sliced search. Additional integration
+fixes cancel copy-mode searches and completed matches when their owning pane
+loses focus, expose the pure search configuration module to headless builds,
+and prevent explicit PID selection from inheriting a different owner's pane.
+
+The [integration evidence ledger](../releases/evidence/2026-11-12/rex-sessions/INTEGRATION.md)
+records exact commands, frozen binary hashes, completed gates and remaining
+limits. Earlier evidence in the same package is explicitly historical.
+Workspace Clippy, headless checks, Rust 1.90 all-target checks, excluded Porygon,
+the full serial workspace suite, live two-host PID/MCP isolation, local GPU
+viewer lifecycle, persistent and window-mode control, native split, inline
+surfaces and memory budgets passed on the integrated source.
+The first workspace attempt retained a failure in the unchanged Luau cache
+test during concurrent compilation (19 of 20 hooks applied); the identical
+suite passed after builds finished, without changing its 8 ms frame budget or
+assertions. Both logs are retained.
+
+Devbox's merged ARM64 host and counter build passed using the repository-pinned
+Rust 1.98.1. Its source archive has the same 332 Rust/Cargo paths as `b61448a`;
+the sole difference is a GUI test-only re-export added after staging. The
+actual tailnet test is pending browser authentication for the temporary
+userspace daemon. No public SSH result substitutes for that missing gate.
+The remote setup initially invoked rustup proxies accidentally; repairing the
+resulting incomplete stable toolchain updated devbox's `stable` from 1.97.1
+to 1.100.0. The product build uses pinned 1.98.1 directly. Devbox remains up.

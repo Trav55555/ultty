@@ -1,0 +1,29 @@
+{
+  "source_commit": "b61448a",
+  "binaries": {
+    "ultty": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-bin/ultty",
+      "sha256": "ed2fe21a2250861b8d0a7246fd69423bdb64757f5fec4e65033c9f1725e1686f"
+    },
+    "ulttyctl": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-bin/ulttyctl",
+      "sha256": "1b6be811d3cddb5ddd63b2e1522f9f35a6c1e648dc0bf9b6346abf1e0c15950e"
+    },
+    "counter-app": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-bin/counter-app",
+      "sha256": "7e1296d0fa3a067275798ae75ee46de094484aea6b93fc86e246d326df5bb200"
+    },
+    "ulttui-lua": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-bin/ulttui-lua",
+      "sha256": "ff3308cb42001697c49b56f2e051d63725f7e4cd9b1c38f9e8f785974284dbed"
+    },
+    "ultty-session": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-bin/ultty-session",
+      "sha256": "99c321c69a18d00012703e51aa6b1853231eb5caf857f7bb167776ff42095166"
+    },
+    "inline-surface": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-bin/inline-surface",
+      "sha256": "2acc7ac0ecec8f995437af92e6e7a0f72d30de1cf460cfa9c97f13b3a11247a2"
+    }
+  }
+}

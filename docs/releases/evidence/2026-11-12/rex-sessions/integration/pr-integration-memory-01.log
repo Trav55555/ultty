@@ -1,0 +1,27 @@
+   Compiling ultty v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/rex-features/crates/ultty)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 05s
+     Running benches/memory.rs (/home/travers/projects/tui-terminal/target/rex-features/debug/deps/memory-162472bd0a68389d)
+case                             live bytes       budget   peak bytes    rss delta  status
+empty_terminal_80x24                  36886        38800        36886       331776  ok
+empty_terminal_300x75                375144       394000       375144       364544  ok
+typical_10k_lines_80x24              731210       767800       741226       733184  ok
+typical_10k_lines_120x40            1165110      1223400      1165142      1138688  ok
+typical_10k_lines_300x75            1454280      1527000      1454312      1306624  ok
+typical_10k_lines_120x40_resized      1163142      1221300      1448974      1007616  ok
+sgr_dense_10k_lines_120x40          9959158     10457200      9959190      7663616  ok
+cjk_10k_lines_120x40                2323958      2440200      2359922      1110016  ok
+scene_tree_1000_regions              923664       953000      1383456       151552  ok
+scene_table_1000x4_plain            3730192      3917000      5555712      4399104  ok
+scene_table_1000x4_semantic         4410328      4631000      6043136         4096  ok
+  hour   end of hour   floor (min)   ceiling (max)
+     1       5774198       2015039        10828765
+     2       8729565       1333959        10977208
+     3       5079066       1009378        10967492
+     4       5978117       1707276        10731328
+     5       2829381       2221785        10923292
+     6       9344868        991098        10911985
+     7       6713197        922946        11058844
+     8       6606417        934648        10572347
+     9        899246        899246        10790523
+    10       4508893       1146120        10966361
+agent_session_10h                  11058844     11611800     11322890     16990208  ok

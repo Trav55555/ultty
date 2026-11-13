@@ -1,0 +1,6 @@
+placed: rows 202..244 (3 rows of 14 px)
+off: no card
+top: rows 202..244
+shifted: rows 118..160, 6 lines up
+<stdin>:6: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+inline-surface: ok (/home/travers/projects/tui-terminal/target/rex-features/logs/final-app-inline-surface-01)

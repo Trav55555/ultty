@@ -1,0 +1,8 @@
+{
+  "passed": true,
+  "counter": 4,
+  "lua": 5,
+  "no_handler": 6,
+  "ansi": 7,
+  "timeout_outcome": "unknown_then_applied"
+}

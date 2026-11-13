@@ -1,0 +1,10 @@
+{
+  "ultty-session": {
+    "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/integration-pid-bin/ultty-session",
+    "sha256": "99c321c69a18d00012703e51aa6b1853231eb5caf857f7bb167776ff42095166"
+  },
+  "ulttyctl": {
+    "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/integration-pid-bin/ulttyctl",
+    "sha256": "30125e736f44a071e180fc950ad976b559d4cd2adbd2fb2f8a714b4e0203d465"
+  }
+}

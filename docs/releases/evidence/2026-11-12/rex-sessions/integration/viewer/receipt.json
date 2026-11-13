@@ -1,0 +1,189 @@
+{
+  "binaries": {
+    "ULTTY": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-bin/ultty",
+      "sha256": "ed2fe21a2250861b8d0a7246fd69423bdb64757f5fec4e65033c9f1725e1686f"
+    },
+    "ULTTY_SESSION": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-bin/ultty-session",
+      "sha256": "99c321c69a18d00012703e51aa6b1853231eb5caf857f7bb167776ff42095166"
+    },
+    "COUNTER_APP": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-bin/counter-app",
+      "sha256": "7e1296d0fa3a067275798ae75ee46de094484aea6b93fc86e246d326df5bb200"
+    }
+  },
+  "screenshots": [
+    {
+      "file": "first.png",
+      "sha256": "8fa14980bc8a9014dfaed04f8b7a6353841f320882c6b45db09f5b11e4d3b995",
+      "width": 1000,
+      "height": 700,
+      "interior_ink": 206480
+    },
+    {
+      "file": "before-kill.png",
+      "sha256": "f4c196099dcd3b9ef9ff88d5b31b4aba69dddad301940bcc211989ccc4b897ea",
+      "width": 1000,
+      "height": 700,
+      "interior_ink": 79536
+    },
+    {
+      "file": "observer.png",
+      "sha256": "f4c196099dcd3b9ef9ff88d5b31b4aba69dddad301940bcc211989ccc4b897ea",
+      "width": 1000,
+      "height": 700,
+      "interior_ink": 79536
+    },
+    {
+      "file": "reattached.png",
+      "sha256": "f4c196099dcd3b9ef9ff88d5b31b4aba69dddad301940bcc211989ccc4b897ea",
+      "width": 1000,
+      "height": 700,
+      "interior_ink": 79536
+    }
+  ],
+  "phases": [
+    "graceful close preserved owner, child, native session and count",
+    "SIGKILL viewer preserved owner, child and native session",
+    "observer GUI and wire mutations refused; controller reattached to count=13"
+  ],
+  "idle_samples": [
+    {
+      "label": "controller-idle",
+      "elapsed_seconds": 1.0037792370421812,
+      "clock_ticks_per_second": 100,
+      "processes": {
+        "host": {
+          "before": {
+            "pid": 4076900,
+            "rss_kib": 7428,
+            "threads": 2,
+            "cpu_ticks": 0
+          },
+          "after": {
+            "pid": 4076900,
+            "rss_kib": 7428,
+            "threads": 2,
+            "cpu_ticks": 0
+          },
+          "cpu_ticks_delta": 0
+        },
+        "viewer": {
+          "before": {
+            "pid": 4076993,
+            "rss_kib": 119068,
+            "threads": 31,
+            "cpu_ticks": 14
+          },
+          "after": {
+            "pid": 4076993,
+            "rss_kib": 119068,
+            "threads": 31,
+            "cpu_ticks": 14
+          },
+          "cpu_ticks_delta": 0
+        }
+      }
+    },
+    {
+      "label": "owner-without-gui-viewer",
+      "elapsed_seconds": 1.0000701759709045,
+      "clock_ticks_per_second": 100,
+      "processes": {
+        "host": {
+          "before": {
+            "pid": 4076900,
+            "rss_kib": 7428,
+            "threads": 2,
+            "cpu_ticks": 3
+          },
+          "after": {
+            "pid": 4076900,
+            "rss_kib": 7428,
+            "threads": 2,
+            "cpu_ticks": 3
+          },
+          "cpu_ticks_delta": 0
+        }
+      }
+    },
+    {
+      "label": "observer-idle",
+      "elapsed_seconds": 1.0000650979345664,
+      "clock_ticks_per_second": 100,
+      "processes": {
+        "host": {
+          "before": {
+            "pid": 4076900,
+            "rss_kib": 7428,
+            "threads": 2,
+            "cpu_ticks": 4
+          },
+          "after": {
+            "pid": 4076900,
+            "rss_kib": 7428,
+            "threads": 2,
+            "cpu_ticks": 4
+          },
+          "cpu_ticks_delta": 0
+        },
+        "viewer": {
+          "before": {
+            "pid": 4078612,
+            "rss_kib": 117212,
+            "threads": 31,
+            "cpu_ticks": 11
+          },
+          "after": {
+            "pid": 4078612,
+            "rss_kib": 117212,
+            "threads": 31,
+            "cpu_ticks": 11
+          },
+          "cpu_ticks_delta": 0
+        }
+      }
+    },
+    {
+      "label": "owner-after-observer-close",
+      "elapsed_seconds": 1.0000672329915687,
+      "clock_ticks_per_second": 100,
+      "processes": {
+        "host": {
+          "before": {
+            "pid": 4076900,
+            "rss_kib": 7428,
+            "threads": 2,
+            "cpu_ticks": 5
+          },
+          "after": {
+            "pid": 4076900,
+            "rss_kib": 7428,
+            "threads": 2,
+            "cpu_ticks": 6
+          },
+          "cpu_ticks_delta": 1
+        }
+      }
+    }
+  ],
+  "observer_input": {
+    "type": "error",
+    "code": "permission_denied"
+  },
+  "close_elapsed_seconds": {
+    "first": 0.08997891296166927,
+    "reattached": 0.017910829046741128
+  },
+  "identity": {
+    "owner": {
+      "pid": 4076900,
+      "epoch": "828d8345855e17b1485e59b6e37d80fa2bead348a237d4d08e4d49b7c3c04eac"
+    },
+    "pane": 0,
+    "pid": 4076906,
+    "native": 1
+  },
+  "result": "pass"
+}

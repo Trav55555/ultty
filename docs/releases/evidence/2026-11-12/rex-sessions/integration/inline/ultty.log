@@ -1,0 +1,36 @@
+2026-11-13T00:44:07.330893Z  INFO ultty: Starting Ultty
+2026-11-13T00:44:07.332235Z  WARN winit::platform_impl::linux::x11::xdisplay: error setting XSETTINGS; Xft options won't reload automatically
+2026-11-13T00:44:07.344549Z  INFO ultty::app: Loaded configuration
+2026-11-13T00:44:07.344671Z  WARN winit::platform_impl::linux::x11::util::randr: XRandR reported that the display's 0mm in size, which is certifiably insane
+2026-11-13T00:44:07.344703Z  INFO winit::platform_impl::linux::x11::window: Guessed window scale factor: 1
+2026-11-13T00:44:07.369657Z  INFO ultty::app: GPU: llvmpipe (LLVM 21.1.8, 256 bits) (Vulkan, Cpu, llvmpipe)
+2026-11-13T00:44:07.390108Z  INFO ultty::renderer: Present mode: AutoVsync
+2026-11-13T00:44:07.436712Z  INFO ultty::app: Terminal size: 88x39
+2026-11-13T00:44:07.436844Z  INFO ultty::app: Native protocol server started; per-tab sockets in "/home/travers/projects/tui-terminal/target/ui.VViv8P"
+2026-11-13T00:44:07.436945Z  INFO ultty::control::server: Control server listening on "/home/travers/projects/tui-terminal/target/ui.VViv8P/ultty-ctl-4117465.sock"
+2026-11-13T00:44:07.440184Z  INFO ultty::app: Control server started at "/home/travers/projects/tui-terminal/target/ui.VViv8P/ultty-ctl-4117465.sock" (auth token in "/home/travers/projects/tui-terminal/target/ui.VViv8P/ultty-auth-4117465.token")
+2026-11-13T00:44:07.440285Z  INFO ultty::protocol::server: Protocol server listening for tab 0 on "/home/travers/projects/tui-terminal/target/ui.VViv8P/ultty-4117465-tab0.sock"
+2026-11-13T00:44:07.444650Z  INFO ultty::config_watcher: Watching config file: "/home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-inline-01/config/ultty/config.toml"
+2026-11-13T00:44:07.444669Z  INFO ultty::app: Config hot-reload enabled
+2026-11-13T00:44:07.537738Z  INFO ultty::protocol::server: Accepted connection from (unnamed) on tab 0, session 1
+2026-11-13T00:44:07.537798Z  INFO ultty::protocol::server: Session 1 bound to pane 0
+2026-11-13T00:44:07.537988Z  INFO ultty::protocol::session::commands: Session 1 client hello: version=1, caps=0x07f1
+2026-11-13T00:44:07.978747Z  INFO ultty::renderer::screenshot: Screenshot saved to /home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-inline-01/placed.png
+2026-11-13T00:44:08.445519Z  INFO ultty::renderer::screenshot: Screenshot saved to /home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-inline-01/off.png
+2026-11-13T00:44:09.691411Z  INFO ultty::renderer::screenshot: Screenshot saved to /home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-inline-01/top.png
+2026-11-13T00:44:10.429053Z  INFO ultty::renderer::screenshot: Screenshot saved to /home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-inline-01/shifted.png
+2026-11-13T00:44:14.767865Z  INFO ultty::protocol::session: Session 1 disconnected (EOF)
+2026-11-13T00:44:14.767888Z  INFO ultty::protocol::server: Session 1 ended
+2026-11-13T00:44:14.894940Z  INFO ultty::protocol::server: Accepted connection from (unnamed) on tab 0, session 2
+2026-11-13T00:44:14.894990Z  INFO ultty::protocol::server: Session 2 bound to pane 1
+2026-11-13T00:44:14.895079Z  INFO ultty::protocol::session::commands: Session 2 client hello: version=1, caps=0x07f1
+2026-11-13T00:44:14.911248Z  INFO ultty::protocol::server: Accepted connection from (unnamed) on tab 0, session 3
+2026-11-13T00:44:14.911298Z  INFO ultty::protocol::server: Session 3 bound to pane 2
+2026-11-13T00:44:14.911954Z  INFO ultty::protocol::session::commands: Session 3 client hello: version=1, caps=0x07f1
+2026-11-13T00:44:15.281175Z  INFO ultty::renderer::screenshot: Screenshot saved to /home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-inline-01/split-live.png
+2026-11-13T00:44:15.403567Z  INFO ultty::protocol::session: Session 2 disconnected (EOF)
+2026-11-13T00:44:15.403589Z  INFO ultty::protocol::server: Session 2 ended
+2026-11-13T00:44:15.416172Z  INFO ultty::app::update: Terminal TerminalId(1) exited with status 0
+X connection to :2 broken (explicit kill or server shutdown).
+2026-11-13T00:44:15.428435Z  INFO ultty::platform::shutdown: Received signal 15; shutting down
+2026-11-13T00:44:15.431887Z ERROR arboard::platform::linux::x11: Worker thread errored with: Unknown error while interacting with the clipboard: The X11 server closed the connection

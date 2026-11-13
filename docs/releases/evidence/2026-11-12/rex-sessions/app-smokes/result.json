@@ -1,0 +1,25 @@
+{
+  "passed": true,
+  "frozen_binaries_unchanged": true,
+  "manifest": "/home/travers/projects/tui-terminal/target/rex-features/logs/final-app-smoke-bin/manifest.json",
+  "artifacts": {
+    "native-split": "/home/travers/projects/tui-terminal/target/rex-features/logs/final-app-native-split-01",
+    "inline-surface": "/home/travers/projects/tui-terminal/target/rex-features/logs/final-app-inline-surface-01",
+    "control": "/home/travers/projects/tui-terminal/target/rex-features/logs/final-app-control-01"
+  },
+  "control_seconds": 10.655571647919714,
+  "semantic": {
+    "passed": true,
+    "counter": 4,
+    "lua": 5,
+    "no_handler": 6,
+    "ansi": 7,
+    "timeout_outcome": "unknown_then_applied"
+  },
+  "script_sha256": {
+    "scripts/e2e/native-split.sh": "1a6ca1549ced29cc7f3a956a954616e490ef984599ed3d9c0a6b6be5db878eb2",
+    "scripts/e2e/inline-surface.sh": "8e680e691ae072eb1b4c9b770982aa724b3b4904f970621867cd66947205bb51",
+    "scripts/e2e/control-workflows.py": "2a33247b612a4f1291a1f077465f27ff0ad42d57a2c6e59347c2365d61c07c57"
+  },
+  "cleanup_qualification": "inline-surface.sh kills GUI and Xvfb concurrently; winit teardown panic after assertions is preserved in its ultty.log. This smoke proves functional assertions, not graceful GUI teardown."
+}
