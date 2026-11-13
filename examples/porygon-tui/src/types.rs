@@ -8,14 +8,6 @@ pub struct ChatMessage {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct SessionInfo {
-    pub id: String,
-    pub name: Option<String>,
-    pub date: Option<String>,
-    pub message_count: Option<usize>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct MemoryResult {
     pub content: String,
     pub score: Option<f64>,
@@ -199,6 +191,12 @@ pub struct WeatherData {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApprovalRequest {
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub decision_version: Option<String>,
+    #[serde(default)]
+    pub decision_stale: bool,
     pub id: String,
     pub tool_name: String,
     pub params: serde_json::Value,

@@ -38,6 +38,7 @@ compile_error!(
 
 pub mod app;
 pub mod backend;
+pub mod clipboard;
 pub mod cmd;
 /// Optional terminal program-status reporting, shared with low-level clients.
 pub use ultty_client::program_status;

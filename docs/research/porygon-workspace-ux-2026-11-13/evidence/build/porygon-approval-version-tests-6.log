@@ -1,0 +1,12 @@
+warning: `--no-sync` has no effect when used outside of a project
+........................................................................ [ 85%]
+............                                                             [100%]
+=============================== warnings summary ===============================
+tests/test_approval_version_claim.py: 18 warnings
+tests/test_server_endpoints.py: 140 warnings
+tests/test_conversation_history_pages.py: 409 warnings
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/aiosqlite/core.py:63: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    result = function()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+84 passed, 567 warnings in 2.82s

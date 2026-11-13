@@ -154,7 +154,7 @@ impl Connection {
         Ok(snapshot)
     }
 
-    fn endpoint(&self, segments: &[&str]) -> Result<Url, String> {
+    pub(crate) fn endpoint(&self, segments: &[&str]) -> Result<Url, String> {
         let mut url = self.base_url.clone();
         {
             let mut path = url

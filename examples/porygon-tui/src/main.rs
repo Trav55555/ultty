@@ -14,15 +14,22 @@ use ulttui::prelude::*;
 use ulttui::theme::{ButtonTheme, ControlTheme, DesignTokens, InputTheme, SelectionTheme, Theme};
 
 mod approval_client;
+mod approval_ui;
+mod attachment;
 mod commands;
 mod connection;
 mod contract_probe;
+mod conversations;
+mod copy;
 mod daemon;
 mod native_stream;
 mod session_ui;
 mod sidebar;
+mod transcript;
 mod types;
 mod views;
+mod work;
+mod work_views;
 
 use commands::CommandRegistry;
 use types::*;
@@ -94,7 +101,12 @@ fn porygon_theme() -> Theme {
 }
 
 pub(crate) struct PorygonTui {
+    pub(crate) conversations: conversations::Conversations,
+    pub(crate) work: work::WorkState,
+    pub(crate) pending_attach: Option<attachment::Request>,
+    pub(crate) attach_generation: u64,
     pub(crate) messages: Vec<ChatMessage>,
+    pub(crate) transcript: std::cell::RefCell<transcript::Transcript>,
     pub(crate) input: TextInput,
     pub(crate) newline_prefix: bool,
     pub(crate) show_help: bool,
@@ -114,6 +126,7 @@ pub(crate) struct PorygonTui {
     pub(crate) started: bool,
     pub(crate) pending_approval: Option<ApprovalRequest>,
     pub(crate) show_approval_modal: bool,
+    pub(crate) approval_scroll: usize,
     pub(crate) weather: Option<WeatherData>,
     /// Opt-in flag for the weather panel (see the crate docs).
     pub(crate) weather_enabled: bool,
@@ -165,6 +178,11 @@ impl PorygonTui {
             .unwrap_or_default();
 
         Self {
+            transcript: std::cell::RefCell::default(),
+            conversations: conversations::Conversations::default(),
+            work: work::WorkState::default(),
+            pending_attach: None,
+            attach_generation: 0,
             messages: vec![ChatMessage {
                 role: "system".into(),
                 content: "Type a message to start a conversation.\nUse F1 for keys and commands. Your draft stays here while disconnected.".into(),
@@ -194,6 +212,7 @@ impl PorygonTui {
             started: false,
             pending_approval: None,
             show_approval_modal: false,
+            approval_scroll: 0,
             weather: None,
             weather_enabled: weather_enabled_from_env(),
             clock_text: format_clock(),
@@ -235,6 +254,12 @@ impl PorygonTui {
 
 #[derive(Debug)]
 enum Msg {
+    FlushDrafts,
+    OpenConversations,
+    MoreConversations,
+    ConversationsListed(u64, usize, Result<Vec<conversations::Conversation>, String>),
+    LoadConversation(String, u64),
+    ConversationLoaded(String, u64, Result<Vec<ChatMessage>, String>),
     Init,
     SendMessage,
     PollConnection,
@@ -246,23 +271,40 @@ enum Msg {
     PollWeather,
     WeatherFetched(WeatherData),
     WeatherFailed,
-    PollApprovals,
+    OpenWork(work::Page),
+    RefreshWork,
+    WorkRuns(u64, Result<Vec<work::WorkRun>, String>),
+    WorkDetail(
+        String,
+        u64,
+        Result<(work::WorkRun, Vec<work::Report>), String>,
+    ),
+    WorkAttention(
+        u64,
+        Result<(Vec<work::WorkRun>, Vec<approval_client::PendingApproval>), String>,
+    ),
+    PollAttention,
+    AttentionNotice(Result<usize, String>),
+    AttachWork,
+    AttachReady(u64, Result<attachment::Snapshot, String>),
+    InspectWork,
     ApprovalReceived(ApprovalRequest, bool),
     ApprovalDecision(bool),
-    ApprovalSubmitted(String, Result<(), String>),
-    ApprovalLoadFailed(String),
+    ApprovalSubmitted(String, String, Result<(), String>),
+    ApprovalBecameStale(String, String, String),
     DismissApproval,
     RefreshApproval,
-    ApprovalReconciled(String, Result<bool, String>),
-    NoApprovalsPending,
+    ApprovalReconciled(
+        String,
+        Option<String>,
+        Result<approval_client::ApprovalRefresh, String>,
+    ),
     StreamToken(String),
     AbortStream,
     NativeEvent(String, u64, native_stream::Event),
     InspectRun,
     RunObserved(String, u64, Result<connection::RunSnapshot, String>),
     StopObserved(String, u64, Result<connection::RunSnapshot, String>),
-    SessionsFetched(Vec<SessionInfo>),
-    SessionResumed(Vec<ChatMessage>),
     SessionSaved,
     SessionForked(String),
     SessionExported(String),
@@ -314,6 +356,9 @@ enum Msg {
     ValidationError(String),
     VirtualScrollBenchReady(String),
     DiffBenchReady(String),
+    CopyLatestAssistant,
+    CopyReviewedWork,
+    ClipboardWritten(Result<(), String>),
     ExitRequested,
     DraftExitWarning,
 }
@@ -327,9 +372,10 @@ impl Application for PorygonTui {
 
     fn subscriptions(&self) -> Sub<Msg> {
         let mut subs = vec![
+            Sub::every(Duration::from_millis(250), || Msg::FlushDrafts),
             Sub::every(Duration::from_secs(3), || Msg::PollConnection),
+            Sub::every(Duration::from_secs(5), || Msg::PollAttention),
             Sub::every(Duration::from_secs(2), || Msg::PollStatus),
-            Sub::every(Duration::from_millis(500), || Msg::PollApprovals),
             Sub::every(Duration::from_secs(1), || Msg::ClockTick),
         ];
         if self.weather_enabled {

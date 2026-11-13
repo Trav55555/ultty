@@ -1,0 +1,1135 @@
+//! Conversation navigation and local drafts. Opening a conversation never submits a turn.
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::hash::{Hash, Hasher};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use ulttui::event::{Event, Key};
+use ulttui::prelude::{Cmd, Column, Text};
+use ulttui::toast::Toast;
+
+use crate::types::ChatMessage;
+use crate::{Msg, PorygonTui};
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct Conversation {
+    pub(crate) id: String,
+    title: Option<String>,
+    updated_at: String,
+    message_count: usize,
+}
+
+#[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
+struct Position {
+    draft: String,
+    scroll: f32,
+    follow: bool,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct DraftStore {
+    positions: BTreeMap<String, Position>,
+    active: Option<String>,
+    run: Option<String>,
+    unresolved: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredDrafts {
+    Current(DraftStore),
+    Legacy(BTreeMap<String, Position>),
+}
+
+#[derive(Default)]
+pub(crate) struct Conversations {
+    pub(crate) open: bool,
+    pub(crate) rows: Vec<Conversation>,
+    pub(crate) error: Option<String>,
+    query: String,
+    selected: usize,
+    pending: Option<(String, u64)>,
+    generation: u64,
+    next_offset: usize,
+    list_generation: u64,
+    loading: bool,
+    has_more: bool,
+    active: Option<String>,
+    run: Option<String>,
+    unresolved: bool,
+    dirty: bool,
+    restoring_history: bool,
+    positions: BTreeMap<String, Position>,
+    path: Option<PathBuf>,
+    lock: Option<PathBuf>,
+}
+
+impl Conversations {
+    fn filtered(&self) -> Vec<&Conversation> {
+        let query = self.query.to_lowercase();
+        self.rows
+            .iter()
+            .filter(|row| {
+                row.title
+                    .as_deref()
+                    .unwrap_or("Untitled conversation")
+                    .to_lowercase()
+                    .contains(&query)
+            })
+            .collect()
+    }
+
+    fn write(&self) -> Result<(), String> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let parent = path.parent().ok_or("Draft path has no parent")?;
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|e| e.to_string())?;
+        file.write_all(
+            &serde_json::to_vec(&DraftStore {
+                positions: self.positions.clone(),
+                active: self.active.clone(),
+                run: self.run.clone(),
+                unresolved: self.unresolved,
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        fs::rename(temporary, path).map_err(|e| e.to_string())
+    }
+}
+
+const MAX_HISTORY_MESSAGES: usize = 50_000;
+const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Deserialize)]
+struct HistoryMessage {
+    conversation_id: String,
+    role: String,
+    content: String,
+    created_at: String,
+}
+
+impl From<HistoryMessage> for ChatMessage {
+    fn from(message: HistoryMessage) -> Self {
+        Self {
+            role: message.role,
+            content: message.content,
+            timestamp: message.created_at,
+        }
+    }
+}
+
+fn validate_message_conversations(messages: &[HistoryMessage], id: &str) -> Result<(), String> {
+    if messages.iter().any(|message| message.conversation_id != id) {
+        return Err("Daemon returned a message belonging to another conversation; previous conversation preserved.".into());
+    }
+    Ok(())
+}
+
+async fn decode_history<T: serde::de::DeserializeOwned>(
+    mut response: reqwest::Response,
+    remaining: &mut usize,
+) -> Result<T, String> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        if chunk.len() > *remaining {
+            return Err("Conversation history exceeds the 32 MiB loading budget; previous conversation preserved.".into());
+        }
+        *remaining -= chunk.len();
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|error| format!("Invalid conversation history: {error}"))
+}
+
+pub(crate) async fn fetch_history(
+    connection: &crate::connection::Connection,
+    id: &str,
+) -> Result<Vec<ChatMessage>, String> {
+    #[derive(Deserialize)]
+    struct Page {
+        conversation_id: String,
+        messages: Vec<HistoryMessage>,
+        total: usize,
+        next_offset: Option<usize>,
+    }
+    #[derive(Deserialize)]
+    struct Detail {
+        id: String,
+        message_count: usize,
+        messages: Vec<HistoryMessage>,
+    }
+    let mut remaining = MAX_HISTORY_BYTES;
+    let mut messages = Vec::new();
+    let mut offset = 0;
+    let mut expected_total = None;
+    loop {
+        let url = connection.endpoint(&["conversations", id, "messages"])?;
+        let response = connection
+            .client
+            .get(url)
+            .query(&[("limit", 200), ("offset", offset)])
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if offset == 0 && response.status() == reqwest::StatusCode::NOT_FOUND {
+            let url = connection.endpoint(&["conversations", id])?;
+            let response = connection
+                .client
+                .get(url)
+                .send()
+                .await
+                .map_err(|error| error.to_string())?
+                .error_for_status()
+                .map_err(|error| error.to_string())?;
+            let detail: Detail = decode_history(response, &mut remaining).await?;
+            if detail.id != id {
+                return Err("Daemon returned a different conversation; nothing switched.".into());
+            }
+            validate_message_conversations(&detail.messages, id)?;
+            if detail.message_count != detail.messages.len() {
+                return Err("Daemon returned partial conversation history. Upgrade the daemon for paginated history; previous conversation preserved.".into());
+            }
+            if detail.message_count > MAX_HISTORY_MESSAGES {
+                return Err("Conversation history exceeds the 50,000 message loading budget; previous conversation preserved.".into());
+            }
+            return Ok(detail.messages.into_iter().map(ChatMessage::from).collect());
+        }
+        let response = response
+            .error_for_status()
+            .map_err(|error| error.to_string())?;
+        let page: Page = decode_history(response, &mut remaining).await?;
+        if page.conversation_id != id {
+            return Err("Daemon returned a different conversation; nothing switched.".into());
+        }
+        validate_message_conversations(&page.messages, id)?;
+        if page.total > MAX_HISTORY_MESSAGES {
+            return Err("Conversation history exceeds the 50,000 message loading budget; previous conversation preserved.".into());
+        }
+        if expected_total.is_some_and(|total| total != page.total) {
+            return Err("Conversation changed while loading history. Refresh manually; previous conversation preserved.".into());
+        }
+        expected_total = Some(page.total);
+        messages.extend(page.messages.into_iter().map(ChatMessage::from));
+        if messages.len() > page.total {
+            return Err(
+                "Daemon returned inconsistent history counts; previous conversation preserved."
+                    .into(),
+            );
+        }
+        match page.next_offset {
+            Some(next) if next > offset && next == messages.len() && next < page.total => offset = next,
+            None if messages.len() == page.total => return Ok(messages),
+            _ => return Err("Daemon returned incomplete or non-advancing history pages; previous conversation preserved.".into()),
+        }
+    }
+}
+
+impl PorygonTui {
+    pub(crate) fn initialize_drafts(&mut self) {
+        let root = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
+            });
+        let mut namespace = std::collections::hash_map::DefaultHasher::new();
+        self.connection
+            .as_ref()
+            .map(|connection| connection.base_url.as_str())
+            .unwrap_or(&self.daemon_url)
+            .hash(&mut namespace);
+        std::env::current_dir().ok().hash(&mut namespace);
+        self.conversations.path = root.map(|root| {
+            root.join(format!(
+                "porygon-tui/{:016x}/drafts.json",
+                namespace.finish()
+            ))
+        });
+        if let Some(path) = &self.conversations.path {
+            match fs::read(path) {
+                Ok(bytes) => match serde_json::from_slice(&bytes) {
+                    Ok(StoredDrafts::Current(store)) => self.restore_store(store),
+                    Ok(StoredDrafts::Legacy(positions)) => self.conversations.positions = positions,
+                    Err(error) => {
+                        self.error = Some(format!("Could not read drafts; persistence disabled to preserve the file: {error}"));
+                        self.conversations.path = None;
+                    }
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    self.error = Some(format!(
+                        "Could not read drafts; persistence disabled to preserve the file: {error}"
+                    ));
+                    self.conversations.path = None;
+                }
+            }
+        }
+        if let Some(path) = &self.conversations.path {
+            let lock = path.with_extension("lock");
+            let result = (|| -> Result<(), String> {
+                fs::create_dir_all(path.parent().ok_or("Missing draft directory")?)
+                    .map_err(|error| error.to_string())?;
+                if let Ok(pid) = fs::read_to_string(&lock) {
+                    if let Ok(pid) = pid.trim().parse::<i32>() {
+                        // SAFETY: signal zero checks process existence without delivering a signal.
+                        if pid > 0
+                            && unsafe { libc::kill(pid, 0) } == -1
+                            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                        {
+                            fs::remove_file(&lock).map_err(|error| error.to_string())?;
+                        }
+                    }
+                }
+                let mut file = OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(&lock)
+                    .map_err(|error| error.to_string())?;
+                write!(file, "{}", std::process::id()).map_err(|error| error.to_string())?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => self.conversations.lock = Some(lock),
+                Err(error) => {
+                    self.error = Some(format!(
+                        "Draft persistence unavailable (another client may own it): {error}"
+                    ));
+                    self.conversations.path = None;
+                }
+            }
+        }
+        self.restore_position();
+    }
+
+    fn restore_store(&mut self, store: DraftStore) {
+        self.conversations.positions = store.positions;
+        self.conversation_id = store.active.clone();
+        self.conversations.restoring_history = self.conversation_id.is_some();
+        self.current_run = store.run.clone();
+        self.run_unresolved = store.unresolved;
+        self.conversations.active = store.active;
+        self.conversations.run = store.run;
+        self.conversations.unresolved = store.unresolved;
+        if self.run_unresolved {
+            self.status.step = "previous work unconfirmed; /reconnect to inspect".into();
+        }
+        if self.conversation_id.is_some() {
+            self.messages[0].content = "Previous conversation restored with your draft. F2 opens its history. Previous work is never resubmitted.".into();
+        }
+    }
+
+    pub(crate) fn assign_conversation(&mut self, id: String) {
+        if self.conversation_id.is_none() {
+            self.conversations.positions.remove("");
+        }
+        self.conversation_id = Some(id);
+        self.persist_conversation();
+    }
+
+    pub(crate) fn flush_drafts(&mut self) {
+        self.persist_conversation();
+        if self.conversations.dirty {
+            match self.conversations.write() {
+                Ok(()) => self.conversations.dirty = false,
+                Err(error) => self.error = Some(format!("Draft not saved: {error}")),
+            }
+        }
+    }
+
+    pub(crate) fn persist_conversation(&mut self) {
+        let key = self.conversation_id.clone().unwrap_or_default();
+        let mut position = Position {
+            draft: self.input.current_value().to_owned(),
+            scroll: self.chat_scroll.scroll_position().1,
+            follow: self.follow_output,
+        };
+        if self.conversations.restoring_history {
+            if let Some(previous) = self.conversations.positions.get(&key) {
+                position.scroll = previous.scroll;
+                position.follow = previous.follow;
+            }
+        }
+        if self.conversations.positions.get(&key) != Some(&position) {
+            self.conversations.positions.insert(key, position);
+            self.conversations.dirty = true;
+        }
+        if self.conversations.active != self.conversation_id
+            || self.conversations.run != self.current_run
+            || self.conversations.unresolved != self.run_unresolved
+        {
+            self.conversations.active = self.conversation_id.clone();
+            self.conversations.run = self.current_run.clone();
+            self.conversations.unresolved = self.run_unresolved;
+            self.conversations.dirty = true;
+        }
+    }
+
+    fn restore_position(&mut self) {
+        let key = self.conversation_id.as_deref().unwrap_or_default();
+        let position = self
+            .conversations
+            .positions
+            .get(key)
+            .cloned()
+            .unwrap_or(Position {
+                follow: true,
+                ..Position::default()
+            });
+        self.input.set_value(position.draft);
+        self.follow_output = position.follow;
+        self.unread_output = false;
+        self.update_scroll_dimensions();
+        self.chat_scroll.scroll_to(position.scroll);
+        if self.follow_output {
+            self.chat_scroll.scroll_to_bottom();
+        }
+    }
+
+    pub(crate) fn can_switch(&self) -> bool {
+        !self.run_unresolved
+            && !self.waiting_response
+            && !self.stopping
+            && self.pending_approval.is_none()
+            && !self.approval_in_flight
+    }
+
+    pub(crate) fn open_conversations(&mut self) -> Cmd<Msg> {
+        self.persist_conversation();
+        self.conversations.open = true;
+        self.conversations.query.clear();
+        self.conversations.selected = 0;
+        self.conversations.error = None;
+        self.conversations.list_generation = self.conversations.list_generation.wrapping_add(1);
+        self.conversations.rows.clear();
+        self.conversations.loading = false;
+        self.conversations.next_offset = 0;
+        self.conversations.has_more = true;
+        self.fetch_conversation_page()
+    }
+
+    pub(crate) fn fetch_conversation_page(&mut self) -> Cmd<Msg> {
+        if self.conversations.loading || !self.conversations.has_more {
+            return Cmd::none();
+        }
+        let Some(connection) = self.connection.clone() else {
+            self.conversations.error = Some("Connect to the daemon to load conversations.".into());
+            return Cmd::none();
+        };
+        self.conversations.loading = true;
+        let offset = self.conversations.next_offset;
+        let generation = self.conversations.list_generation;
+        Cmd::spawn(async move {
+            let result = async {
+                let url = connection.endpoint(&["conversations"])?;
+                connection
+                    .client
+                    .get(url)
+                    .query(&[("limit", 200), ("offset", offset)])
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            .await;
+            Msg::ConversationsListed(generation, offset, result)
+        })
+    }
+
+    pub(crate) fn conversations_listed(
+        &mut self,
+        generation: u64,
+        offset: usize,
+        result: Result<Vec<Conversation>, String>,
+    ) {
+        if generation != self.conversations.list_generation
+            || offset != self.conversations.next_offset
+        {
+            return;
+        }
+        self.conversations.loading = false;
+        match result {
+            Ok(rows) => {
+                self.conversations.next_offset += rows.len();
+                self.conversations.has_more = rows.len() == 200;
+                for row in rows {
+                    if !self
+                        .conversations
+                        .rows
+                        .iter()
+                        .any(|existing| existing.id == row.id)
+                    {
+                        self.conversations.rows.push(row);
+                    }
+                }
+                self.conversations.error = None;
+            }
+            Err(error) => self.conversations.error = Some(error),
+        }
+    }
+
+    pub(crate) fn resume_conversation(&mut self, id: String) -> Cmd<Msg> {
+        if self.connection.is_none() {
+            return Cmd::ShowToast(Toast::warning(
+                "Configure the daemon connection before opening a conversation.",
+            ));
+        }
+
+        if !self.can_switch() {
+            return Cmd::ShowToast(Toast::warning(
+                "Resolve current work before switching conversations.",
+            ));
+        }
+        self.persist_conversation();
+        self.conversations.open = true;
+        self.conversations.generation = self.conversations.generation.wrapping_add(1);
+        let generation = self.conversations.generation;
+        self.conversations.pending = Some((id.clone(), generation));
+        self.load_conversation(id, generation)
+    }
+
+    pub(crate) fn conversation_event(&mut self, event: &Event) -> Option<Msg> {
+        let Event::Key(key) = event else { return None };
+        match key.key {
+            Key::Escape | Key::F(2) => {
+                self.conversations.open = false;
+                self.conversations.pending = None;
+            }
+            Key::Char('l') if key.modifiers.ctrl => return Some(Msg::MoreConversations),
+            Key::Up => self.conversations.selected = self.conversations.selected.saturating_sub(1),
+            Key::Down => {
+                self.conversations.selected = (self.conversations.selected + 1)
+                    .min(self.conversations.filtered().len().saturating_sub(1))
+            }
+            Key::Char('n') if key.modifiers.ctrl => {
+                if self.can_switch() {
+                    self.flush_drafts();
+                    self.conversations.restoring_history = false;
+                    self.conversation_id = None;
+                    self.current_run = None;
+                    self.current_response = None;
+                    self.messages.clear();
+                    self.tool_calls.clear();
+                    self.tool_ids.clear();
+                    self.streaming_content.clear();
+                    self.session_id = None;
+                    self.error = None;
+                    self.status.step = "ready".into();
+                    self.conversations.pending = None;
+                    self.conversations.open = false;
+                    self.restore_position();
+                    self.flush_drafts();
+                } else {
+                    self.conversations.error =
+                        Some("Resolve current work before switching conversations.".into());
+                }
+            }
+            Key::Enter => {
+                if !self.can_switch() {
+                    self.conversations.error =
+                        Some("Resolve current work before switching conversations.".into());
+                    return None;
+                }
+                if let Some(row) = self
+                    .conversations
+                    .filtered()
+                    .get(self.conversations.selected)
+                {
+                    let id = row.id.clone();
+                    self.conversations.generation = self.conversations.generation.wrapping_add(1);
+                    let generation = self.conversations.generation;
+                    self.conversations.pending = Some((id.clone(), generation));
+                    return Some(Msg::LoadConversation(id, generation));
+                }
+            }
+            Key::Backspace => {
+                self.conversations.query.pop();
+                self.conversations.selected = 0;
+            }
+            Key::Char(character) if !key.modifiers.ctrl && !key.modifiers.alt => {
+                self.conversations.query.push(character);
+                self.conversations.selected = 0;
+            }
+            _ => {}
+        }
+        None
+    }
+
+    pub(crate) fn load_conversation(&self, id: String, generation: u64) -> Cmd<Msg> {
+        let Some(connection) = self.connection.clone() else {
+            return Cmd::none();
+        };
+        Cmd::spawn(async move {
+            let result = fetch_history(&connection, &id).await;
+            Msg::ConversationLoaded(id, generation, result)
+        })
+    }
+
+    pub(crate) fn conversation_loaded(
+        &mut self,
+        id: String,
+        generation: u64,
+        result: Result<Vec<ChatMessage>, String>,
+    ) -> Cmd<Msg> {
+        if self.conversations.pending.as_ref() != Some(&(id.clone(), generation))
+            || !self.conversations.open
+        {
+            return Cmd::none();
+        }
+        self.conversations.pending = None;
+        match result {
+            Ok(messages) if self.can_switch() => {
+                self.select_loaded_conversation(id, messages);
+                Cmd::none()
+            }
+            Ok(_) => Cmd::ShowToast(Toast::warning(
+                "Resolve current work before switching conversations.",
+            )),
+            Err(error) => {
+                self.conversations.error = Some(error);
+                Cmd::none()
+            }
+        }
+    }
+
+    pub(crate) fn select_loaded_conversation(&mut self, id: String, messages: Vec<ChatMessage>) {
+        self.flush_drafts();
+        self.conversations.restoring_history = false;
+        self.messages = messages;
+        self.conversation_id = Some(id);
+        self.current_run = None;
+        self.current_response = None;
+        self.tool_calls.clear();
+        self.tool_ids.clear();
+        self.streaming_content.clear();
+        self.session_id = None;
+        self.error = None;
+        self.status.step = "ready".into();
+        self.conversations.open = false;
+        self.restore_position();
+        self.flush_drafts();
+    }
+
+    pub(crate) fn conversation_view(&self) -> Column {
+        let mut view = Column::new()
+            .padding(1.0)
+            .child(Text::new(
+                "Conversations · Esc back · Ctrl+N new · Enter open",
+            ))
+            .child(Text::new(format!("Search: {}", self.conversations.query)));
+        view = view.child(Text::new(format!(
+            "Search covers {} loaded conversations · {}",
+            self.conversations.rows.len(),
+            if self.conversations.loading {
+                "loading older conversations…"
+            } else if self.conversations.has_more {
+                "Ctrl+L loads older conversations"
+            } else {
+                "all conversations loaded"
+            }
+        )));
+        if let Some(error) = &self.conversations.error {
+            view = view.child(Text::new(error.clone()));
+        }
+        if self.conversations.pending.is_some() {
+            view = view.child(Text::new("Loading conversation…"));
+        }
+        let rows = self.conversations.filtered();
+        if rows.is_empty() {
+            view = view.child(Text::new(
+                "No matching conversations. Ctrl+N starts a new conversation.",
+            ));
+        }
+        let start = self.conversations.selected.saturating_sub(5);
+        for (index, row) in rows
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(self.terminal_height.saturating_sub(6) as usize)
+        {
+            view = view.child(Text::new(format!(
+                "{} {} · {} messages · {}",
+                if index == self.conversations.selected {
+                    ">"
+                } else {
+                    " "
+                },
+                row.title.as_deref().unwrap_or("Untitled conversation"),
+                row.message_count,
+                row.updated_at
+            )));
+        }
+        view
+    }
+}
+
+impl Drop for Conversations {
+    fn drop(&mut self) {
+        if let Some(lock) = &self.lock {
+            let _ = fs::remove_file(lock);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ulttui::event::{KeyEvent, Modifiers};
+
+    fn key(key: Key, ctrl: bool) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            modifiers: Modifiers {
+                ctrl,
+                ..Modifiers::default()
+            },
+            focused_id: Some("chat-input".into()),
+        })
+    }
+
+    fn select(app: &mut PorygonTui, id: &str) {
+        app.conversations.open = true;
+        app.conversations.pending = Some((id.into(), 0));
+        app.conversation_loaded(
+            id.into(),
+            0,
+            Ok(vec![ChatMessage {
+                role: "user".into(),
+                content: format!("history {id}"),
+                timestamp: "now".into(),
+            }]),
+        );
+    }
+
+    #[test]
+    fn test_switch_restores_each_draft_and_reading_position() {
+        let mut app = PorygonTui::new();
+        app.input.set_value("new draft\nsecond line");
+        select(&mut app, "a");
+        app.input.set_value("draft a");
+        app.follow_output = false;
+        select(&mut app, "b");
+        app.input.set_value("draft b");
+        select(&mut app, "a");
+        assert_eq!(app.input.current_value(), "draft a");
+        assert!(!app.follow_output);
+        app.conversations.open = true;
+        app.conversation_event(&key(Key::Char('n'), true));
+        assert_eq!(app.input.current_value(), "new draft\nsecond line");
+        assert_eq!(app.conversation_id, None);
+    }
+
+    #[test]
+    fn test_picker_enter_never_submits_or_consumes_draft() {
+        let mut app = PorygonTui::new();
+        app.input.set_value("do not send");
+        app.conversations.open = true;
+        app.conversations.rows.push(Conversation {
+            id: "a".into(),
+            title: Some("Research".into()),
+            message_count: 3,
+            updated_at: "today".into(),
+        });
+        assert!(
+            matches!(app.handle_event(&key(Key::Enter, false)), Some(Msg::LoadConversation(id, _)) if id == "a")
+        );
+        assert_eq!(app.input.current_value(), "do not send");
+        assert!(!app.waiting_response);
+        assert!(app.current_run.is_none());
+    }
+
+    #[test]
+    fn test_busy_and_late_load_cannot_change_turn_identity() {
+        let mut app = PorygonTui::new();
+        app.conversation_id = Some("active".into());
+        app.current_run = Some("run".into());
+        app.run_unresolved = true;
+        app.input.set_value("preserved");
+        select(&mut app, "other");
+        app.conversation_event(&key(Key::Char('n'), true));
+        assert_eq!(app.conversation_id.as_deref(), Some("active"));
+        assert_eq!(app.current_run.as_deref(), Some("run"));
+        assert_eq!(app.input.current_value(), "preserved");
+        app.run_unresolved = false;
+        app.conversations.pending = Some(("other".into(), 0));
+        app.conversation_event(&key(Key::Escape, false));
+        app.conversation_loaded("other".into(), 0, Ok(Vec::new()));
+        assert_eq!(app.conversation_id.as_deref(), Some("active"));
+    }
+
+    #[test]
+    fn test_persistent_store_roundtrip_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("porygon-drafts-test-{}", std::process::id()));
+        let path = directory.join("drafts.json");
+        let mut store = Conversations::default();
+        store.path = Some(path.clone());
+        store.positions.insert(
+            "conversation".into(),
+            Position {
+                draft: "exact\ntext ✓".into(),
+                scroll: 42.0,
+                follow: false,
+            },
+        );
+        store.write().unwrap();
+        let restored: DraftStore = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored.positions["conversation"].draft, "exact\ntext ✓");
+        assert_eq!(restored.positions["conversation"].scroll, 42.0);
+        assert!(!restored.positions["conversation"].follow);
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn test_quit_retains_stop_safety_with_picker_open() {
+        let mut app = PorygonTui::new();
+        app.conversations.open = true;
+        app.waiting_response = true;
+        assert!(matches!(
+            app.handle_event(&Event::Quit),
+            Some(Msg::AbortStream)
+        ));
+        app.waiting_response = false;
+        assert!(matches!(
+            app.handle_event(&Event::Quit),
+            Some(Msg::ExitRequested)
+        ));
+    }
+
+    #[test]
+    fn test_typing_caches_without_disk_io_until_flush() {
+        let directory =
+            std::env::temp_dir().join(format!("porygon-drafts-cache-{}", std::process::id()));
+        let path = directory.join("drafts.json");
+        let mut app = PorygonTui::new();
+        app.conversations.path = Some(path.clone());
+        for index in 0..1000 {
+            app.input.set_value(format!("draft {index}"));
+            app.persist_conversation();
+        }
+        assert!(!path.exists(), "key edits must not touch the filesystem");
+        app.flush_drafts();
+        let store: DraftStore = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(store.positions[""].draft, "draft 999");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn test_restart_restores_active_draft_and_uncertainty_without_submission() {
+        let mut app = PorygonTui::new();
+        let mut store = DraftStore {
+            active: Some("active".into()),
+            run: Some("unconfirmed".into()),
+            unresolved: true,
+            ..DraftStore::default()
+        };
+        store.positions.insert(
+            "active".into(),
+            Position {
+                draft: "next thought".into(),
+                scroll: 123.0,
+                follow: false,
+            },
+        );
+        app.restore_store(store);
+        app.restore_position();
+        app.persist_conversation();
+        assert_eq!(app.input.current_value(), "next thought");
+        assert_eq!(app.conversation_id.as_deref(), Some("active"));
+        assert_eq!(app.current_run.as_deref(), Some("unconfirmed"));
+        assert_eq!(app.conversations.positions["active"].scroll, 123.0);
+        assert!(!app.waiting_response);
+        assert!(app.run_unresolved);
+        assert!(!app.run_can_continue);
+    }
+
+    #[test]
+    fn test_assigned_conversation_takes_ownership_of_next_draft() {
+        let mut app = PorygonTui::new();
+        app.input.set_value("submitted text");
+        app.persist_conversation();
+        app.input.set_value("next thought");
+        app.assign_conversation("created".into());
+        assert!(!app.conversations.positions.contains_key(""));
+        assert_eq!(app.conversations.positions["created"].draft, "next thought");
+        app.conversations.open = true;
+        app.conversation_event(&key(Key::Char('n'), true));
+        assert!(app.input.current_value().is_empty());
+    }
+
+    #[test]
+    fn test_previous_same_id_load_generation_is_ignored() {
+        let mut app = PorygonTui::new();
+        app.conversations.open = true;
+        app.conversations.pending = Some(("same".into(), 2));
+        app.conversation_loaded("same".into(), 1, Ok(Vec::new()));
+        assert!(app.conversation_id.is_none());
+        assert_eq!(app.conversations.pending, Some(("same".into(), 2)));
+    }
+    #[test]
+    fn test_older_pages_extend_search_and_ignore_stale_offsets() {
+        let mut app = PorygonTui::new();
+        let page = (0..200)
+            .map(|index| Conversation {
+                id: format!("conversation-{index}"),
+                title: Some(format!("recent {index}")),
+                updated_at: "today".into(),
+                message_count: 1,
+            })
+            .collect();
+        app.conversations_listed(0, 0, Ok(page));
+        assert!(app.conversations.has_more);
+        assert_eq!(app.conversations.next_offset, 200);
+        app.conversations.query = "older".into();
+        assert!(app.conversations.filtered().is_empty());
+        app.conversations_listed(
+            0,
+            200,
+            Ok(vec![Conversation {
+                id: "old".into(),
+                title: Some("older investigation".into()),
+                updated_at: "yesterday".into(),
+                message_count: 7,
+            }]),
+        );
+        assert_eq!(app.conversations.filtered().len(), 1);
+        assert!(!app.conversations.has_more);
+        app.conversations_listed(0, 0, Ok(Vec::new()));
+        assert_eq!(app.conversations.rows.len(), 201);
+    }
+
+    #[test]
+    fn test_resume_command_uses_guarded_conversation_identity() {
+        let mut app = PorygonTui::new();
+        app.connection = Some(
+            crate::connection::Connection::from_values("http://127.0.0.1:18789", "fixture")
+                .unwrap(),
+        );
+        app.conversation_id = Some("original".into());
+        app.input.set_value("/resume destination");
+        app.handle_update(Msg::SendMessage);
+        let generation = app.conversations.generation;
+        assert_eq!(
+            app.conversations.pending,
+            Some(("destination".into(), generation))
+        );
+        assert_eq!(app.conversation_id.as_deref(), Some("original"));
+        app.conversation_loaded("destination".into(), generation, Ok(Vec::new()));
+        assert_eq!(app.conversation_id.as_deref(), Some("destination"));
+        app.run_unresolved = true;
+        app.input.set_value("/resume forbidden");
+        app.handle_update(Msg::SendMessage);
+        assert_eq!(app.conversation_id.as_deref(), Some("destination"));
+        assert!(app.conversations.pending.is_none());
+    }
+
+    #[test]
+    fn test_sessions_command_opens_picker_and_save_accepts_empty_transcript() {
+        let mut app = PorygonTui::new();
+        app.input.set_value("/sessions");
+        app.handle_update(Msg::SendMessage);
+        assert!(app.conversations.open);
+        app.connected = true;
+        app.messages.clear();
+        app.input.set_value("/save");
+        app.handle_update(Msg::SendMessage);
+    }
+    #[test]
+    fn test_reopened_picker_ignores_previous_list_generation() {
+        let mut app = PorygonTui::new();
+        app.open_conversations();
+        let previous = app.conversations.list_generation;
+        app.open_conversations();
+        let current = app.conversations.list_generation;
+        app.conversations_listed(
+            previous,
+            0,
+            Ok(vec![Conversation {
+                id: "stale".into(),
+                title: None,
+                updated_at: "yesterday".into(),
+                message_count: 1,
+            }]),
+        );
+        assert!(app.conversations.rows.is_empty());
+        app.conversations_listed(
+            current,
+            0,
+            Ok(vec![Conversation {
+                id: "fresh".into(),
+                title: None,
+                updated_at: "today".into(),
+                message_count: 1,
+            }]),
+        );
+        assert_eq!(app.conversations.rows[0].id, "fresh");
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use crate::connection::Connection;
+    use serde_json::{json, Value};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn server(
+        responses: Vec<(u16, Value)>,
+    ) -> (Connection, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let connection = Connection::from_values(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            "fixture",
+        )
+        .unwrap();
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                let body = body.to_string();
+                let response = format!("HTTP/1.1 {status} fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (connection, task)
+    }
+
+    fn messages(start: usize, count: usize) -> Vec<Value> {
+        (start..start + count).map(|index| json!({"conversation_id":"B","role":"assistant","content":format!("history-marker-{index}"),"created_at":"now"})).collect()
+    }
+
+    #[tokio::test]
+    async fn test_history_loads_every_page_with_exact_conversation_identity() {
+        let total = 10_003;
+        let responses = (0..total).step_by(200).map(|offset| {
+            let count = (total - offset).min(200);
+            let next = (offset + count < total).then_some(offset + count);
+            (200, json!({"conversation_id":"B","messages":messages(offset,count),"total":total,"next_offset":next}))
+        }).collect();
+        let (connection, task) = server(responses).await;
+        let history = fetch_history(&connection, "B").await.unwrap();
+        assert_eq!(history.len(), total);
+        assert_eq!(history[0].content, "history-marker-0");
+        assert_eq!(history[total - 1].content, "history-marker-10002");
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 51);
+        assert!(requests[0].starts_with("GET /conversations/B/messages?limit=200&offset=0 "));
+        assert!(requests[50].starts_with("GET /conversations/B/messages?limit=200&offset=10000 "));
+    }
+
+    #[tokio::test]
+    async fn test_old_daemon_fallback_accepts_complete_history_and_rejects_partial() {
+        for (count, accepted) in [(2, true), (300, false)] {
+            let (connection, task) = server(vec![
+                (404, json!({"detail":"Not Found"})),
+                (
+                    200,
+                    json!({"id":"B","message_count":count,"messages":messages(0,2)}),
+                ),
+            ])
+            .await;
+            let result = fetch_history(&connection, "B").await;
+            assert_eq!(result.is_ok(), accepted);
+            if !accepted {
+                assert!(result.unwrap_err().contains("partial conversation history"));
+            }
+            assert!(task.await.unwrap()[1].starts_with("GET /conversations/B "));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_history_rejects_changed_counts_identity_and_invalid_offsets() {
+        let cases = [
+            json!({"conversation_id":"other","messages":messages(0,1),"total":1,"next_offset":null}),
+            json!({"conversation_id":"B","messages":messages(0,1),"total":2,"next_offset":null}),
+            json!({"conversation_id":"B","messages":messages(0,1),"total":2,"next_offset":0}),
+            json!({"conversation_id":"B","messages":messages(0,1),"total":50001,"next_offset":1}),
+        ];
+        for body in cases {
+            let (connection, task) = server(vec![(200, body)]).await;
+            assert!(fetch_history(&connection, "B").await.is_err());
+            task.await.unwrap();
+        }
+        let (connection, task) = server(vec![
+            (
+                200,
+                json!({"conversation_id":"B","messages":messages(0,1),"total":2,"next_offset":1}),
+            ),
+            (
+                200,
+                json!({"conversation_id":"B","messages":messages(1,1),"total":3,"next_offset":2}),
+            ),
+        ])
+        .await;
+        assert!(fetch_history(&connection, "B")
+            .await
+            .unwrap_err()
+            .contains("changed while loading"));
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_history_wire_budget_rejects_before_deserializing_oversize_response() {
+        let (connection, task) = server(vec![(200, json!({"large":"x".repeat(100)}))]).await;
+        let response = connection
+            .client
+            .get(connection.base_url.clone())
+            .send()
+            .await
+            .unwrap();
+        let result: Result<Value, String> = decode_history(response, &mut 16).await;
+        assert!(result.unwrap_err().contains("loading budget"));
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn test_history_rejects_foreign_messages_in_page_and_legacy_detail() {
+        let mut mixed = messages(0, 2);
+        mixed[1]["conversation_id"] = json!("foreign");
+        let cases = vec![
+            vec![(
+                200,
+                json!({"conversation_id":"B","messages":mixed,"total":2,"next_offset":null}),
+            )],
+            vec![
+                (404, json!({"detail":"Not Found"})),
+                (200, json!({"id":"B","message_count":2,"messages":mixed})),
+            ],
+        ];
+        for responses in cases {
+            let (connection, task) = server(responses).await;
+            let error = fetch_history(&connection, "B").await.unwrap_err();
+            assert!(error.contains("message belonging to another conversation"));
+            task.await.unwrap();
+        }
+    }
+}

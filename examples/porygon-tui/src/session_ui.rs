@@ -38,6 +38,7 @@ impl PorygonTui {
             Err(error) => return Cmd::ShowToast(Toast::error(error)),
         };
         let message = self.input.submit_value();
+        self.persist_conversation();
         self.suggestions.clear();
         self.messages.push(ChatMessage {
             role: "user".into(),
@@ -68,6 +69,7 @@ impl PorygonTui {
         self.stream_token_count = 0;
         self.tool_calls.clear();
         self.tool_ids.clear();
+        self.flush_drafts();
         self.begin_stream_metrics();
         self.auto_scroll_chat();
         let (sender, receiver) = mpsc::channel(8);
@@ -124,6 +126,7 @@ impl PorygonTui {
                 arguments,
             } => {
                 self.handle_update(Msg::ApprovalReceived(ApprovalRequest {
+            scope: None, decision_version: None, decision_stale: false,
                     id, tool_name: tool, params: arguments, risk_score: -1.0,
                     reasoning: format!("Run {run_id}. Approve this action once, or deny. Scope and reversibility are not supplied by this stream."),
                     blast_radius: "unknown".into(), reversible: None,
@@ -181,7 +184,7 @@ impl PorygonTui {
             }
             Event::Done(conversation) => {
                 if let Some(id) = conversation {
-                    self.conversation_id = Some(id);
+                    self.assign_conversation(id);
                 }
                 self.end_native_stream();
                 self.status.step = "stream ended; checking run outcome".into();
@@ -249,7 +252,7 @@ impl PorygonTui {
             }
             Ok(run) => {
                 if let Some(id) = run.metadata["conversation_id"].as_str() {
-                    self.conversation_id = Some(id.to_string());
+                    self.assign_conversation(id.to_string());
                 }
                 let terminal = matches!(
                     run.status.as_str(),
@@ -327,10 +330,17 @@ impl PorygonTui {
                 "Approval channel is unavailable. Inspect the run.",
             ));
         }
+        if let Some(reason) = self.approval_decision_blocker() {
+            return Cmd::ShowToast(Toast::warning(reason));
+        }
         let Some(connection) = self.connection.clone() else {
             return Cmd::none();
         };
         let id = request.id.clone();
+        let version = request
+            .decision_version
+            .clone()
+            .expect("durable decision blocker requires a version");
         self.approval_in_flight = true;
         Cmd::spawn(async move {
             let decision = if approved {
@@ -342,12 +352,20 @@ impl PorygonTui {
                 &connection.client,
                 &connection.base_url,
                 &id,
+                &version,
                 decision,
             )
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string());
-            Msg::ApprovalSubmitted(id, result)
+            .await;
+            match result {
+                Err(error) if error.is::<approval_client::StaleApproval>() => {
+                    Msg::ApprovalBecameStale(id, version, error.to_string())
+                }
+                result => Msg::ApprovalSubmitted(
+                    id,
+                    version,
+                    result.map(|_| ()).map_err(|error| error.to_string()),
+                ),
+            }
         })
     }
 }
@@ -381,6 +399,9 @@ mod tests {
 
     fn approval(id: &str) -> ApprovalRequest {
         ApprovalRequest {
+            scope: Some("tool_call".into()),
+            decision_version: Some("fixture-version".into()),
+            decision_stale: false,
             id: id.into(),
             tool_name: "shell".into(),
             params: json!({"command":"true"}),
@@ -503,6 +524,7 @@ mod tests {
         app.decide_approval(true);
         app.handle_update(Msg::ApprovalSubmitted(
             "a1".into(),
+            "fixture-version".into(),
             Err("response lost".into()),
         ));
         assert!(app.approval_in_flight);
@@ -511,9 +533,17 @@ mod tests {
         assert_eq!(app.current_run.as_deref(), Some("run-a"));
         assert_eq!(app.pending_approval.as_ref().unwrap().id, "a1");
         assert!(matches!(app.decide_approval(true), Cmd::None));
-        app.handle_update(Msg::ApprovalReconciled("a1".into(), Ok(true)));
+        app.handle_update(Msg::ApprovalReconciled(
+            "a1".into(),
+            Some("fixture-version".into()),
+            Ok(approval_client::ApprovalRefresh::Same),
+        ));
         assert!(app.approval_in_flight);
-        app.handle_update(Msg::ApprovalReconciled("a1".into(), Ok(false)));
+        app.handle_update(Msg::ApprovalReconciled(
+            "a1".into(),
+            Some("fixture-version".into()),
+            Ok(approval_client::ApprovalRefresh::Missing),
+        ));
         assert!(app.pending_approval.is_none());
         assert!(!app.show_approval_modal);
     }

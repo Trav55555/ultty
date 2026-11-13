@@ -23,9 +23,9 @@ pub enum CommandAction {
     /// Combine multiple actions.
     #[allow(dead_code)]
     Batch(Vec<CommandAction>),
-    /// Fetch the list of saved sessions from the daemon.
+    /// Open the canonical conversation picker.
     FetchSessions,
-    /// Resume a saved session by ID.
+    /// Open a canonical conversation by ID without submitting.
     ResumeSession { id: String },
     /// Save the current session with an optional name.
     SaveSession { name: Option<String> },
@@ -137,12 +137,12 @@ impl CommandRegistry {
                 },
                 Command {
                     name: "save",
-                    description: "Save current session",
+                    description: "Legacy transcript save",
                     usage: "/save [name]",
                 },
                 Command {
                     name: "sessions",
-                    description: "List saved sessions",
+                    description: "Open conversation picker",
                     usage: "/sessions",
                 },
                 Command {
@@ -157,17 +157,17 @@ impl CommandRegistry {
                 },
                 Command {
                     name: "resume",
-                    description: "Resume a saved session",
+                    description: "Open a conversation without submitting",
                     usage: "/resume <id>",
                 },
                 Command {
                     name: "fork",
-                    description: "Fork a session",
+                    description: "Legacy transcript fork",
                     usage: "/fork [id]",
                 },
                 Command {
                     name: "export",
-                    description: "Export session",
+                    description: "Legacy transcript export",
                     usage: "/export <id>",
                 },
                 Command {

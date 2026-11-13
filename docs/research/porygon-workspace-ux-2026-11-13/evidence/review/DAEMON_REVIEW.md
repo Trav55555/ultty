@@ -1,0 +1,13 @@
+# Daemon differential review
+
+Baseline `928514bd`; final clean commit `b9d524dc364c0df8abd97b3a9c9c40c187016480`. This is a focused review of the history route/store and approval route/store/schema changes, not a comprehensive audit of Porygon.
+
+No blocking introduced finding. The review followed authentication into the history routes and principal/hash/policy validation into approval decisions. The policy helper reads existing bindings; it does not issue authority before the claim. Production approval helpers have two HTTP entry points plus the approve wrapper; the claim has approve, expiry and deny paths. Both production SQL insertion paths rotate decision_version. Existing direct tool-dispatch and bodyless legacy behavior were checked against baseline blame rather than attributed to this change.
+
+The history route applies require_read, rejects missing conversations, bounds limit1..200 and offset>=0, emits the conversation ID, stable timestamp/ID order, authoritative count and next offset. The existing small-history detail route remains compatible. The committed tests include tied timestamps and stale cached counts; independent real-terminal runs load 10,000 actual stored rows and reach both boundaries at both ANSI sizes and in native mode.
+
+The new SQL claim compares ID, tool_call scope and opaque version in one DELETE transaction. It runs after principal/hash/policy checks and before tool execution. An expired foreign-principal request cannot consume another principal's record. A replacement after the initial route read loses the CAS; simultaneous approval/denial has one winner. Failed execution consumes the claim and reports uncertainty rather than requeueing it.
+
+Independent probes in test_independent_daemon_claims.py exercise these interleavings over the actual routes and SQLite store with a scripted tool counter. The first run passed three races; the fourth timed out because its fixture accidentally retained explicit tool_call scope while requesting manual scope. That log is retained. Correcting only the fixture's explicit scope made the fourth probe pass. This was a test construction error, not a production defect.
+
+Remaining limits are deliberate or separately scoped: version binding is opt-in for bodyless legacy callers; heartbeat approvals do not use the tool-call claim; consumption/audit/side effects are not one distributed transaction; paging does not provide a frozen concurrent-write snapshot. The PostgreSQL16 SQL receipt covers migration/backfill/claim statements, not the whole daemon under PostgreSQL. Final runtime and source verdicts are separate evidence.

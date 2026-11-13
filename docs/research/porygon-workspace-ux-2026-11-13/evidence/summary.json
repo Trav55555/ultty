@@ -1,0 +1,124 @@
+{
+  "verdict": "PASS",
+  "client_commit": "897e26e5c10f5b6be48f9829c8f93205634ec7ba",
+  "client_binary_sha256": "2413455fc5bcfab75de8fe551084bb3b16c72b0a3c2230e93d27b154ff0d46fb",
+  "daemon_commit": "b9d524dc364c0df8abd97b3a9c9c40c187016480",
+  "ultty_sha256": "2e6c63cf9b7700af22e0e4c4361aae3e89c7b7760c137a504b34df4134d98fb2",
+  "ulttyctl_sha256": "c12e003170ee864c33bdd8eee8b29c7be9403c735f9ee5941b87a43451a82f2d",
+  "ansi80": "6 passed,44.64s",
+  "ansi160": "6 passed,45.93s",
+  "native": "passed,23.20s",
+  "incumbent_ansi80": "same final six gates:6 failed",
+  "independent_daemon_claims": "4 passed,4.01s",
+  "native_expected_version_request_matched": true,
+  "metrics": {
+    "ansi80": {
+      "messages_seeded": 10000,
+      "open_seconds": 3.2965740459039807,
+      "edit_visible_seconds": 0.3259745689574629,
+      "width": 80,
+      "edit_samples_seconds": [
+        0.10880411101970822,
+        0.10854651499539614,
+        0.12402207194827497,
+        0.12934939097613096,
+        0.11412868497427553,
+        0.11465595092158765,
+        0.10895271389745176,
+        0.11236915097106248,
+        0.11724797904025763,
+        0.12326216802466661,
+        0.10515821096487343,
+        0.11081944196484983,
+        0.11351177701726556,
+        0.11169676901772618,
+        0.11352455196902156,
+        0.11452330008614808,
+        0.12346642697229981,
+        0.1285689240321517,
+        0.1338205779902637,
+        0.1100481590256095
+      ],
+      "edit_p95_seconds": 0.12934939097613096,
+      "process_memory": {
+        "VmHWM": "32980 kB",
+        "VmRSS": "32980 kB"
+      },
+      "human_task_trial": false
+    },
+    "ansi160": {
+      "messages_seeded": 10000,
+      "open_seconds": 3.8269939079182222,
+      "edit_visible_seconds": 0.24409753398504108,
+      "width": 160,
+      "edit_samples_seconds": [
+        0.11348904797341675,
+        0.12592534394934773,
+        0.12180795799940825,
+        0.12130915001034737,
+        0.1158718679798767,
+        0.10903036501258612,
+        0.12557358399499208,
+        0.11761617904994637,
+        0.11798994604032487,
+        0.11151992005761713,
+        0.11569853301625699,
+        0.13585540698841214,
+        0.12813161103986204,
+        0.11484500207006931,
+        0.11797542904969305,
+        0.11228053993545473,
+        0.14231822500005364,
+        0.12663150404114276,
+        0.12118042702786624,
+        0.12725515197962523
+      ],
+      "edit_p95_seconds": 0.13585540698841214,
+      "process_memory": {
+        "VmHWM": "34076 kB",
+        "VmRSS": "34076 kB"
+      },
+      "human_task_trial": false
+    },
+    "native": {
+      "messages_seeded": 10000,
+      "open_seconds": 3.9282036550575867,
+      "edit_samples_seconds": [
+        0.14552443497814238,
+        0.04288029402960092,
+        0.07327590696513653,
+        0.13872743700630963,
+        0.14508285408373922,
+        0.1366075809346512,
+        0.14500654092989862,
+        0.13025533698964864,
+        0.04079247894696891,
+        0.13421174499671906,
+        0.12975409196224064,
+        0.13201280997600406,
+        0.13538583600893617,
+        0.15155874495394528,
+        0.13577003008686006,
+        0.14632542396429926,
+        0.10830137098673731,
+        0.03082116600126028,
+        0.04645562905352563,
+        0.15468055196106434
+      ],
+      "edit_p95_seconds": 0.15155874495394528,
+      "process_memory": {
+        "VmHWM": "32904 kB",
+        "VmRSS": "32904 kB"
+      },
+      "human_task_trial": false
+    }
+  },
+  "human_task_trial": false,
+  "limits": [
+    "provider-free synthetic agent session",
+    "SQLite daemon runtime,not full PostgreSQL integration",
+    "driver-inclusive edit timings,not frame latency",
+    "native mouse selection unsupported; explicit raw copy passes",
+    "SSH evidence is separate team-owned receipt"
+  ]
+}

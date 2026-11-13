@@ -1,0 +1,5 @@
+    Checking ultty-protocol v0.2.0 (/home/travers/projects/porygon-ai/ultty-workspace-ux/crates/ultty-protocol)
+    Checking ultty-client v0.2.0 (/home/travers/projects/porygon-ai/ultty-workspace-ux/crates/ultty-client)
+    Checking ulttui v0.2.0 (/home/travers/projects/porygon-ai/ultty-workspace-ux/crates/ulttui)
+    Checking porygon-tui v0.1.0 (/home/travers/projects/porygon-ai/ultty-workspace-ux/examples/porygon-tui)
+    Finished `dev` profile [unoptimized] target(s) in 5.80s

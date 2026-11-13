@@ -3,7 +3,7 @@ use ulttui::prelude::*;
 use ulttui::widgets::{parse_unified_diff, DiffKind, RichText, Stack};
 
 use crate::sidebar::sidebar_view;
-use crate::types::{ApprovalRequest, FileTreeEntry, ToolStatus};
+use crate::types::{ApprovalRequest, FileTreeEntry};
 use crate::{Msg, PorygonTui};
 
 const SIDEBAR_MIN_TERMINAL_WIDTH: u16 = 100;
@@ -91,40 +91,14 @@ impl PorygonTui {
             .max(1) as usize
     }
 
-    fn markdown_view(&self, content: &str) -> MarkdownView {
-        MarkdownView::new(content).wrap_width_cols(self.message_content_width_cols())
-    }
-
-    fn estimated_message_card_height(&self, content: &str) -> f32 {
-        let Dimension::Cells(rows) = self.markdown_view(content).constraints().height else {
-            return 2.0;
-        };
-        rows + 1.0
-    }
-
-    fn tool_body(&self, tool: &crate::types::ToolCall) -> String {
-        let mut body = String::new();
-        if !tool.args.is_empty() {
-            body.push_str(&format!("```json\n{}\n```\n", tool.args));
-        }
-        if let Some(result) = &tool.result {
-            body.push_str(&format_tool_result_with_diff(result));
-        }
-        body
-    }
-
     fn transcript_height(&self) -> f32 {
-        let messages: f32 = self
-            .messages
-            .iter()
-            .map(|message| self.estimated_message_card_height(&message.content) + 1.0)
-            .sum();
-        let tools: f32 = self
-            .tool_calls
-            .iter()
-            .map(|tool| self.estimated_message_card_height(&self.tool_body(tool)) + 1.0)
-            .sum();
-        2.0 + messages + tools + if self.waiting_response { 2.0 } else { 0.0 }
+        let mut transcript = self.transcript.borrow_mut();
+        transcript.sync(
+            self.message_content_width_cols(),
+            &self.messages,
+            &self.tool_calls,
+        );
+        transcript.height(self.waiting_response) as f32
     }
 
     fn composer_rows(&self) -> u16 {
@@ -177,6 +151,7 @@ impl PorygonTui {
     }
 
     fn refresh_composer(&mut self) {
+        self.persist_conversation();
         let value = self.input.current_value();
         self.suggestions = if value.starts_with('/') && !value.contains('\n') {
             self.command_registry
@@ -195,64 +170,63 @@ impl PorygonTui {
         }
     }
 
-    fn approval_modal_view(&self, req: &ApprovalRequest) -> Column {
-        let risk_pct = if req.risk_score < 0.0 {
+    fn approval_rows(&self, request: &ApprovalRequest) -> Vec<String> {
+        let width = usize::from(self.terminal_width.saturating_sub(2).max(1));
+        let risk = if request.risk_score < 0.0 {
             "unknown".into()
         } else {
-            format!("{:.0}%", req.risk_score * 100.0)
+            format!("{:.0}%", request.risk_score * 100.0)
         };
-        let risk_color = if req.risk_score < 0.0 {
-            Color::Rgb(136, 136, 136)
-        } else if req.risk_score >= 0.7 {
-            Color::Rgb(255, 93, 110)
-        } else if req.risk_score >= 0.3 {
-            Color::Rgb(249, 226, 175)
+        let scope = if self.approval_is_stream {
+            "current stream"
         } else {
-            Color::Rgb(166, 227, 161)
+            "durable request"
         };
-        let reversible_text = match req.reversible {
-            Some(true) => "yes",
-            Some(false) => "no",
-            None => "unknown",
-        };
+        let content = format!("Request: {}\nScope: {scope}\nTool: {}\nReason: {}\nRisk: {risk}\nAffected scope: {}\nReversible: {}\nArguments:\n{}",
+            request.id, request.tool_name, request.reasoning, request.blast_radius,
+            match request.reversible {Some(true)=>"yes",Some(false)=>"no",None=>"unknown"},
+            serde_json::to_string_pretty(&request.params).unwrap_or_else(|error| format!("Could not display arguments: {error}")));
+        crate::work_views::wrap(&content, width)
+    }
 
-        let params_str = serde_json::to_string_pretty(&req.params)
-            .unwrap_or_else(|_| format!("{:?}", req.params));
+    fn approval_max_scroll(&self) -> usize {
+        self.pending_approval
+            .as_ref()
+            .map(|request| self.approval_rows(request).len())
+            .unwrap_or(0)
+            .saturating_sub(usize::from(self.terminal_height.saturating_sub(5).max(1)))
+    }
 
-        Column::new()
-            .gap(0.5)
+    fn approval_page_view(&self, request: &ApprovalRequest) -> Column {
+        let available = usize::from(self.terminal_height.saturating_sub(5).max(1));
+        let rows = self.approval_rows(request);
+        let start = self
+            .approval_scroll
+            .min(rows.len().saturating_sub(available));
+        let mut page = Column::new()
             .width(Dimension::Percent(100.0))
+            .height(Dimension::Percent(100.0))
+            .padding(1.0)
+            .child(RichText::new().text("Approval details | Esc back"))
             .child(
-                RichText::new()
-                    .span("Tool: ", Style::new().fg(Color::Rgb(136, 136, 136)))
-                    .span(
-                        &req.tool_name,
-                        Style::new().fg(Color::Rgb(58, 224, 221)).bold(),
-                    )
-                    .fill_width(),
+                RichText::new().text(if let Some(reason) = self.approval_decision_blocker() {
+                    reason
+                } else if self.approval_in_flight {
+                    "Decision unconfirmed | r refresh"
+                } else {
+                    "y approve once | n deny | r refresh"
+                }),
             )
-            .child(
-                RichText::new()
-                    .span("Risk: ", Style::new().fg(Color::Rgb(136, 136, 136)))
-                    .span(&risk_pct, Style::new().fg(risk_color).bold())
-                    .span("  Blast: ", Style::new().fg(Color::Rgb(136, 136, 136)))
-                    .span(&req.blast_radius, Style::default())
-                    .span("  Reversible: ", Style::new().fg(Color::Rgb(136, 136, 136)))
-                    .span(reversible_text, Style::default())
-                    .fill_width(),
-            )
-            .child(
-                RichText::new()
-                    .span(
-                        &req.reasoning,
-                        Style {
-                            dim: true,
-                            ..Style::new()
-                        },
-                    )
-                    .fill_width(),
-            )
-            .child(MarkdownView::new(format!("```json\n{}\n```", params_str)))
+            .child(RichText::new().text(format!(
+                "Up/Down PgUp/PgDn | rows {}-{} of {}",
+                start + 1,
+                (start + available).min(rows.len()),
+                rows.len()
+            )));
+        for row in rows.into_iter().skip(start).take(available) {
+            page = page.child(RichText::new().text(row));
+        }
+        page
     }
 
     pub(crate) fn hex_gauge(&self) -> String {
@@ -276,6 +250,25 @@ impl PorygonTui {
         } else {
             "disconnected"
         };
+        let stream_decisions =
+            usize::from(self.approval_is_stream && self.pending_approval.is_some())
+                + self.queued_stream_approvals.len();
+        let attention = self
+            .work
+            .notice
+            .map(|count| (count + stream_decisions).to_string())
+            .unwrap_or_else(|| {
+                if stream_decisions > 0 {
+                    format!("{stream_decisions}+")
+                } else {
+                    "?".into()
+                }
+            });
+        let shortcuts = if self.terminal_width < 80 {
+            format!(" F1 help F2 F3 F4({attention}) ")
+        } else {
+            format!(" F1 help F2 sessions F3 work F4 attention {attention} ")
+        };
         Row::new()
             .height(Dimension::Cells(1.0))
             .flex_shrink(0.0)
@@ -295,74 +288,34 @@ impl PorygonTui {
                     ),
             )
             .child(Spacer)
-            .child(RichText::new().span("  F1 help ", Style::default()))
+            .child(RichText::new().span(shortcuts, Style::default()))
     }
 
     fn messages_view(&self) -> Column {
-        let mut col = Column::new()
-            .gap(1.0)
-            .padding(1.0)
-            .height(Dimension::Cells(self.transcript_height()))
-            .flex_shrink(0.0)
-            .width(Dimension::Percent(100.0));
-        for (index, message) in self.messages.iter().enumerate() {
-            let (name, color) = match message.role.as_str() {
-                "user" => ("You", Color::Rgb(58, 224, 221)),
-                "assistant" => ("Porygon", Color::Rgb(255, 93, 110)),
-                _ => ("System", Color::Rgb(136, 136, 136)),
-            };
-            let body = self
-                .markdown_view(&message.content)
-                .streaming(self.waiting_response && self.current_response == Some(index));
-            col = col.child(
-                Column::new()
-                    .height(Dimension::Cells(
-                        self.estimated_message_card_height(&message.content),
-                    ))
-                    .flex_shrink(0.0)
-                    .width(Dimension::Percent(100.0))
-                    .child(RichText::new().span(
-                        format!("{name}  {}", message.timestamp),
-                        Style::new().fg(color).bold(),
-                    ))
-                    .child(body),
-            );
-        }
-        for tool in &self.tool_calls {
-            let (state, color) = match tool.status {
-                ToolStatus::Pending => ("pending", Color::Rgb(249, 226, 175)),
-                ToolStatus::Approved => ("approved", Color::Rgb(166, 227, 161)),
-                ToolStatus::Rejected => ("rejected", Color::Rgb(255, 93, 110)),
-                ToolStatus::Running => ("running", Color::Rgb(58, 224, 221)),
-                ToolStatus::Completed => ("completed", Color::Rgb(166, 227, 161)),
-                ToolStatus::Failed => ("failed", Color::Rgb(255, 93, 110)),
-            };
-            let body = self.tool_body(tool);
-            col = col.child(
-                Column::new()
-                    .height(Dimension::Cells(self.estimated_message_card_height(&body)))
-                    .flex_shrink(0.0)
-                    .width(Dimension::Percent(100.0))
-                    .child(RichText::new().span(
-                        format!("{}  {state}", tool.name),
-                        Style::new().fg(color).bold(),
-                    ))
-                    .child(self.markdown_view(&body)),
-            );
-        }
-        if self.waiting_response {
-            col = col.child(Text::new("Working..."));
-        }
-        col
+        let mut transcript = self.transcript.borrow_mut();
+        transcript.sync(
+            self.message_content_width_cols(),
+            &self.messages,
+            &self.tool_calls,
+        );
+        transcript.view(
+            self.chat_scroll.scroll_position().1.max(0.0) as usize,
+            self.terminal_height
+                .saturating_sub(1 + self.bottom_height() + 2)
+                .max(1) as usize,
+            self.waiting_response,
+            self.current_response,
+            self.follow_output,
+        )
     }
 
     pub(crate) fn composer_hint(&self) -> &'static str {
         if self.newline_prefix {
             "Enter: insert newline | Esc: cancel chord"
+        } else if self.pending_approval.is_some() {
+            "Decision pending | F4: inspect | draft kept here"
         } else if self.waiting_response || self.stopping {
             "Working | draft kept here | Ctrl+C: stop"
-        } else if self.pending_approval.is_some() {
-            "Decision pending | draft kept here | /approvals"
         } else if self.run_unresolved && !self.run_can_continue {
             "Run unresolved | draft kept here | /reconnect"
         } else if !self.connected {
@@ -435,6 +388,36 @@ impl PorygonTui {
             }
             return None;
         }
+        if !self.show_approval_modal {
+            if let Event::Key(key) = event {
+                match key.key {
+                    Key::F(1) => {
+                        self.conversations.open = false;
+                        self.work.page = crate::work::Page::Closed;
+                        self.show_help = !self.show_help;
+                        return None;
+                    }
+                    Key::F(2) => {
+                        self.show_help = false;
+                        self.work.page = crate::work::Page::Closed;
+                        return Some(Msg::OpenConversations);
+                    }
+                    Key::F(3) | Key::F(4) => {
+                        self.conversations.open = false;
+                        self.show_help = false;
+                        return Some(Msg::OpenWork(if key.key == Key::F(3) {
+                            crate::work::Page::Work
+                        } else {
+                            crate::work::Page::Attention
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if self.conversations.open && !matches!(event, Event::Quit) {
+            return self.conversation_event(event);
+        }
         if self.show_help && !matches!(event, Event::Quit) {
             if matches!(event, Event::Key(ke) if matches!(ke.key, Key::Escape | Key::F(1))) {
                 self.show_help = false;
@@ -442,10 +425,41 @@ impl PorygonTui {
             return None;
         }
         if self.show_approval_modal {
+            self.approval_scroll = self.approval_scroll.min(self.approval_max_scroll());
             return match event {
                 Event::Quit => Some(Msg::AbortStream),
                 Event::Key(ke) => match ke.key {
-                    Key::Escape => Some(Msg::DismissApproval),
+                    Key::Escape => {
+                        self.approval_scroll = 0;
+                        Some(Msg::DismissApproval)
+                    }
+                    Key::Up | Key::PageUp => {
+                        self.approval_scroll =
+                            self.approval_scroll.saturating_sub(if ke.key == Key::Up {
+                                1
+                            } else {
+                                usize::from(self.terminal_height.saturating_sub(5).max(1))
+                            });
+                        None
+                    }
+                    Key::Down | Key::PageDown => {
+                        self.approval_scroll =
+                            self.approval_scroll.saturating_add(if ke.key == Key::Down {
+                                1
+                            } else {
+                                usize::from(self.terminal_height.saturating_sub(5).max(1))
+                            });
+                        self.approval_scroll = self.approval_scroll.min(self.approval_max_scroll());
+                        None
+                    }
+                    Key::Home => {
+                        self.approval_scroll = 0;
+                        None
+                    }
+                    Key::End => {
+                        self.approval_scroll = self.approval_max_scroll();
+                        None
+                    }
                     Key::Char('r') => Some(Msg::RefreshApproval),
                     Key::Char('y') if !self.approval_in_flight => Some(Msg::ApprovalDecision(true)),
                     Key::Char('n') if !self.approval_in_flight => {
@@ -455,6 +469,76 @@ impl PorygonTui {
                 },
                 _ => None,
             };
+        }
+        if self.work.page != crate::work::Page::Closed && !matches!(event, Event::Quit) {
+            self.work.detail_scroll = self
+                .work
+                .detail_scroll
+                .min(crate::work_views::max_scroll(self));
+            if let Event::Key(ke) = event {
+                match ke.key {
+                    Key::Escape => {
+                        self.work.page = if self.work.page == crate::work::Page::Detail {
+                            crate::work::Page::Work
+                        } else {
+                            crate::work::Page::Closed
+                        };
+                    }
+                    Key::Up | Key::PageUp if self.work.page == crate::work::Page::Detail => {
+                        self.work.detail_scroll =
+                            self.work
+                                .detail_scroll
+                                .saturating_sub(if ke.key == Key::Up {
+                                    1
+                                } else {
+                                    usize::from(self.terminal_height.saturating_sub(3).max(1))
+                                });
+                    }
+                    Key::Down | Key::PageDown if self.work.page == crate::work::Page::Detail => {
+                        self.work.detail_scroll = self
+                            .work
+                            .detail_scroll
+                            .saturating_add(if ke.key == Key::Down {
+                                1
+                            } else {
+                                usize::from(self.terminal_height.saturating_sub(3).max(1))
+                            })
+                            .min(crate::work_views::max_scroll(self));
+                    }
+                    Key::Home if self.work.page == crate::work::Page::Detail => {
+                        self.work.detail_scroll = 0;
+                    }
+                    Key::End if self.work.page == crate::work::Page::Detail => {
+                        self.work.detail_scroll = crate::work_views::max_scroll(self);
+                    }
+                    Key::Up => self.work.selected = self.work.selected.saturating_sub(1),
+                    Key::Down => {
+                        let len = if self.work.page == crate::work::Page::Work {
+                            self.work.runs.len()
+                        } else {
+                            crate::work::attention(
+                                &self.work,
+                                self.pending_approval
+                                    .as_ref()
+                                    .filter(|_| self.approval_is_stream)
+                                    .map(|r| r.id.as_str()),
+                            )
+                            .len()
+                        };
+                        self.work.selected = (self.work.selected + 1).min(len.saturating_sub(1));
+                    }
+                    Key::Enter => return Some(Msg::InspectWork),
+                    Key::Char('c') if self.work.page == crate::work::Page::Detail => {
+                        return Some(Msg::CopyReviewedWork);
+                    }
+                    Key::Char('a') if self.work.page == crate::work::Page::Detail => {
+                        return Some(Msg::AttachWork)
+                    }
+                    Key::Char('r') => return Some(Msg::RefreshWork),
+                    _ => {}
+                }
+            }
+            return None;
         }
         match event {
             Event::Quit if self.waiting_response => Some(Msg::AbortStream),
@@ -492,12 +576,12 @@ impl PorygonTui {
                     }
                     _ => {}
                 }
+                self.persist_conversation();
                 None
             }
             Event::Key(ke) => {
-                if ke.key == Key::F(1) {
-                    self.show_help = true;
-                    return None;
+                if ke.key == Key::Char('y') && ke.modifiers.ctrl {
+                    return Some(Msg::CopyLatestAssistant);
                 }
                 match ke.key {
                     Key::PageUp | Key::PageDown => {
@@ -510,6 +594,14 @@ impl PorygonTui {
                         if self.follow_output {
                             self.unread_output = false;
                         }
+                        self.persist_conversation();
+                        return None;
+                    }
+                    Key::Home if ke.modifiers.ctrl => {
+                        self.update_scroll_dimensions();
+                        self.chat_scroll.scroll_to(0.0);
+                        self.follow_output = false;
+                        self.persist_conversation();
                         return None;
                     }
                     Key::End if ke.modifiers.ctrl => {
@@ -517,6 +609,7 @@ impl PorygonTui {
                         self.chat_scroll.scroll_to_bottom();
                         self.follow_output = true;
                         self.unread_output = false;
+                        self.persist_conversation();
                         return None;
                     }
                     _ => {}
@@ -565,14 +658,7 @@ impl PorygonTui {
             .child(Divider::horizontal())
             .child(self.input_view())
             .child(self.status_bar_view());
-        let mut chat_area = ScrollView::new().child(self.messages_view());
-        chat_area.set_content_height(self.transcript_height());
-        chat_area.set_viewport_height(
-            self.terminal_height
-                .saturating_sub(1 + self.bottom_height() + 2)
-                .max(1) as f32,
-        );
-        chat_area.scroll_to(self.chat_scroll.scroll_position().1);
+        let chat_area = self.messages_view();
         let center_content = Column::new()
             .overflow_y_hidden()
             .child(chat_area)
@@ -582,6 +668,9 @@ impl PorygonTui {
             dock = dock.dock_right(sidebar_view(self));
         }
         let main_content = dock.center(center_content);
+        if self.conversations.open {
+            return Stack::new().child(self.conversation_view());
+        }
         if self.show_help {
             let mut help = Column::new()
                 .width(Dimension::Percent(100.0))
@@ -589,15 +678,20 @@ impl PorygonTui {
                 .padding(1.0);
             for line in [
                 "Keys and commands",
+                "F2: conversations; search, Enter to open, Ctrl+N new.",
+                "F3: work and run review. F4: attention.",
+                "In conversations, Ctrl+L loads older conversations.",
                 "Esc or F1: back to your draft",
                 "",
                 "Enter: send when ready; keep draft while busy.",
                 "Ctrl+X then Enter: newline.",
                 "Shift+Enter: newline when terminal supports it.",
                 "Paste: insert text without sending.",
+                "Ctrl+Y: copy latest reply. In review, c copies evidence.",
                 "Ctrl+C: stop active work.",
-                "Ctrl+C when idle: quit; confirm to discard draft.",
-                "PgUp/PgDn: history. Ctrl+End: latest output.",
+                "Ctrl+C when idle: save draft and quit.",
+                "With a draft, press Ctrl+C twice to quit.",
+                "PgUp/PgDn: history. Ctrl+Home/End: oldest/latest.",
                 "Type / for commands. Ctrl+Space: complete.",
                 "/reconnect: inspect. /attach ID: read a run.",
             ] {
@@ -605,19 +699,12 @@ impl PorygonTui {
             }
             return Stack::new().child(help);
         }
+        if self.work.page != crate::work::Page::Closed && !self.show_approval_modal {
+            return Stack::new().child(crate::work_views::view(self));
+        }
         if self.show_approval_modal {
             if let Some(req) = &self.pending_approval {
-                return Stack::new().child(main_content).child(
-                    Modal::new()
-                        .title("Tool Approval Required")
-                        .body_view(self.approval_modal_view(req))
-                        .buttons(if self.approval_in_flight {
-                            vec!["Decision unconfirmed", "R:refresh Esc:close"]
-                        } else {
-                            vec!["Approve once (y)", "Deny (n)", "Esc:close"]
-                        })
-                        .visible(true),
-                );
+                return Stack::new().child(self.approval_page_view(req));
             }
         }
         Stack::new().child(main_content)
@@ -639,6 +726,67 @@ mod tests {
             },
             focused_id: Some("chat-input".into()),
         })
+    }
+
+    #[test]
+    fn long_approval_is_readable_and_enter_cannot_decide() {
+        let mut app = PorygonTui::new();
+        app.terminal_width = 40;
+        app.terminal_height = 12;
+        app.pending_approval = Some(ApprovalRequest {
+            scope: Some("tool_call".into()),
+            decision_version: Some("fixture-version".into()),
+            decision_stale: false,
+            id: "approval-scoped-1".into(),
+            tool_name: "write_file".into(),
+            params: serde_json::json!({"content": format!("{}TAIL-ARGUMENT", "long value ".repeat(80))}),
+            risk_score: -1.0,
+            reasoning: "Inspect the complete request".into(),
+            blast_radius: "unknown".into(),
+            reversible: None,
+        });
+        app.show_approval_modal = true;
+        assert!(app.handle_event(&composer_key(Key::Enter, false)).is_none());
+        app.handle_event(&composer_key(Key::End, false));
+        assert!(app.approval_scroll > 20);
+        let native = ulttui::widgets::render_view_messages(
+            &app.approval_page_view(app.pending_approval.as_ref().unwrap()),
+        )
+        .unwrap();
+        assert!(!native.iter().any(|message| matches!(message,
+            ultty_protocol::AppMessage::SetContent { content: ultty_protocol::Content::Text(text), .. }
+            if text.text.trim() == "{" || text.text.trim() == "}")));
+        assert!(native.iter().any(|message| matches!(message,
+            ultty_protocol::AppMessage::SetContent { content: ultty_protocol::Content::RichText(text), .. }
+            if text.spans.iter().any(|span| span.text.trim() == "}"))));
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                app.approval_page_view(app.pending_approval.as_ref().unwrap())
+                    .render_ansi(frame, frame.area())
+            })
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("TAIL-ARGUMENT"), "{screen}");
+        let end = app.approval_scroll;
+        for _ in 0..20 {
+            app.handle_event(&composer_key(Key::Down, false));
+        }
+        assert_eq!(app.approval_scroll, end);
+        app.handle_event(&composer_key(Key::Up, false));
+        assert_eq!(app.approval_scroll, end - 1);
+        assert!(matches!(
+            app.handle_event(&composer_key(Key::Char('n'), false)),
+            Some(Msg::ApprovalDecision(false))
+        ));
     }
 
     #[test]
@@ -765,9 +913,11 @@ mod tests {
                 .collect();
             for expected in [
                 "Keys and commands",
+                "F2: conversations; search, Enter to open, Ctrl+N new.",
+                "In conversations, Ctrl+L loads older conversations.",
                 "back to your draft",
                 "Ctrl+X then Enter: newline.",
-                "confirm to discard draft.",
+                "save draft and quit.",
                 "/attach ID: read a run.",
             ] {
                 assert!(
@@ -830,10 +980,12 @@ mod tests {
         let mut app = PorygonTui::new();
         app.terminal_width = 75;
 
-        let short = app.estimated_message_card_height("short line");
-        let long = app.estimated_message_card_height(
-            "- **Project DNA:** AGENTS.md found at /home/travers/projects/tui-terminal/AGENTS.md",
-        );
+        app.messages[0].content = "short line".into();
+        let short = app.transcript_height();
+        app.messages[0].content =
+            "- **Project DNA:** AGENTS.md found at /home/travers/projects/tui-terminal/AGENTS.md"
+                .into();
+        let long = app.transcript_height();
 
         assert!(long > short, "long={long} short={short}");
     }

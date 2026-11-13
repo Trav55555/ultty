@@ -31,6 +31,18 @@ pub enum Backend {
 }
 
 impl Backend {
+    /// Emit an explicit clipboard request using the backend's existing writer.
+    /// A successful write does not confirm terminal support or clipboard contents.
+    pub fn copy_to_clipboard(&mut self, text: &str) -> crate::Result<()> {
+        crate::clipboard::validate(text)?;
+        match self {
+            Backend::Native(backend) => backend.write_clipboard(text),
+            Backend::Ansi(backend) => backend.write_clipboard(text),
+            #[cfg(any(test, feature = "test-utils"))]
+            Backend::Mock(backend) => backend.write_clipboard(text),
+        }
+    }
+
     /// Write optional status through the backend's own output, without reading input.
     pub fn report_status(
         &mut self,

@@ -10,9 +10,19 @@ use crate::toast::Toast;
 /// App-loop callback for a report write, independent of task completion.
 pub type StatusWriteResult<M> = Box<dyn FnOnce(crate::Result<()>) -> M + Send + 'static>;
 
+/// App-loop callback for a clipboard write; success confirms emission only.
+pub type ClipboardWriteResult<M> = Box<dyn FnOnce(crate::Result<()>) -> M + Send + 'static>;
+
 /// A command representing a side effect to execute after update().
 #[derive(Default)]
 pub enum Cmd<M> {
+    /// Request an explicit clipboard write through the backend's owned writer.
+    CopyToClipboard {
+        /// Exact source text, bounded by [`crate::clipboard::MAX_CLIPBOARD_BYTES`].
+        text: String,
+        /// Receive emission success/failure; success does not confirm clipboard contents.
+        on_result: Option<ClipboardWriteResult<M>>,
+    },
     /// Write an optional OSC 7501 report through the backend's owned writer.
     ReportStatus {
         /// Report validated before any bytes are written.
@@ -65,6 +75,27 @@ pub enum Cmd<M> {
 }
 
 impl<M> Cmd<M> {
+    /// Write exact source text to the terminal clipboard; failures are logged.
+    /// Oversized payloads are rejected without truncation. No clipboard read occurs.
+    pub fn copy_to_clipboard(text: String) -> Self {
+        Self::CopyToClipboard {
+            text,
+            on_result: None,
+        }
+    }
+
+    /// Receive clipboard request emission success/failure as an application message.
+    /// Successful emission does not confirm terminal support or clipboard contents.
+    pub fn copy_to_clipboard_with_result(
+        text: String,
+        on_result: impl FnOnce(crate::Result<()>) -> M + Send + 'static,
+    ) -> Self {
+        Self::CopyToClipboard {
+            text,
+            on_result: Some(Box::new(on_result)),
+        }
+    }
+
     /// Report program state without a capability query or input reader.
     /// Write failures are logged; use `report_status_with_result` to handle them.
     pub fn report_status(report: ultty_client::program_status::Report) -> Self {
@@ -169,6 +200,7 @@ impl<M> Cmd<M> {
 impl<M> std::fmt::Debug for Cmd<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
+            Cmd::CopyToClipboard { .. } => "Cmd::CopyToClipboard",
             Cmd::ReportStatus { .. } => "Cmd::ReportStatus",
             Cmd::None => "Cmd::None",
             Cmd::Message(_) => "Cmd::Message",
