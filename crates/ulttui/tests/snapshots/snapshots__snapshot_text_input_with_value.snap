@@ -1,8 +1,9 @@
 ---
 source: crates/ulttui/tests/snapshots.rs
+assertion_line: 381
 expression: output
 ---
-[N] Hello world
+│[N] Hello world
 -- styles --
-0:0-3 fg=Reset bg=Reset mod=BOLD
-0:4-14 fg=Rgb(205, 214, 244) bg=Reset mod=NONE
+0:0-0 fg=Rgb(49, 50, 68) bg=Reset mod=NONE
+0:5-15 fg=Rgb(205, 214, 244) bg=Reset mod=NONE
