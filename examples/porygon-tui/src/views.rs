@@ -295,7 +295,7 @@ impl PorygonTui {
                     ),
             )
             .child(Spacer)
-            .child(Text::new("  F1 help "))
+            .child(RichText::new().span("  F1 help ", Style::default()))
     }
 
     fn messages_view(&self) -> Column {
