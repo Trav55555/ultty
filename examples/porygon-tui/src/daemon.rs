@@ -1231,15 +1231,9 @@ impl PorygonTui {
                 let Some(id) = self.work.detail_id.clone() else {
                     return Cmd::none();
                 };
-                let permitted = self.pending_approval.is_none()
-                    && !self.approval_in_flight
-                    && !self.waiting_response;
-                let cmd = self.handle_command_action(CommandAction::AttachRun { id });
-                if permitted {
-                    self.work.page = crate::work::Page::Closed;
-                }
-                cmd
+                self.begin_attach(id)
             }
+            Msg::AttachReady(generation, result) => self.finish_attach(generation, result),
             Msg::WorkDetail(id, generation, result) => {
                 if self.work.page == crate::work::Page::Detail
                     && self.work.detail_id.as_deref() == Some(&id)
@@ -1509,8 +1503,8 @@ impl PorygonTui {
             }
             Msg::OpenConversations => self.open_conversations(),
             Msg::MoreConversations => self.fetch_conversation_page(),
-            Msg::ConversationsListed(offset, result) => {
-                self.conversations_listed(offset, result);
+            Msg::ConversationsListed(generation, offset, result) => {
+                self.conversations_listed(generation, offset, result);
                 Cmd::none()
             }
             Msg::LoadConversation(id, generation) => self.load_conversation(id, generation),
@@ -2522,28 +2516,7 @@ impl PorygonTui {
             CommandAction::ShowApprovals => {
                 Cmd::message(Msg::OpenWork(crate::work::Page::Attention))
             }
-            CommandAction::AttachRun { id } => {
-                if self.pending_approval.is_some() || self.approval_in_flight {
-                    return Cmd::ShowToast(Toast::warning(
-                        "Resolve or refresh the pending approval before selecting another run.",
-                    ));
-                }
-                if self.waiting_response {
-                    return Cmd::ShowToast(Toast::warning(
-                        "Stop the active stream before selecting another run.",
-                    ));
-                }
-                self.current_run = Some(id);
-                self.run_epoch = self.run_epoch.wrapping_add(1);
-                self.current_response = None;
-                self.run_can_continue = false;
-                self.conversation_id = None;
-                self.run_unresolved = true;
-                self.approval_is_stream = false;
-                self.pending_approval = None;
-                self.show_approval_modal = false;
-                self.inspect_run(false)
-            }
+            CommandAction::AttachRun { id } => self.begin_attach(id),
             CommandAction::FetchTools => {
                 if !self.connected {
                     self.messages.push(ChatMessage {

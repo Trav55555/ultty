@@ -14,6 +14,7 @@ use ulttui::prelude::*;
 use ulttui::theme::{ButtonTheme, ControlTheme, DesignTokens, InputTheme, SelectionTheme, Theme};
 
 mod approval_client;
+mod attachment;
 mod commands;
 mod connection;
 mod contract_probe;
@@ -101,6 +102,8 @@ fn porygon_theme() -> Theme {
 pub(crate) struct PorygonTui {
     pub(crate) conversations: conversations::Conversations,
     pub(crate) work: work::WorkState,
+    pub(crate) pending_attach: Option<attachment::Request>,
+    pub(crate) attach_generation: u64,
     pub(crate) messages: Vec<ChatMessage>,
     pub(crate) transcript: std::cell::RefCell<transcript::Transcript>,
     pub(crate) input: TextInput,
@@ -177,6 +180,8 @@ impl PorygonTui {
             transcript: std::cell::RefCell::default(),
             conversations: conversations::Conversations::default(),
             work: work::WorkState::default(),
+            pending_attach: None,
+            attach_generation: 0,
             messages: vec![ChatMessage {
                 role: "system".into(),
                 content: "Type a message to start a conversation.\nUse F1 for keys and commands. Your draft stays here while disconnected.".into(),
@@ -251,7 +256,7 @@ enum Msg {
     FlushDrafts,
     OpenConversations,
     MoreConversations,
-    ConversationsListed(usize, Result<Vec<conversations::Conversation>, String>),
+    ConversationsListed(u64, usize, Result<Vec<conversations::Conversation>, String>),
     LoadConversation(String, u64),
     ConversationLoaded(String, u64, Result<Vec<ChatMessage>, String>),
     Init,
@@ -280,6 +285,7 @@ enum Msg {
     PollAttention,
     AttentionNotice(Result<usize, String>),
     AttachWork,
+    AttachReady(u64, Result<attachment::Snapshot, String>),
     InspectWork,
     ApprovalReceived(ApprovalRequest, bool),
     ApprovalDecision(bool),

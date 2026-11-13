@@ -54,6 +54,7 @@ pub(crate) struct Conversations {
     pending: Option<(String, u64)>,
     generation: u64,
     next_offset: usize,
+    list_generation: u64,
     loading: bool,
     has_more: bool,
     active: Option<String>,
@@ -107,6 +108,122 @@ impl Conversations {
         .map_err(|e| e.to_string())?;
         file.sync_all().map_err(|e| e.to_string())?;
         fs::rename(temporary, path).map_err(|e| e.to_string())
+    }
+}
+
+const MAX_HISTORY_MESSAGES: usize = 50_000;
+const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Deserialize)]
+struct HistoryMessage {
+    role: String,
+    content: String,
+    created_at: String,
+}
+
+impl From<HistoryMessage> for ChatMessage {
+    fn from(message: HistoryMessage) -> Self {
+        Self {
+            role: message.role,
+            content: message.content,
+            timestamp: message.created_at,
+        }
+    }
+}
+
+async fn decode_history<T: serde::de::DeserializeOwned>(
+    mut response: reqwest::Response,
+    remaining: &mut usize,
+) -> Result<T, String> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        if chunk.len() > *remaining {
+            return Err("Conversation history exceeds the 32 MiB loading budget; previous conversation preserved.".into());
+        }
+        *remaining -= chunk.len();
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|error| format!("Invalid conversation history: {error}"))
+}
+
+pub(crate) async fn fetch_history(
+    connection: &crate::connection::Connection,
+    id: &str,
+) -> Result<Vec<ChatMessage>, String> {
+    #[derive(Deserialize)]
+    struct Page {
+        conversation_id: String,
+        messages: Vec<HistoryMessage>,
+        total: usize,
+        next_offset: Option<usize>,
+    }
+    #[derive(Deserialize)]
+    struct Detail {
+        id: String,
+        message_count: usize,
+        messages: Vec<HistoryMessage>,
+    }
+    let mut remaining = MAX_HISTORY_BYTES;
+    let mut messages = Vec::new();
+    let mut offset = 0;
+    let mut expected_total = None;
+    loop {
+        let url = connection.endpoint(&["conversations", id, "messages"])?;
+        let response = connection
+            .client
+            .get(url)
+            .query(&[("limit", 200), ("offset", offset)])
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if offset == 0 && response.status() == reqwest::StatusCode::NOT_FOUND {
+            let url = connection.endpoint(&["conversations", id])?;
+            let response = connection
+                .client
+                .get(url)
+                .send()
+                .await
+                .map_err(|error| error.to_string())?
+                .error_for_status()
+                .map_err(|error| error.to_string())?;
+            let detail: Detail = decode_history(response, &mut remaining).await?;
+            if detail.id != id {
+                return Err("Daemon returned a different conversation; nothing switched.".into());
+            }
+            if detail.message_count != detail.messages.len() {
+                return Err("Daemon returned partial conversation history. Upgrade the daemon for paginated history; previous conversation preserved.".into());
+            }
+            if detail.message_count > MAX_HISTORY_MESSAGES {
+                return Err("Conversation history exceeds the 50,000 message loading budget; previous conversation preserved.".into());
+            }
+            return Ok(detail.messages.into_iter().map(ChatMessage::from).collect());
+        }
+        let response = response
+            .error_for_status()
+            .map_err(|error| error.to_string())?;
+        let page: Page = decode_history(response, &mut remaining).await?;
+        if page.conversation_id != id {
+            return Err("Daemon returned a different conversation; nothing switched.".into());
+        }
+        if page.total > MAX_HISTORY_MESSAGES {
+            return Err("Conversation history exceeds the 50,000 message loading budget; previous conversation preserved.".into());
+        }
+        if expected_total.is_some_and(|total| total != page.total) {
+            return Err("Conversation changed while loading history. Refresh manually; previous conversation preserved.".into());
+        }
+        expected_total = Some(page.total);
+        messages.extend(page.messages.into_iter().map(ChatMessage::from));
+        if messages.len() > page.total {
+            return Err(
+                "Daemon returned inconsistent history counts; previous conversation preserved."
+                    .into(),
+            );
+        }
+        match page.next_offset {
+            Some(next) if next > offset && next == messages.len() && next < page.total => offset = next,
+            None if messages.len() == page.total => return Ok(messages),
+            _ => return Err("Daemon returned incomplete or non-advancing history pages; previous conversation preserved.".into()),
+        }
     }
 }
 
@@ -271,7 +388,7 @@ impl PorygonTui {
         }
     }
 
-    fn can_switch(&self) -> bool {
+    pub(crate) fn can_switch(&self) -> bool {
         !self.run_unresolved
             && !self.waiting_response
             && !self.stopping
@@ -285,6 +402,7 @@ impl PorygonTui {
         self.conversations.query.clear();
         self.conversations.selected = 0;
         self.conversations.error = None;
+        self.conversations.list_generation = self.conversations.list_generation.wrapping_add(1);
         self.conversations.rows.clear();
         self.conversations.loading = false;
         self.conversations.next_offset = 0;
@@ -302,6 +420,7 @@ impl PorygonTui {
         };
         self.conversations.loading = true;
         let offset = self.conversations.next_offset;
+        let generation = self.conversations.list_generation;
         Cmd::spawn(async move {
             let result = async {
                 let url = connection.endpoint(&["conversations"])?;
@@ -319,16 +438,19 @@ impl PorygonTui {
                     .map_err(|e| e.to_string())
             }
             .await;
-            Msg::ConversationsListed(offset, result)
+            Msg::ConversationsListed(generation, offset, result)
         })
     }
 
     pub(crate) fn conversations_listed(
         &mut self,
+        generation: u64,
         offset: usize,
         result: Result<Vec<Conversation>, String>,
     ) {
-        if offset != self.conversations.next_offset {
+        if generation != self.conversations.list_generation
+            || offset != self.conversations.next_offset
+        {
             return;
         }
         self.conversations.loading = false;
@@ -444,46 +566,7 @@ impl PorygonTui {
             return Cmd::none();
         };
         Cmd::spawn(async move {
-            #[derive(Deserialize)]
-            struct Message {
-                role: String,
-                content: String,
-                created_at: String,
-            }
-            #[derive(Deserialize)]
-            struct Detail {
-                id: String,
-                messages: Vec<Message>,
-            }
-            let result = async {
-                let url = connection.endpoint(&["conversations", &id])?;
-                let detail: Detail = connection
-                    .client
-                    .get(url)
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .error_for_status()
-                    .map_err(|e| e.to_string())?
-                    .json()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                if detail.id != id {
-                    return Err(
-                        "Daemon returned a different conversation; nothing switched.".into(),
-                    );
-                }
-                Ok(detail
-                    .messages
-                    .into_iter()
-                    .map(|message| ChatMessage {
-                        role: message.role,
-                        content: message.content,
-                        timestamp: message.created_at,
-                    })
-                    .collect())
-            }
-            .await;
+            let result = fetch_history(&connection, &id).await;
             Msg::ConversationLoaded(id, generation, result)
         })
     }
@@ -502,21 +585,7 @@ impl PorygonTui {
         self.conversations.pending = None;
         match result {
             Ok(messages) if self.can_switch() => {
-                self.flush_drafts();
-                self.conversations.restoring_history = false;
-                self.messages = messages;
-                self.conversation_id = Some(id);
-                self.current_run = None;
-                self.current_response = None;
-                self.tool_calls.clear();
-                self.tool_ids.clear();
-                self.streaming_content.clear();
-                self.session_id = None;
-                self.error = None;
-                self.status.step = "ready".into();
-                self.conversations.open = false;
-                self.restore_position();
-                self.flush_drafts();
+                self.select_loaded_conversation(id, messages);
                 Cmd::none()
             }
             Ok(_) => Cmd::ShowToast(Toast::warning(
@@ -527,6 +596,24 @@ impl PorygonTui {
                 Cmd::none()
             }
         }
+    }
+
+    pub(crate) fn select_loaded_conversation(&mut self, id: String, messages: Vec<ChatMessage>) {
+        self.flush_drafts();
+        self.conversations.restoring_history = false;
+        self.messages = messages;
+        self.conversation_id = Some(id);
+        self.current_run = None;
+        self.current_response = None;
+        self.tool_calls.clear();
+        self.tool_ids.clear();
+        self.streaming_content.clear();
+        self.session_id = None;
+        self.error = None;
+        self.status.step = "ready".into();
+        self.conversations.open = false;
+        self.restore_position();
+        self.flush_drafts();
     }
 
     pub(crate) fn conversation_view(&self) -> Column {
@@ -800,12 +887,13 @@ mod tests {
                 message_count: 1,
             })
             .collect();
-        app.conversations_listed(0, Ok(page));
+        app.conversations_listed(0, 0, Ok(page));
         assert!(app.conversations.has_more);
         assert_eq!(app.conversations.next_offset, 200);
         app.conversations.query = "older".into();
         assert!(app.conversations.filtered().is_empty());
         app.conversations_listed(
+            0,
             200,
             Ok(vec![Conversation {
                 id: "old".into(),
@@ -816,7 +904,7 @@ mod tests {
         );
         assert_eq!(app.conversations.filtered().len(), 1);
         assert!(!app.conversations.has_more);
-        app.conversations_listed(0, Ok(Vec::new()));
+        app.conversations_listed(0, 0, Ok(Vec::new()));
         assert_eq!(app.conversations.rows.len(), 201);
     }
 
@@ -855,5 +943,162 @@ mod tests {
         app.messages.clear();
         app.input.set_value("/save");
         app.handle_update(Msg::SendMessage);
+    }
+    #[test]
+    fn test_reopened_picker_ignores_previous_list_generation() {
+        let mut app = PorygonTui::new();
+        app.open_conversations();
+        let previous = app.conversations.list_generation;
+        app.open_conversations();
+        let current = app.conversations.list_generation;
+        app.conversations_listed(
+            previous,
+            0,
+            Ok(vec![Conversation {
+                id: "stale".into(),
+                title: None,
+                updated_at: "yesterday".into(),
+                message_count: 1,
+            }]),
+        );
+        assert!(app.conversations.rows.is_empty());
+        app.conversations_listed(
+            current,
+            0,
+            Ok(vec![Conversation {
+                id: "fresh".into(),
+                title: None,
+                updated_at: "today".into(),
+                message_count: 1,
+            }]),
+        );
+        assert_eq!(app.conversations.rows[0].id, "fresh");
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use crate::connection::Connection;
+    use serde_json::{json, Value};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn server(
+        responses: Vec<(u16, Value)>,
+    ) -> (Connection, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let connection = Connection::from_values(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            "fixture",
+        )
+        .unwrap();
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                let body = body.to_string();
+                let response = format!("HTTP/1.1 {status} fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (connection, task)
+    }
+
+    fn messages(start: usize, count: usize) -> Vec<Value> {
+        (start..start + count).map(|index| json!({"role":"assistant","content":format!("history-marker-{index}"),"created_at":"now"})).collect()
+    }
+
+    #[tokio::test]
+    async fn test_history_loads_every_page_with_exact_conversation_identity() {
+        let total = 10_003;
+        let responses = (0..total).step_by(200).map(|offset| {
+            let count = (total - offset).min(200);
+            let next = (offset + count < total).then_some(offset + count);
+            (200, json!({"conversation_id":"B","messages":messages(offset,count),"total":total,"next_offset":next}))
+        }).collect();
+        let (connection, task) = server(responses).await;
+        let history = fetch_history(&connection, "B").await.unwrap();
+        assert_eq!(history.len(), total);
+        assert_eq!(history[0].content, "history-marker-0");
+        assert_eq!(history[total - 1].content, "history-marker-10002");
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 51);
+        assert!(requests[0].starts_with("GET /conversations/B/messages?limit=200&offset=0 "));
+        assert!(requests[50].starts_with("GET /conversations/B/messages?limit=200&offset=10000 "));
+    }
+
+    #[tokio::test]
+    async fn test_old_daemon_fallback_accepts_complete_history_and_rejects_partial() {
+        for (count, accepted) in [(2, true), (300, false)] {
+            let (connection, task) = server(vec![
+                (404, json!({"detail":"Not Found"})),
+                (
+                    200,
+                    json!({"id":"B","message_count":count,"messages":messages(0,2)}),
+                ),
+            ])
+            .await;
+            let result = fetch_history(&connection, "B").await;
+            assert_eq!(result.is_ok(), accepted);
+            if !accepted {
+                assert!(result.unwrap_err().contains("partial conversation history"));
+            }
+            assert!(task.await.unwrap()[1].starts_with("GET /conversations/B "));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_history_rejects_changed_counts_identity_and_invalid_offsets() {
+        let cases = [
+            json!({"conversation_id":"other","messages":messages(0,1),"total":1,"next_offset":null}),
+            json!({"conversation_id":"B","messages":messages(0,1),"total":2,"next_offset":null}),
+            json!({"conversation_id":"B","messages":messages(0,1),"total":2,"next_offset":0}),
+            json!({"conversation_id":"B","messages":messages(0,1),"total":50001,"next_offset":1}),
+        ];
+        for body in cases {
+            let (connection, task) = server(vec![(200, body)]).await;
+            assert!(fetch_history(&connection, "B").await.is_err());
+            task.await.unwrap();
+        }
+        let (connection, task) = server(vec![
+            (
+                200,
+                json!({"conversation_id":"B","messages":messages(0,1),"total":2,"next_offset":1}),
+            ),
+            (
+                200,
+                json!({"conversation_id":"B","messages":messages(1,1),"total":3,"next_offset":2}),
+            ),
+        ])
+        .await;
+        assert!(fetch_history(&connection, "B")
+            .await
+            .unwrap_err()
+            .contains("changed while loading"));
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_history_wire_budget_rejects_before_deserializing_oversize_response() {
+        let (connection, task) = server(vec![(200, json!({"large":"x".repeat(100)}))]).await;
+        let response = connection
+            .client
+            .get(connection.base_url.clone())
+            .send()
+            .await
+            .unwrap();
+        let result: Result<Value, String> = decode_history(response, &mut 16).await;
+        assert!(result.unwrap_err().contains("loading budget"));
+        task.await.unwrap();
     }
 }
