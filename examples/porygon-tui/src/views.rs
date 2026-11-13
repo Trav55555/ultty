@@ -583,36 +583,27 @@ impl PorygonTui {
         }
         let main_content = dock.center(center_content);
         if self.show_help {
-            return Stack::new().child(main_content).child(
-                Modal::new()
-                    .title("Keys and commands")
-                    .body_view(
-                        Column::new()
-                            .child(Text::new(
-                                "Enter sends when ready. Busy sends keep the draft.",
-                            ))
-                            .child(Text::new(
-                                "Ctrl+X then Enter: newline. Shift+Enter when supported.",
-                            ))
-                            .child(Text::new(
-                                "Paste inserts text only. Ctrl+C stops active work.",
-                            ))
-                            .child(Text::new(
-                                "PgUp/PgDn: history. Ctrl+End: follow latest output.",
-                            ))
-                            .child(Text::new(
-                                "Type / for commands. Ctrl+Space completes a command.",
-                            ))
-                            .child(Text::new(
-                                "/reconnect inspects; /attach ID reads an existing run.",
-                            ))
-                            .child(Text::new(
-                                "Ctrl+C quits when idle; confirm to discard a draft.",
-                            )),
-                    )
-                    .buttons(vec!["Esc or F1: back"])
-                    .visible(true),
-            );
+            let mut help = Column::new()
+                .width(Dimension::Percent(100.0))
+                .height(Dimension::Percent(100.0))
+                .padding(1.0);
+            for line in [
+                "Keys and commands",
+                "Esc or F1: back to your draft",
+                "",
+                "Enter: send when ready; keep draft while busy.",
+                "Ctrl+X then Enter: newline.",
+                "Shift+Enter: newline when terminal supports it.",
+                "Paste: insert text without sending.",
+                "Ctrl+C: stop active work.",
+                "Ctrl+C when idle: quit; confirm to discard draft.",
+                "PgUp/PgDn: history. Ctrl+End: latest output.",
+                "Type / for commands. Ctrl+Space: complete.",
+                "/reconnect: inspect. /attach ID: read a run.",
+            ] {
+                help = help.child(Text::new(line));
+            }
+            return Stack::new().child(help);
         }
         if self.show_approval_modal {
             if let Some(req) = &self.pending_approval {
@@ -752,6 +743,39 @@ mod tests {
             app.handle_event(&Event::Quit),
             Some(Msg::AbortStream)
         ));
+    }
+
+    #[test]
+    fn help_page_keeps_title_keys_and_return_action_visible() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        for (width, height) in [(61, 30), (80, 24)] {
+            let mut app = PorygonTui::new();
+            app.show_help = true;
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| app.render_view().render_ansi(frame, frame.area()))
+                .unwrap();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            for expected in [
+                "Keys and commands",
+                "back to your draft",
+                "Ctrl+X then Enter: newline.",
+                "confirm to discard draft.",
+                "/attach ID: read a run.",
+            ] {
+                assert!(
+                    screen.contains(expected),
+                    "{width}x{height}: missing {expected}"
+                );
+            }
+        }
     }
 
     #[test]
