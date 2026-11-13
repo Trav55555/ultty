@@ -105,6 +105,13 @@ pub struct ManagedTerminal {
     pub progress: Option<ultty_protocol::control::PaneStatus>,
 }
 
+impl Drop for ManagedTerminal {
+    fn drop(&mut self) {
+        // Its scrollback is freed with it (once the PTY thread lets go).
+        crate::heap_trim::request();
+    }
+}
+
 impl ManagedTerminal {
     /// The status to show for the pane: what was set through the control
     /// socket, else what the program's progress reports imply.

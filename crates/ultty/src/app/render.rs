@@ -101,6 +101,7 @@ impl App {
                 "pipeline_render_frame"
             );
         }
+        ultty::heap_trim::maybe_trim();
         #[cfg(feature = "heap-stats")]
         ultty::heap_stats::maybe_log();
 

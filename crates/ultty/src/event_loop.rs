@@ -506,6 +506,8 @@ impl EventLoop {
             terminal.resize(Dimensions::new(cols, rows));
             terminal.cell_pixel_size()
         };
+        // Reflow rebuilt the scrollback and freed the old rows.
+        crate::heap_trim::request();
         self.child
             .resize(PtySize::for_cells(cols, rows, cell))
             .map_err(io::Error::other)
@@ -908,7 +910,13 @@ fn drain(
         read_bytes += n;
         let urgent = {
             let mut state = shared.lock();
+            let history_before = state.terminal.buffer().history_len();
             parse_into(&mut state, parser, &buf[..n]);
+            if history_before.saturating_sub(state.terminal.buffer().history_len())
+                >= crate::heap_trim::HISTORY_DROP_LINES
+            {
+                crate::heap_trim::request();
+            }
             let hold = state.holds_responses();
             for response in state.terminal.take_responses() {
                 if hold {
