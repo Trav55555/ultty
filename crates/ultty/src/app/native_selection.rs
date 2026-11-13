@@ -20,6 +20,7 @@ pub(super) struct NativeSelectionState {
     anchor: Option<(usize, u64)>,
     snapshot: Option<String>,
     pointer_origin: (f64, f64),
+    link: Option<String>,
 }
 
 struct Hit {
@@ -28,6 +29,7 @@ struct Hit {
     row: SelectionRow,
     column: usize,
     rows: Option<Vec<SelectionRow>>,
+    link: Option<String>,
 }
 
 impl App {
@@ -74,6 +76,27 @@ impl App {
                 let row = SelectionRow::from_region(region)?;
                 let inset = (region.computed.content_x - region.computed.x).max(0.0);
                 let column = (local_x - inset).max(0.0) as usize;
+                let offset = row.position(column)?.checked_sub(row.start)?;
+                let link = region.metadata.iter().find_map(|(key, value)| {
+                    if !key.starts_with("transcript-link-v1-") || value.len() > 4096 {
+                        return None;
+                    }
+                    let mut fields = value.splitn(3, ':');
+                    let start: usize = fields.next()?.parse().ok()?;
+                    let end: usize = fields.next()?.parse().ok()?;
+                    let target = fields.next()?;
+                    if start > offset
+                        || offset >= end
+                        || end > row.text.len()
+                        || !row.text.is_char_boundary(start)
+                        || !row.text.is_char_boundary(end)
+                    {
+                        return None;
+                    }
+                    let delimited = format!("{target} ");
+                    (ultty::url::url_at_text(&delimited, 0).as_deref() == Some(target))
+                        .then(|| target.to_owned())
+                });
                 let mut rows = Vec::new();
                 let mut bytes = 0usize;
                 let mut bounded = true;
@@ -101,6 +124,7 @@ impl App {
                     row,
                     column,
                     rows,
+                    link,
                 })
             })
     }
@@ -139,6 +163,7 @@ impl App {
             anchor: Some((position, hit.row.revision)),
             snapshot: None,
             pointer_origin: (self.mouse_pos.x, self.mouse_pos.y),
+            link: hit.link,
         };
         self.mark_native_selection_dirty();
         self.needs_redraw = true;
@@ -198,7 +223,12 @@ impl App {
         if self.native_selection.ctrl && !self.native_selection.moved {
             if self.url_detector.is_enabled() {
                 if let Some((position, _)) = self.native_selection.anchor {
-                    if let Some(url) = self.native_selection.selection.url_at(position) {
+                    if let Some(url) = self
+                        .native_selection
+                        .link
+                        .clone()
+                        .or_else(|| self.native_selection.selection.url_at(position))
+                    {
                         if let Err(error) = ultty::url::UrlDetector::open_url(&url) {
                             tracing::warn!("Failed to open URL: {error}");
                         }
@@ -243,6 +273,15 @@ impl App {
             return false;
         }
         if self.native_selection.invalid {
+            return true;
+        }
+        let owner_present = self.runtime.protocol.as_ref().is_some_and(|server| {
+            server
+                .pane_or_unbound_sessions(self.native_selection.pane.unwrap())
+                .any(|session| Some(session.session_id()) == self.native_selection.session)
+        });
+        if !owner_present {
+            self.invalidate_native_transcript_selection();
             return true;
         }
         if let Some(text) = self.native_selection.snapshot.clone() {

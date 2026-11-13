@@ -41,6 +41,7 @@ pub struct PreparedMarkdownRow {
     /// Whether the next row starts after a real line break.
     pub hard_break: bool,
     selection_metadata: Option<String>,
+    links: Vec<(usize, usize, String)>,
     final_block: bool,
     final_row: bool,
     defer_while_streaming: bool,
@@ -54,6 +55,7 @@ impl PreparedMarkdownRow {
             semantics: Semantics::default(),
             hard_break: false,
             selection_metadata: None,
+            links: Vec::new(),
             final_block: false,
             final_row: false,
             defer_while_streaming: false,
@@ -104,10 +106,29 @@ impl View for PreparedMarkdownRow {
         self.semantics.clone()
     }
     fn native_metadata(&self) -> Vec<(String, String)> {
-        self.selection_metadata
+        let mut metadata = self
+            .selection_metadata
             .as_ref()
             .map(|value| vec![("transcript-row-v1".into(), value.clone())])
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if self.selection_metadata.is_some() {
+            // Leave ample room for the row identity and other region metadata.
+            // Oversized or unusually dense links remain ordinary selectable text.
+            let mut bytes = 0usize;
+            for (index, (start, end, target)) in self.links.iter().enumerate() {
+                if metadata.len() >= 129 || target.len() > 2048 {
+                    continue;
+                }
+                let key = format!("transcript-link-v1-{index}");
+                let value = format!("{start}:{end}:{target}");
+                if bytes + key.len() + value.len() > 32 * 1024 {
+                    break;
+                }
+                bytes += key.len() + value.len();
+                metadata.push((key, value));
+            }
+        }
+        metadata
     }
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         self.widget().render_ansi(frame, area);
@@ -131,6 +152,7 @@ struct ReparsePoint {
 struct StyledSpan {
     text: String,
     style: Style,
+    link: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -334,9 +356,20 @@ impl MarkdownView {
             }
             let dim = matches!(block, Block::CodeBlock { .. } | Block::BlockQuote { .. });
             let mut row = RichText::new();
+            let mut links: Vec<(usize, usize, String)> = Vec::new();
+            let targets: Vec<Option<&str>> = match block {
+                Block::Heading { spans, .. } | Block::Paragraph { spans } => {
+                    spans.iter().map(|s| s.link.as_deref()).collect()
+                }
+                Block::ListItem { spans, .. } => std::iter::once(None)
+                    .chain(spans.iter().map(|s| s.link.as_deref()))
+                    .collect(),
+                _ => Vec::new(),
+            };
             let mut column = 0;
             let mut logical_column = 0;
-            for span in rich.spans {
+            for (span_index, span) in rich.spans.into_iter().enumerate() {
+                let target = targets.get(span_index).copied().flatten();
                 let mut style = span.style;
                 style.dim |= dim;
                 for cluster in span.text.graphemes(true) {
@@ -344,6 +377,7 @@ impl MarkdownView {
                         let mut completed =
                             PreparedMarkdownRow::new(std::mem::replace(&mut row, RichText::new()));
                         completed.hard_break = true;
+                        completed.links = std::mem::take(&mut links);
                         rows.push(completed);
                         column = 0;
                         logical_column = 0;
@@ -360,11 +394,25 @@ impl MarkdownView {
                     for grapheme in cluster.graphemes(true) {
                         let cells = grapheme.width().max(1);
                         if column > 0 && column + cells > width {
-                            rows.push(PreparedMarkdownRow::new(std::mem::replace(
+                            let mut completed = PreparedMarkdownRow::new(std::mem::replace(
                                 &mut row,
                                 RichText::new(),
-                            )));
+                            ));
+                            completed.links = std::mem::take(&mut links);
+                            rows.push(completed);
                             column = 0;
+                        }
+                        if let Some(target) = target.filter(|target| target.len() <= 2048) {
+                            let start: usize = row.spans.iter().map(|span| span.text.len()).sum();
+                            let end = start + grapheme.len();
+                            if let Some(last) = links
+                                .last_mut()
+                                .filter(|last| last.1 == start && last.2 == target)
+                            {
+                                last.1 = end;
+                            } else {
+                                links.push((start, end, target.to_string()));
+                            }
                         }
                         if let Some(last) = row.spans.last_mut().filter(|last| last.style == style)
                         {
@@ -382,6 +430,7 @@ impl MarkdownView {
             }
             let mut completed = PreparedMarkdownRow::new(row);
             completed.hard_break = !final_block;
+            completed.links = links;
             rows.push(completed);
             if final_block {
                 let defer = matches!(block, Block::ListItem { spans, task: None, .. } if may_become_task(spans));
@@ -428,6 +477,7 @@ impl MarkdownView {
     fn push_text_span(
         current: &mut Option<CurrentBlock>,
         inline_style_stack: &[InlineStyleMarker],
+        link: Option<&str>,
         text: &str,
         inline_code: bool,
     ) {
@@ -463,6 +513,7 @@ impl MarkdownView {
         let span = StyledSpan {
             text: text.to_string(),
             style,
+            link: link.map(str::to_owned),
         };
 
         match current {
@@ -750,6 +801,7 @@ struct BlockBuilder {
     blocks: Vec<Block>,
     current: Option<CurrentBlock>,
     inline_style_stack: Vec<InlineStyleMarker>,
+    link: Option<String>,
     list_stack: Vec<ListState>,
     quote_depth: usize,
     table_depth: usize,
@@ -769,6 +821,7 @@ impl BlockBuilder {
         MarkdownView::push_text_span(
             &mut self.current,
             &self.inline_style_stack,
+            self.link.as_deref(),
             text,
             inline_code,
         );
@@ -842,7 +895,10 @@ impl BlockBuilder {
                 Tag::Table(_) => self.table_depth += 1,
                 Tag::Strong => self.inline_style_stack.push(InlineStyleMarker::Strong),
                 Tag::Emphasis => self.inline_style_stack.push(InlineStyleMarker::Emphasis),
-                Tag::Link { .. } => self.inline_style_stack.push(InlineStyleMarker::Link),
+                Tag::Link { dest_url, .. } => {
+                    self.link = Some(dest_url.to_string());
+                    self.inline_style_stack.push(InlineStyleMarker::Link);
+                }
                 _ => {}
             },
             Event::End(tag) => match tag {
@@ -858,7 +914,10 @@ impl BlockBuilder {
                 }
                 TagEnd::Strong => self.pop_inline_style(InlineStyleMarker::Strong),
                 TagEnd::Emphasis => self.pop_inline_style(InlineStyleMarker::Emphasis),
-                TagEnd::Link => self.pop_inline_style(InlineStyleMarker::Link),
+                TagEnd::Link => {
+                    self.link = None;
+                    self.pop_inline_style(InlineStyleMarker::Link);
+                }
                 _ => {}
             },
             Event::Html(text) => self.push_text(text.as_ref(), false),
@@ -1754,6 +1813,54 @@ mod tests {
             .flat_map(|frame| appends(frame))
             .collect::<Vec<_>>()
             .join("|")
+    }
+
+    #[test]
+    fn oversized_link_target_is_selectable_without_oversized_metadata() {
+        use super::View;
+        let source = format!("[x](https://example.test/{})", "a".repeat(5000));
+        let rows = MarkdownView::new(source).prepared_rows(80);
+        let first = rows
+            .into_iter()
+            .next()
+            .unwrap()
+            .with_selection_metadata("1:0:0".into());
+        assert_eq!(first.native_metadata().len(), 1);
+        assert_eq!(first.content.spans[0].text, "x");
+    }
+
+    #[test]
+    fn wrapped_mixed_style_link_labels_keep_exact_target_ranges() {
+        use super::View;
+        let rows = MarkdownView::new("[ab**cd**ef](https://example.test/path)")
+            .with_visible_link_targets()
+            .prepared_rows(3);
+        let linked: Vec<_> = rows
+            .into_iter()
+            .filter_map(|row| {
+                let row = row.with_selection_metadata("1:0:0".into());
+                let text: String = row
+                    .content
+                    .spans
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect();
+                let links: Vec<_> = row
+                    .native_metadata()
+                    .into_iter()
+                    .filter(|(key, _)| key.starts_with("transcript-link-v1-"))
+                    .map(|(_, value)| value)
+                    .collect();
+                (!links.is_empty()).then_some((text, links))
+            })
+            .collect();
+        assert_eq!(
+            linked,
+            vec![
+                ("abc".into(), vec!["0:3:https://example.test/path".into()]),
+                ("def".into(), vec!["0:3:https://example.test/path".into()])
+            ]
+        );
     }
 
     #[test]

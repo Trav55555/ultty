@@ -12,6 +12,21 @@ mod cache;
 mod images;
 mod widgets;
 
+fn selectable_chunk_end(text: &str, start: usize, columns: usize) -> Option<usize> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut end = start;
+    let mut used = 0;
+    for (offset, grapheme) in text[start..].grapheme_indices(true) {
+        let width = crate::scene::caret::grapheme_cells(grapheme);
+        if used + width > columns && end != start {
+            break;
+        }
+        used += width;
+        end = start + offset + grapheme.len();
+    }
+    (end > start).then_some(end)
+}
+
 // Keep a grapheme in one shaping run even when its source styles differ.
 // Its first scalar supplies the style, so rendering and hit testing share cells.
 fn selectable_spans(rich: &ultty_protocol::RichText) -> Vec<ultty_protocol::Span> {
@@ -743,9 +758,12 @@ impl Renderer {
                                     continue;
                                 }
 
-                                let Some(chunk_end) =
+                                let chunk_end = if selectable {
+                                    selectable_chunk_end(segment, byte_pos, cols_left)
+                                } else {
                                     next_display_width_chunk_end(segment, byte_pos, cols_left)
-                                else {
+                                };
+                                let Some(chunk_end) = chunk_end else {
                                     break;
                                 };
                                 let chunk = &segment[byte_pos..chunk_end];
@@ -995,7 +1013,18 @@ mod tests {
 
 #[cfg(test)]
 mod scissor_tests {
-    use super::{scissor_for, selectable_spans};
+    use super::{scissor_for, selectable_chunk_end, selectable_spans};
+
+    #[test]
+    fn selectable_chunks_use_grapheme_cell_widths() {
+        let text = "👩\u{200d}💻A";
+        assert_eq!(selectable_chunk_end(text, 0, 3), Some(text.len()));
+        assert_eq!(selectable_chunk_end(text, 0, 2), Some(text.len() - 1));
+        assert_eq!(
+            selectable_chunk_end("\u{301}A", 0, 1),
+            Some("\u{301}".len())
+        );
+    }
 
     #[test]
     fn selectable_text_keeps_graphemes_together_across_style_boundaries() {
