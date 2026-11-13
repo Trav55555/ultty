@@ -69,6 +69,7 @@ impl PorygonTui {
         self.stream_token_count = 0;
         self.tool_calls.clear();
         self.tool_ids.clear();
+        self.flush_drafts();
         self.begin_stream_metrics();
         self.auto_scroll_chat();
         let (sender, receiver) = mpsc::channel(8);
@@ -182,7 +183,7 @@ impl PorygonTui {
             }
             Event::Done(conversation) => {
                 if let Some(id) = conversation {
-                    self.conversation_id = Some(id);
+                    self.assign_conversation(id);
                 }
                 self.end_native_stream();
                 self.status.step = "stream ended; checking run outcome".into();
@@ -250,7 +251,7 @@ impl PorygonTui {
             }
             Ok(run) => {
                 if let Some(id) = run.metadata["conversation_id"].as_str() {
-                    self.conversation_id = Some(id.to_string());
+                    self.assign_conversation(id.to_string());
                 }
                 let terminal = matches!(
                     run.status.as_str(),

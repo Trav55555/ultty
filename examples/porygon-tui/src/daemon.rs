@@ -1347,6 +1347,10 @@ impl PorygonTui {
                 Cmd::none()
             }
             Msg::NoApprovalsPending => Cmd::none(),
+            Msg::FlushDrafts => {
+                self.flush_drafts();
+                Cmd::none()
+            }
             Msg::OpenConversations => self.open_conversations(),
             Msg::ConversationsListed(result) => {
                 match result {
@@ -1358,8 +1362,10 @@ impl PorygonTui {
                 }
                 Cmd::none()
             }
-            Msg::LoadConversation(id) => self.load_conversation(id),
-            Msg::ConversationLoaded(id, result) => self.conversation_loaded(id, result),
+            Msg::LoadConversation(id, generation) => self.load_conversation(id, generation),
+            Msg::ConversationLoaded(id, generation, result) => {
+                self.conversation_loaded(id, generation, result)
+            }
             Msg::SessionsFetched(sessions) => {
                 let mut table = String::from("**Saved Sessions:**\n\n");
                 if sessions.is_empty() {
@@ -2060,7 +2066,7 @@ impl PorygonTui {
                 Cmd::ShowToast(Toast::warning("Unsent draft. Press Ctrl+C again to quit."))
             }
             Msg::ExitRequested => {
-                self.persist_conversation();
+                self.flush_drafts();
                 if self.connected && self.messages.len() > 1 {
                     let daemon_url = self.daemon_url.clone();
                     let client = self.client.clone();

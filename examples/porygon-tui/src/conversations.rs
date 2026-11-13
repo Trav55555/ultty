@@ -22,11 +22,26 @@ pub(crate) struct Conversation {
     message_count: usize,
 }
 
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
 struct Position {
     draft: String,
     scroll: f32,
     follow: bool,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct DraftStore {
+    positions: BTreeMap<String, Position>,
+    active: Option<String>,
+    run: Option<String>,
+    unresolved: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredDrafts {
+    Current(DraftStore),
+    Legacy(BTreeMap<String, Position>),
 }
 
 #[derive(Default)]
@@ -36,7 +51,13 @@ pub(crate) struct Conversations {
     pub(crate) error: Option<String>,
     query: String,
     selected: usize,
-    pending: Option<String>,
+    pending: Option<(String, u64)>,
+    generation: u64,
+    active: Option<String>,
+    run: Option<String>,
+    unresolved: bool,
+    dirty: bool,
+    restoring_history: bool,
     positions: BTreeMap<String, Position>,
     path: Option<PathBuf>,
     lock: Option<PathBuf>,
@@ -71,8 +92,16 @@ impl Conversations {
             .mode(0o600)
             .open(&temporary)
             .map_err(|e| e.to_string())?;
-        file.write_all(&serde_json::to_vec(&self.positions).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        file.write_all(
+            &serde_json::to_vec(&DraftStore {
+                positions: self.positions.clone(),
+                active: self.active.clone(),
+                run: self.run.clone(),
+                unresolved: self.unresolved,
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
         file.sync_all().map_err(|e| e.to_string())?;
         fs::rename(temporary, path).map_err(|e| e.to_string())
     }
@@ -101,11 +130,20 @@ impl PorygonTui {
         if let Some(path) = &self.conversations.path {
             match fs::read(path) {
                 Ok(bytes) => match serde_json::from_slice(&bytes) {
-                    Ok(positions) => self.conversations.positions = positions,
-                    Err(error) => self.error = Some(format!("Could not read drafts: {error}")),
+                    Ok(StoredDrafts::Current(store)) => self.restore_store(store),
+                    Ok(StoredDrafts::Legacy(positions)) => self.conversations.positions = positions,
+                    Err(error) => {
+                        self.error = Some(format!("Could not read drafts; persistence disabled to preserve the file: {error}"));
+                        self.conversations.path = None;
+                    }
                 },
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => self.error = Some(format!("Could not read drafts: {error}")),
+                Err(error) => {
+                    self.error = Some(format!(
+                        "Could not read drafts; persistence disabled to preserve the file: {error}"
+                    ));
+                    self.conversations.path = None;
+                }
             }
         }
         if let Some(path) = &self.conversations.path {
@@ -146,18 +184,66 @@ impl PorygonTui {
         self.restore_position();
     }
 
+    fn restore_store(&mut self, store: DraftStore) {
+        self.conversations.positions = store.positions;
+        self.conversation_id = store.active.clone();
+        self.conversations.restoring_history = self.conversation_id.is_some();
+        self.current_run = store.run.clone();
+        self.run_unresolved = store.unresolved;
+        self.conversations.active = store.active;
+        self.conversations.run = store.run;
+        self.conversations.unresolved = store.unresolved;
+        if self.run_unresolved {
+            self.status.step = "previous work unconfirmed; /reconnect to inspect".into();
+        }
+        if self.conversation_id.is_some() {
+            self.messages[0].content = "Previous conversation restored with your draft. F2 opens its history. Previous work is never resubmitted.".into();
+        }
+    }
+
+    pub(crate) fn assign_conversation(&mut self, id: String) {
+        if self.conversation_id.is_none() {
+            self.conversations.positions.remove("");
+        }
+        self.conversation_id = Some(id);
+        self.persist_conversation();
+    }
+
+    pub(crate) fn flush_drafts(&mut self) {
+        self.persist_conversation();
+        if self.conversations.dirty {
+            match self.conversations.write() {
+                Ok(()) => self.conversations.dirty = false,
+                Err(error) => self.error = Some(format!("Draft not saved: {error}")),
+            }
+        }
+    }
+
     pub(crate) fn persist_conversation(&mut self) {
         let key = self.conversation_id.clone().unwrap_or_default();
-        self.conversations.positions.insert(
-            key,
-            Position {
-                draft: self.input.current_value().to_owned(),
-                scroll: self.chat_scroll.scroll_position().1,
-                follow: self.follow_output,
-            },
-        );
-        if let Err(error) = self.conversations.write() {
-            self.error = Some(format!("Draft not saved: {error}"));
+        let mut position = Position {
+            draft: self.input.current_value().to_owned(),
+            scroll: self.chat_scroll.scroll_position().1,
+            follow: self.follow_output,
+        };
+        if self.conversations.restoring_history {
+            if let Some(previous) = self.conversations.positions.get(&key) {
+                position.scroll = previous.scroll;
+                position.follow = previous.follow;
+            }
+        }
+        if self.conversations.positions.get(&key) != Some(&position) {
+            self.conversations.positions.insert(key, position);
+            self.conversations.dirty = true;
+        }
+        if self.conversations.active != self.conversation_id
+            || self.conversations.run != self.current_run
+            || self.conversations.unresolved != self.run_unresolved
+        {
+            self.conversations.active = self.conversation_id.clone();
+            self.conversations.run = self.current_run.clone();
+            self.conversations.unresolved = self.run_unresolved;
+            self.conversations.dirty = true;
         }
     }
 
@@ -235,7 +321,8 @@ impl PorygonTui {
             }
             Key::Char('n') if key.modifiers.ctrl => {
                 if self.can_switch() {
-                    self.persist_conversation();
+                    self.flush_drafts();
+                    self.conversations.restoring_history = false;
                     self.conversation_id = None;
                     self.current_run = None;
                     self.current_response = None;
@@ -249,6 +336,7 @@ impl PorygonTui {
                     self.conversations.pending = None;
                     self.conversations.open = false;
                     self.restore_position();
+                    self.flush_drafts();
                 } else {
                     self.conversations.error =
                         Some("Resolve current work before switching conversations.".into());
@@ -266,8 +354,10 @@ impl PorygonTui {
                     .get(self.conversations.selected)
                 {
                     let id = row.id.clone();
-                    self.conversations.pending = Some(id.clone());
-                    return Some(Msg::LoadConversation(id));
+                    self.conversations.generation = self.conversations.generation.wrapping_add(1);
+                    let generation = self.conversations.generation;
+                    self.conversations.pending = Some((id.clone(), generation));
+                    return Some(Msg::LoadConversation(id, generation));
                 }
             }
             Key::Backspace => {
@@ -283,7 +373,7 @@ impl PorygonTui {
         None
     }
 
-    pub(crate) fn load_conversation(&self, id: String) -> Cmd<Msg> {
+    pub(crate) fn load_conversation(&self, id: String, generation: u64) -> Cmd<Msg> {
         let Some(connection) = self.connection.clone() else {
             return Cmd::none();
         };
@@ -296,6 +386,7 @@ impl PorygonTui {
             }
             #[derive(Deserialize)]
             struct Detail {
+                id: String,
                 messages: Vec<Message>,
             }
             let result = async {
@@ -311,6 +402,11 @@ impl PorygonTui {
                     .json()
                     .await
                     .map_err(|e| e.to_string())?;
+                if detail.id != id {
+                    return Err(
+                        "Daemon returned a different conversation; nothing switched.".into(),
+                    );
+                }
                 Ok(detail
                     .messages
                     .into_iter()
@@ -322,22 +418,26 @@ impl PorygonTui {
                     .collect())
             }
             .await;
-            Msg::ConversationLoaded(id, result)
+            Msg::ConversationLoaded(id, generation, result)
         })
     }
 
     pub(crate) fn conversation_loaded(
         &mut self,
         id: String,
+        generation: u64,
         result: Result<Vec<ChatMessage>, String>,
     ) -> Cmd<Msg> {
-        if self.conversations.pending.as_deref() != Some(&id) || !self.conversations.open {
+        if self.conversations.pending.as_ref() != Some(&(id.clone(), generation))
+            || !self.conversations.open
+        {
             return Cmd::none();
         }
         self.conversations.pending = None;
         match result {
             Ok(messages) if self.can_switch() => {
-                self.persist_conversation();
+                self.flush_drafts();
+                self.conversations.restoring_history = false;
                 self.messages = messages;
                 self.conversation_id = Some(id);
                 self.current_run = None;
@@ -350,6 +450,7 @@ impl PorygonTui {
                 self.status.step = "ready".into();
                 self.conversations.open = false;
                 self.restore_position();
+                self.flush_drafts();
                 Cmd::none()
             }
             Ok(_) => Cmd::ShowToast(Toast::warning(
@@ -430,9 +531,10 @@ mod tests {
 
     fn select(app: &mut PorygonTui, id: &str) {
         app.conversations.open = true;
-        app.conversations.pending = Some(id.into());
+        app.conversations.pending = Some((id.into(), 0));
         app.conversation_loaded(
             id.into(),
+            0,
             Ok(vec![ChatMessage {
                 role: "user".into(),
                 content: format!("history {id}"),
@@ -471,7 +573,7 @@ mod tests {
             updated_at: "today".into(),
         });
         assert!(
-            matches!(app.handle_event(&key(Key::Enter, false)), Some(Msg::LoadConversation(id)) if id == "a")
+            matches!(app.handle_event(&key(Key::Enter, false)), Some(Msg::LoadConversation(id, _)) if id == "a")
         );
         assert_eq!(app.input.current_value(), "do not send");
         assert!(!app.waiting_response);
@@ -491,9 +593,9 @@ mod tests {
         assert_eq!(app.current_run.as_deref(), Some("run"));
         assert_eq!(app.input.current_value(), "preserved");
         app.run_unresolved = false;
-        app.conversations.pending = Some("other".into());
+        app.conversations.pending = Some(("other".into(), 0));
         app.conversation_event(&key(Key::Escape, false));
-        app.conversation_loaded("other".into(), Ok(Vec::new()));
+        app.conversation_loaded("other".into(), 0, Ok(Vec::new()));
         assert_eq!(app.conversation_id.as_deref(), Some("active"));
     }
 
@@ -514,15 +616,100 @@ mod tests {
             },
         );
         store.write().unwrap();
-        let restored: BTreeMap<String, Position> =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(restored["conversation"].draft, "exact\ntext ✓");
-        assert_eq!(restored["conversation"].scroll, 42.0);
-        assert!(!restored["conversation"].follow);
+        let restored: DraftStore = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored.positions["conversation"].draft, "exact\ntext ✓");
+        assert_eq!(restored.positions["conversation"].scroll, 42.0);
+        assert!(!restored.positions["conversation"].follow);
         assert_eq!(
             fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn test_quit_retains_stop_safety_with_picker_open() {
+        let mut app = PorygonTui::new();
+        app.conversations.open = true;
+        app.waiting_response = true;
+        assert!(matches!(
+            app.handle_event(&Event::Quit),
+            Some(Msg::AbortStream)
+        ));
+        app.waiting_response = false;
+        assert!(matches!(
+            app.handle_event(&Event::Quit),
+            Some(Msg::ExitRequested)
+        ));
+    }
+
+    #[test]
+    fn test_typing_caches_without_disk_io_until_flush() {
+        let directory =
+            std::env::temp_dir().join(format!("porygon-drafts-cache-{}", std::process::id()));
+        let path = directory.join("drafts.json");
+        let mut app = PorygonTui::new();
+        app.conversations.path = Some(path.clone());
+        for index in 0..1000 {
+            app.input.set_value(format!("draft {index}"));
+            app.persist_conversation();
+        }
+        assert!(!path.exists(), "key edits must not touch the filesystem");
+        app.flush_drafts();
+        let store: DraftStore = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(store.positions[""].draft, "draft 999");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn test_restart_restores_active_draft_and_uncertainty_without_submission() {
+        let mut app = PorygonTui::new();
+        let mut store = DraftStore {
+            active: Some("active".into()),
+            run: Some("unconfirmed".into()),
+            unresolved: true,
+            ..DraftStore::default()
+        };
+        store.positions.insert(
+            "active".into(),
+            Position {
+                draft: "next thought".into(),
+                scroll: 123.0,
+                follow: false,
+            },
+        );
+        app.restore_store(store);
+        app.restore_position();
+        app.persist_conversation();
+        assert_eq!(app.input.current_value(), "next thought");
+        assert_eq!(app.conversation_id.as_deref(), Some("active"));
+        assert_eq!(app.current_run.as_deref(), Some("unconfirmed"));
+        assert_eq!(app.conversations.positions["active"].scroll, 123.0);
+        assert!(!app.waiting_response);
+        assert!(app.run_unresolved);
+        assert!(!app.run_can_continue);
+    }
+
+    #[test]
+    fn test_assigned_conversation_takes_ownership_of_next_draft() {
+        let mut app = PorygonTui::new();
+        app.input.set_value("submitted text");
+        app.persist_conversation();
+        app.input.set_value("next thought");
+        app.assign_conversation("created".into());
+        assert!(!app.conversations.positions.contains_key(""));
+        assert_eq!(app.conversations.positions["created"].draft, "next thought");
+        app.conversations.open = true;
+        app.conversation_event(&key(Key::Char('n'), true));
+        assert!(app.input.current_value().is_empty());
+    }
+
+    #[test]
+    fn test_previous_same_id_load_generation_is_ignored() {
+        let mut app = PorygonTui::new();
+        app.conversations.open = true;
+        app.conversations.pending = Some(("same".into(), 2));
+        app.conversation_loaded("same".into(), 1, Ok(Vec::new()));
+        assert!(app.conversation_id.is_none());
+        assert_eq!(app.conversations.pending, Some(("same".into(), 2)));
     }
 }

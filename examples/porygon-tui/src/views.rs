@@ -270,7 +270,7 @@ impl PorygonTui {
                     ),
             )
             .child(Spacer)
-            .child(RichText::new().span("  F1 help ", Style::default()))
+            .child(RichText::new().span("  F1 help · F2 conversations ", Style::default()))
     }
 
     fn messages_view(&self) -> Column {
@@ -368,7 +368,7 @@ impl PorygonTui {
             }
             return None;
         }
-        if self.conversations.open {
+        if self.conversations.open && !matches!(event, Event::Quit) {
             return self.conversation_event(event);
         }
         if self.show_help && !matches!(event, Event::Quit) {
@@ -535,7 +535,7 @@ impl PorygonTui {
                 "Shift+Enter: newline when terminal supports it.",
                 "Paste: insert text without sending.",
                 "Ctrl+C: stop active work.",
-                "Ctrl+C when idle: quit; confirm to discard draft.",
+                "Ctrl+C when idle: save draft and quit (press twice with draft).",
                 "PgUp/PgDn: history. Ctrl+End: latest output.",
                 "Type / for commands. Ctrl+Space: complete.",
                 "/reconnect: inspect. /attach ID: read a run.",

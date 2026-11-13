@@ -241,10 +241,11 @@ impl PorygonTui {
 
 #[derive(Debug)]
 enum Msg {
+    FlushDrafts,
     OpenConversations,
     ConversationsListed(Result<Vec<conversations::Conversation>, String>),
-    LoadConversation(String),
-    ConversationLoaded(String, Result<Vec<ChatMessage>, String>),
+    LoadConversation(String, u64),
+    ConversationLoaded(String, u64, Result<Vec<ChatMessage>, String>),
     Init,
     SendMessage,
     PollConnection,
@@ -337,6 +338,7 @@ impl Application for PorygonTui {
 
     fn subscriptions(&self) -> Sub<Msg> {
         let mut subs = vec![
+            Sub::every(Duration::from_millis(250), || Msg::FlushDrafts),
             Sub::every(Duration::from_secs(3), || Msg::PollConnection),
             Sub::every(Duration::from_secs(2), || Msg::PollStatus),
             Sub::every(Duration::from_millis(500), || Msg::PollApprovals),
