@@ -1,0 +1,34 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.7, pytest-9.0.2, pluggy-1.6.0 -- /home/travers/projects/porygon-ai/porygon-ai/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/travers/projects/porygon-ai/porygon-history-pages/porygon-ai
+configfile: pytest.ini
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 10.0s
+timeout method: signal
+timeout func_only: False
+collecting ... collected 1 item
+
+porygon-history-pages/porygon-ai::test_porygon_native_gpu_composer <- ../../ux-workspace-verification/receipts/candidate-3-native-fixtures/test_workspace_native.py {"artifact_dir": "/home/travers/projects/porygon-ai/ux-workspace-verification/receipts/native-1794592884644949430", "source_root": "/home/travers/projects/porygon-ai/porygon-history-pages/porygon-ai", "artifact_root": "/home/travers/projects/porygon-ai/ux-workspace-verification", "binary_sha256": "2413455fc5bcfab75de8fe551084bb3b16c72b0a3c2230e93d27b154ff0d46fb", "ultty_sha256": "2e6c63cf9b7700af22e0e4c4361aae3e89c7b7760c137a504b34df4134d98fb2", "ulttyctl_sha256": "c12e003170ee864c33bdd8eee8b29c7be9403c735f9ee5941b87a43451a82f2d", "fixture_sha256": "992124033b0d98bf3d2502386ed88c633023cbb5194fb1360bdc4f318bd47888", "gpu_backend_hint": "lavapipe ICD selected when installed; Ultty log retained", "window_sizes_pixels": {"compact": [800, 480], "wide": [1280, 768]}, "messages_received_by_daemon": ["visible-user-body", "draft first\ndraft second"], "real_system_clipboard_multiline_paste": true, "native_ctrl_y_raw_reply_copied_exact": true, "native_review_evidence_copied_json": {"error": null, "result": "native-result-body", "run_id": "native-qual-run", "status": "completed", "verification_reports": [{"artifacts": {"raw_log": "/fixture/native-qual.log"}, "checks": [{"name": "native-qual-check", "passed": true}], "passed": true, "report_type": "qualification", "run_id": "native-qual-run", "summary": "native-verification-summary"}]}, "approval_decision_posts": ["/approvals/pending/native-qual-approval/deny"], "approval_expected_version_request_matched": true, "native_region_text_checks": {"user_body": true, "assistant_body": true, "multiline_draft": true, "busy_enter_did_not_submit": true, "busy_ctrl_c_cancelled_first": true, "assistant_body_at_wide_size": true, "idle_draft_confirmation_shown": true, "porygon_exit_status": 0, "connected_status_label_geometry": [{"text": " Porygon connected", "width_cells": 18.0, "required_cells": 18}]}, "regions_files": ["compact.regions.json", "multiline-draft.regions.json", "wide.regions.json"], "screenshots": ["help-visible.png", "compact.png", "assistant-streaming.png", "multiline-draft.png", "wide.png", "idle-draft-warning.png"]}
+PASSED
+
+=============================== warnings summary ===============================
+: 10044 warnings
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/aiosqlite/core.py:63: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    result = function()
+
+::test_porygon_native_gpu_composer
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+::test_porygon_native_gpu_composer
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/uvicorn/protocols/websockets/websockets_impl.py:17: DeprecationWarning: websockets.server.WebSocketServerProtocol is deprecated
+    from websockets.server import WebSocketServerProtocol
+
+::test_porygon_native_gpu_composer
+::test_porygon_native_gpu_composer
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/websockets/legacy/server.py:1178: DeprecationWarning: remove second argument of ws_handler
+    warnings.warn("remove second argument of ws_handler", DeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+====================== 1 passed, 10048 warnings in 23.20s ======================

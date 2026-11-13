@@ -1,0 +1,36 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.7, pytest-9.0.2, pluggy-1.6.0 -- /home/travers/projects/porygon-ai/porygon-ai/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/travers/projects/porygon-ai/porygon-history-pages/porygon-ai
+configfile: pytest.ini
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 10.0s
+timeout method: signal
+timeout func_only: False
+collecting ... collected 1 item
+
+porygon-history-pages/porygon-ai::test_real_ssh_resize_and_paste <- ../../ux-workspace-verification/ssh/test_ssh.py PASSED
+
+=============================== warnings summary ===============================
+::test_real_ssh_resize_and_paste
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+::test_real_ssh_resize_and_paste
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/uvicorn/protocols/websockets/websockets_impl.py:17: DeprecationWarning: websockets.server.WebSocketServerProtocol is deprecated
+    from websockets.server import WebSocketServerProtocol
+
+::test_real_ssh_resize_and_paste
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/lancedb/__init__.py:289: UserWarning: lance is not fork-safe. If you are using multiprocessing, use spawn instead.
+    warnings.warn(
+
+::test_real_ssh_resize_and_paste
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/websockets/legacy/server.py:1178: DeprecationWarning: remove second argument of ws_handler
+    warnings.warn("remove second argument of ws_handler", DeprecationWarning)
+
+: 16 warnings
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/aiosqlite/core.py:63: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    result = function()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 1 passed, 20 warnings in 15.19s ========================

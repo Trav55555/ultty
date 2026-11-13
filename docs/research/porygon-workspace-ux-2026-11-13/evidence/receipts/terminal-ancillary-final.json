@@ -1,0 +1,10 @@
+{
+  "output": "/home/travers/projects/porygon-ai/ux-workspace-verification/receipts/terminal-1794593212057665193",
+  "claims": {
+    "osc52_system_clipboard_to_paste_exact": true,
+    "split_independent_shell_output": true,
+    "ctrl_click_exact_link_private_opener": true,
+    "grid_selection_copy_internal_spaces_exact": true,
+    "tmux_ansi_fallback_composer_and_draft": true
+  }
+}

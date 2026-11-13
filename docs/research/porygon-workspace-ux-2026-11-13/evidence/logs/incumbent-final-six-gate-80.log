@@ -1,0 +1,546 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.7, pytest-9.0.2, pluggy-1.6.0 -- /home/travers/projects/porygon-ai/porygon-ai/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/travers/projects/porygon-ai/porygon-history-pages/porygon-ai
+configfile: pytest.ini
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 10.0s
+timeout method: signal
+timeout func_only: False
+collecting ... collected 6 items
+
+porygon-history-pages/porygon-ai::test_picker_switch_and_draft_restart <- ../../ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/test_workspace_pty.py FAILED
+porygon-history-pages/porygon-ai::test_work_result_is_visible <- ../../ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/test_workspace_pty.py FAILED
+porygon-history-pages/porygon-ai::test_picker_loads_older_conversations_without_losing_search <- ../../ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/test_workspace_pty.py FAILED
+porygon-history-pages/porygon-ai::test_work_attach_restores_its_conversation_and_isolates_drafts <- ../../ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/test_workspace_pty.py FAILED
+porygon-history-pages/porygon-ai::test_attention_inspects_without_deciding <- ../../ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/test_workspace_pty.py FAILED
+porygon-history-pages/porygon-ai::test_ten_thousand_message_history_remains_interactive <- ../../ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/test_workspace_pty.py FAILED
+
+=================================== FAILURES ===================================
+_____________________ test_picker_switch_and_draft_restart _____________________
+
+mock_context = PorygonContext(project=porygon_test_project, groups=[ai, user])
+mock_database = <porygon.db.engine.Database object at 0x70fa67c7a240>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70fa6c43a090>
+tmp_path = PosixPath('/home/travers/projects/porygon-ai/ux-tmp/pytest-of-travers/pytest-5/test_picker_switch_and_draft_r0')
+
+    @pytest.mark.timeout(60)
+    @pytest.mark.asyncio
+    async def test_picker_switch_and_draft_restart(mock_context, mock_database, monkeypatch, tmp_path):
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        store = ConversationStore()
+        for suffix in ("alpha", "beta"):
+            conv = await store.create_conversation(title=f"qual-{suffix}", conv_id=f"qual-{suffix}")
+            await store.add_message(conv.id, "user", f"history-{suffix}")
+        app, session = daemon(mock_context, monkeypatch)
+        width = int(os.environ.get("PORYGON_ACCEPTANCE_WIDTH", "80"))
+        with PtyApp(binary(), width, app, session) as term:
+            monkeypatch.setenv("PORYGON_FIXTURE_PORT", str(term.listener.getsockname()[1]))
+            term.wait_screen("Message Porygon")
+            term.send(b"local-draft-exact")
+            term.send(b"\x1bOQ")  # xterm F2
+>           term.wait_screen("qual-alpha")
+
+ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/test_workspace_pty.py:60: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <compose_support.PtyApp object at 0x70fa66976990>, needle = 'qual-alpha'
+timeout = 8
+
+    def wait_screen(self, needle, timeout=8):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.collect(.1)
+            if needle in self.screen():
+                return
+>       raise AssertionError(f"screen missing {needle!r}\n{self.screen()}")
+E       AssertionError: screen missing 'qual-alpha'
+E        Porygon connected                                                      F1 help
+E       ┌ScrollView [0%]───────────────────────────────────────────────────────────────┐
+E       │                                                                              │
+E       │ System  13:00                                                                │
+E       │ Type a message to start a conversation.                                      │
+E       │ Use F1 for keys and commands. Your draft stays here while disconnected.      │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       └──────────────────────────────────────────────────────────────────────────────┘
+E       --------------------------------------------------------------------------------
+E       Enter: send | Ctrl+X Enter: newline
+E       │local-draft-exact
+E       │
+E       │
+E       Shift+Enter: newline where supported | / commands
+E       idle
+
+ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/compose_support.py:213: AssertionError
+_________________________ test_work_result_is_visible __________________________
+
+mock_context = PorygonContext(project=porygon_test_project, groups=[ai, user])
+mock_database = <porygon.db.engine.Database object at 0x70fa67b732c0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70fa67b70140>
+
+    @pytest.mark.timeout(45)
+    @pytest.mark.asyncio
+    async def test_work_result_is_visible(mock_context, mock_database, monkeypatch):
+        from porygon.runs import Run, RunStatus, RunStore
+        await RunStore().create_run(Run(
+            id="qual-run-complete", objective="qual-review-objective", status=RunStatus.COMPLETED,
+            result="qual-result-body exact durable result",
+        ))
+        await RunStore().add_verification_report(
+            report_id="qual-report", run_id="qual-run-complete", report_type="fixture-check",
+            passed=True, summary="qual-verification-summary", checks=[{"name": "qual-check", "passed": True}],
+            artifacts={"raw_log": "/fixture/qual-raw-evidence.log"},
+        )
+        app, session = daemon(mock_context, monkeypatch)
+        with PtyApp(binary(), int(os.environ.get("PORYGON_ACCEPTANCE_WIDTH", "80")), app, session) as term:
+            term.wait_screen("Message Porygon")
+            term.send(b"\x1bOR")  # xterm F3
+>           term.wait_screen("qual-review-objective")
+
+ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/test_workspace_pty.py:112: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <compose_support.PtyApp object at 0x70fac61b0530>
+needle = 'qual-review-objective', timeout = 8
+
+    def wait_screen(self, needle, timeout=8):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.collect(.1)
+            if needle in self.screen():
+                return
+>       raise AssertionError(f"screen missing {needle!r}\n{self.screen()}")
+E       AssertionError: screen missing 'qual-review-objective'
+E        Porygon connected                                                      F1 help
+E       ┌ScrollView [0%]───────────────────────────────────────────────────────────────┐
+E       │                                                                              │
+E       │ System  13:00                                                                │
+E       │ Type a message to start a conversation.                                      │
+E       │ Use F1 for keys and commands. Your draft stays here while disconnected.      │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       └──────────────────────────────────────────────────────────────────────────────┘
+E       --------------------------------------------------------------------------------
+E       Enter: send | Ctrl+X Enter: newline
+E       │Message Porygon
+E       │
+E       │
+E       Shift+Enter: newline where supported | / commands
+E       idle
+
+ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/compose_support.py:213: AssertionError
+_________ test_picker_loads_older_conversations_without_losing_search __________
+
+mock_context = PorygonContext(project=porygon_test_project, groups=[ai, user])
+mock_database = <porygon.db.engine.Database object at 0x70fa656c4c20>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70fac6356690>
+
+    @pytest.mark.timeout(60)
+    @pytest.mark.asyncio
+    async def test_picker_loads_older_conversations_without_losing_search(mock_context, mock_database, monkeypatch):
+        store = ConversationStore()
+        await store.create_conversation(title="qual-older-target", conv_id="qual-older-target")
+        await store.add_message("qual-older-target", "user", "qual-older-history-body")
+        for index in range(201):
+            await store.create_conversation(title=f"qual-newer-{index:03d}", conv_id=f"qual-newer-{index:03d}")
+        app, session = daemon(mock_context, monkeypatch)
+        with PtyApp(binary(), int(os.environ.get("PORYGON_ACCEPTANCE_WIDTH", "80")), app, session) as term:
+            term.wait_screen("Message Porygon")
+            term.send(b"\x1bOQ")
+>           term.wait_screen("200 loaded")
+
+ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/test_workspace_pty.py:140: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <compose_support.PtyApp object at 0x70fac5db1070>, needle = '200 loaded'
+timeout = 8
+
+    def wait_screen(self, needle, timeout=8):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.collect(.1)
+            if needle in self.screen():
+                return
+>       raise AssertionError(f"screen missing {needle!r}\n{self.screen()}")
+E       AssertionError: screen missing '200 loaded'
+E        Porygon connected                                                      F1 help
+E       ┌ScrollView [0%]───────────────────────────────────────────────────────────────┐
+E       │                                                                              │
+E       │ System  13:00                                                                │
+E       │ Type a message to start a conversation.                                      │
+E       │ Use F1 for keys and commands. Your draft stays here while disconnected.      │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       └──────────────────────────────────────────────────────────────────────────────┘
+E       --------------------------------------------------------------------------------
+E       Enter: send | Ctrl+X Enter: newline
+E       │Message Porygon
+E       │
+E       │
+E       Shift+Enter: newline where supported | / commands
+E       idle
+
+ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/compose_support.py:213: AssertionError
+________ test_work_attach_restores_its_conversation_and_isolates_drafts ________
+
+mock_context = PorygonContext(project=porygon_test_project, groups=[ai, project, user, integrations])
+mock_database = <porygon.db.engine.Database object at 0x70fac5ab0380>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70fac5bf3ec0>
+
+    @pytest.mark.timeout(60)
+    @pytest.mark.asyncio
+    async def test_work_attach_restores_its_conversation_and_isolates_drafts(mock_context, mock_database, monkeypatch):
+        from porygon.runs import Run, RunStatus, RunStore
+        store = ConversationStore()
+        for suffix in ("a", "b"):
+            await store.create_conversation(title=f"attach-{suffix}", conv_id=f"attach-{suffix}")
+            await store.add_message(f"attach-{suffix}", "user", f"attach-history-{suffix}")
+        await RunStore().create_run(Run(id="attach-run-b", objective="attach-work-b", status=RunStatus.COMPLETED,
+                                       result="attach-result-b", metadata={"conversation_id": "attach-b"}))
+        app, session = daemon(mock_context, monkeypatch)
+        with PtyApp(binary(), int(os.environ.get("PORYGON_ACCEPTANCE_WIDTH", "80")), app, session) as term:
+            term.wait_screen("Message Porygon")
+            for suffix in ("a", "b"):
+                term.send(b"\x1bOQ")
+                term.send(f"attach-{suffix}".encode())
+                term.send(b"\r")
+>               term.wait_screen(f"attach-history-{suffix}")
+
+ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/test_workspace_pty.py:170: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <compose_support.PtyApp object at 0x70fac592c260>
+needle = 'attach-history-a', timeout = 8
+
+    def wait_screen(self, needle, timeout=8):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.collect(.1)
+            if needle in self.screen():
+                return
+>       raise AssertionError(f"screen missing {needle!r}\n{self.screen()}")
+E       AssertionError: screen missing 'attach-history-a'
+E        Porygon connected                                                      F1 help
+E       ┌ScrollView [100%]─────────────────────────────────────────────────────────────┐
+E       │ You  13:00                                                                   │
+E       │ attach-a                                                                     │
+E       │                                                                              │
+E       │ System  13:00                                                                │
+E       │ Run native-cbc7ba537a2a37f35448d3d1de0dac13. If disconnected, use /attach na │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │ Porygon  13:00                                                               │
+E       │ assistant-body-first|                                                        │
+E       │                                                                              │
+E       │ Working...                                                                   │
+E       │                                                                              │
+E       │                                                                              │
+E       └──────────────────────────────────────────────────────────────────────────────┘
+E       --------------------------------------------------------------------------------
+E       Working | draft kept here | Ctrl+C: stop
+E       │Message Porygon
+E       │
+E       │
+E       Shift+Enter: newline where supported | / commands
+E       streaming: 1 tokens
+
+ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/compose_support.py:213: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    porygon.server.routes.agent:agent.py:900 WebSocket error: Cannot call "receive" once a disconnect message has been received.
+___________________ test_attention_inspects_without_deciding ___________________
+
+mock_context = PorygonContext(project=porygon_test_project, groups=[ai, user])
+mock_database = <porygon.db.engine.Database object at 0x70fac5ab3b90>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70fac5ab08f0>
+
+    @pytest.mark.timeout(45)
+    @pytest.mark.asyncio
+    async def test_attention_inspects_without_deciding(mock_context, mock_database, monkeypatch):
+        from porygon.async_tasks.store import TaskStore
+        store = TaskStore()
+        pending = {
+            "id": "qual-approval", "source": "tool:write_file", "objective": "qual-attention-action",
+            "priority": "HIGH", "context": {"tool_name": "write_file", "params": {"path": "/fixture/qual-file", "content": "qual-exact-body"}, "run_id": "qual-pending-run"},
+        }
+        app, session = daemon(mock_context, monkeypatch)
+        app.state.task_store = store
+        decisions = []
+        decision_bodies = []
+    
+        @app.middleware("http")
+        async def observe_decisions(request, call_next):
+            if request.method == "POST" and "/approvals/" in request.url.path:
+                decisions.append(request.url.path)
+                decision_bodies.append(json.loads(await request.body()))
+            return await call_next(request)
+    
+        with PtyApp(binary(), int(os.environ.get("PORYGON_ACCEPTANCE_WIDTH", "80")), app, session) as term:
+            term.wait_screen("Message Porygon")
+            await store.add_pending_approval(pending, scope="tool_call")
+            expected_version = (await store.get_pending_approval("qual-approval"))["decision_version"]
+            term.send(b"\x1bOS")
+            term.wait_screen("qual-attention-action")
+            term.save_stage("attention-list")
+            term.send(b"\r")
+            term.wait_screen("write_file")
+            seen_path = seen_content = False
+            for _ in range(30):
+                screen = term.screen()
+                seen_path |= "/fixture/qual-file" in screen
+                seen_content |= "qual-exact-body" in screen
+                if seen_path and seen_content:
+                    break
+                term.send(b"\x1b[B", settle=.03)
+>           assert seen_path and seen_content, "exact approval args not reachable by scrolling"
+E           AssertionError: exact approval args not reachable by scrolling
+E           assert (False)
+
+ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/test_workspace_pty.py:231: AssertionError
+____________ test_ten_thousand_message_history_remains_interactive _____________
+
+mock_context = PorygonContext(project=porygon_test_project, groups=[ai, user])
+mock_database = <porygon.db.engine.Database object at 0x70fac5cc0950>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x70fac5cddbb0>
+
+    @pytest.mark.timeout(60)
+    @pytest.mark.asyncio
+    async def test_ten_thousand_message_history_remains_interactive(mock_context, mock_database, monkeypatch):
+        from sqlalchemy import text
+        store = ConversationStore()
+        await store.create_conversation(title="qual-long-history", conv_id="qual-long")
+        base = datetime(2026, 1, 1)
+        records = [{"id": f"long-{i}", "conversation_id": "qual-long",
+                    "role": "user" if i % 2 == 0 else "assistant",
+                    "content": f"history-{i:05d}-boundary", "created_at": base + timedelta(seconds=i)}
+                   for i in range(10000)]
+        async with mock_database.begin() as conn:
+            await conn.execute(text("INSERT INTO messages (id,conversation_id,role,content,created_at) VALUES (:id,:conversation_id,:role,:content,:created_at)"), records)
+            await conn.execute(text("UPDATE conversations SET message_count=10000 WHERE id='qual-long'"))
+        app, session = daemon(mock_context, monkeypatch)
+        with PtyApp(binary(), int(os.environ.get("PORYGON_ACCEPTANCE_WIDTH", "80")), app, session) as term:
+            term.wait_screen("Message Porygon")
+            term.send(b"\x1bOQ")
+>           term.wait_screen("qual-long-history")
+
+ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/test_workspace_pty.py:268: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <compose_support.PtyApp object at 0x70fac61f84d0>
+needle = 'qual-long-history', timeout = 8
+
+    def wait_screen(self, needle, timeout=8):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.collect(.1)
+            if needle in self.screen():
+                return
+>       raise AssertionError(f"screen missing {needle!r}\n{self.screen()}")
+E       AssertionError: screen missing 'qual-long-history'
+E        Porygon connected                                                      F1 help
+E       ┌ScrollView [0%]───────────────────────────────────────────────────────────────┐
+E       │                                                                              │
+E       │ System  13:00                                                                │
+E       │ Type a message to start a conversation.                                      │
+E       │ Use F1 for keys and commands. Your draft stays here while disconnected.      │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       │                                                                              │
+E       └──────────────────────────────────────────────────────────────────────────────┘
+E       --------------------------------------------------------------------------------
+E       Enter: send | Ctrl+X Enter: newline
+E       │Message Porygon
+E       │
+E       │
+E       Shift+Enter: newline where supported | / commands
+E       idle
+
+ux-workspace-verification/receipts/incumbent-final-six-gate-80-fixtures/compose_support.py:213: AssertionError
+=============================== warnings summary ===============================
+: 10444 warnings
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/aiosqlite/core.py:63: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    result = function()
+
+::test_picker_switch_and_draft_restart
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+::test_picker_switch_and_draft_restart
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/uvicorn/protocols/websockets/websockets_impl.py:17: DeprecationWarning: websockets.server.WebSocketServerProtocol is deprecated
+    from websockets.server import WebSocketServerProtocol
+
+::test_picker_switch_and_draft_restart
+::test_work_result_is_visible
+::test_picker_loads_older_conversations_without_losing_search
+::test_work_attach_restores_its_conversation_and_isolates_drafts
+::test_attention_inspects_without_deciding
+::test_ten_thousand_message_history_remains_interactive
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/lancedb/__init__.py:289: UserWarning: lance is not fork-safe. If you are using multiprocessing, use spawn instead.
+    warnings.warn(
+
+::test_work_attach_restores_its_conversation_and_isolates_drafts
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/websockets/legacy/server.py:1178: DeprecationWarning: remove second argument of ws_handler
+    warnings.warn("remove second argument of ws_handler", DeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED porygon-history-pages/porygon-ai::test_picker_switch_and_draft_restart - AssertionError: screen missing 'qual-alpha'
+ Porygon connected                                                      F1 help
+┌ScrollView [0%]───────────────────────────────────────────────────────────────┐
+│                                                                              │
+│ System  13:00                                                                │
+│ Type a message to start a conversation.                                      │
+│ Use F1 for keys and commands. Your draft stays here while disconnected.      │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+--------------------------------------------------------------------------------
+Enter: send | Ctrl+X Enter: newline
+│local-draft-exact
+│
+│
+Shift+Enter: newline where supported | / commands
+idle
+FAILED porygon-history-pages/porygon-ai::test_work_result_is_visible - AssertionError: screen missing 'qual-review-objective'
+ Porygon connected                                                      F1 help
+┌ScrollView [0%]───────────────────────────────────────────────────────────────┐
+│                                                                              │
+│ System  13:00                                                                │
+│ Type a message to start a conversation.                                      │
+│ Use F1 for keys and commands. Your draft stays here while disconnected.      │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+--------------------------------------------------------------------------------
+Enter: send | Ctrl+X Enter: newline
+│Message Porygon
+│
+│
+Shift+Enter: newline where supported | / commands
+idle
+FAILED porygon-history-pages/porygon-ai::test_picker_loads_older_conversations_without_losing_search - AssertionError: screen missing '200 loaded'
+ Porygon connected                                                      F1 help
+┌ScrollView [0%]───────────────────────────────────────────────────────────────┐
+│                                                                              │
+│ System  13:00                                                                │
+│ Type a message to start a conversation.                                      │
+│ Use F1 for keys and commands. Your draft stays here while disconnected.      │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+--------------------------------------------------------------------------------
+Enter: send | Ctrl+X Enter: newline
+│Message Porygon
+│
+│
+Shift+Enter: newline where supported | / commands
+idle
+FAILED porygon-history-pages/porygon-ai::test_work_attach_restores_its_conversation_and_isolates_drafts - AssertionError: screen missing 'attach-history-a'
+ Porygon connected                                                      F1 help
+┌ScrollView [100%]─────────────────────────────────────────────────────────────┐
+│ You  13:00                                                                   │
+│ attach-a                                                                     │
+│                                                                              │
+│ System  13:00                                                                │
+│ Run native-cbc7ba537a2a37f35448d3d1de0dac13. If disconnected, use /attach na │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│ Porygon  13:00                                                               │
+│ assistant-body-first|                                                        │
+│                                                                              │
+│ Working...                                                                   │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+--------------------------------------------------------------------------------
+Working | draft kept here | Ctrl+C: stop
+│Message Porygon
+│
+│
+Shift+Enter: newline where supported | / commands
+streaming: 1 tokens
+FAILED porygon-history-pages/porygon-ai::test_attention_inspects_without_deciding - AssertionError: exact approval args not reachable by scrolling
+assert (False)
+FAILED porygon-history-pages/porygon-ai::test_ten_thousand_message_history_remains_interactive - AssertionError: screen missing 'qual-long-history'
+ Porygon connected                                                      F1 help
+┌ScrollView [0%]───────────────────────────────────────────────────────────────┐
+│                                                                              │
+│ System  13:00                                                                │
+│ Type a message to start a conversation.                                      │
+│ Use F1 for keys and commands. Your draft stays here while disconnected.      │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+--------------------------------------------------------------------------------
+Enter: send | Ctrl+X Enter: newline
+│Message Porygon
+│
+│
+Shift+Enter: newline where supported | / commands
+idle
+================= 6 failed, 10453 warnings in 64.70s (0:01:04) =================

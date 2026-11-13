@@ -1,0 +1,12 @@
+CREATE TABLE
+INSERT 0 2
+ALTER TABLE
+UPDATE 2
+ALTER TABLE
+DO
+ claimed 
+---------
+       1
+(1 row)
+
+image_id=sha256:80f4c7a5e91618546dce5b4fe60cf03b14c0f9efa7e40157278d122772ced8d2

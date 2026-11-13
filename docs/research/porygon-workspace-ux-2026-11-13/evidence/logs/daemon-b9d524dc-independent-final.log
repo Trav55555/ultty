@@ -1,0 +1,23 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.7, pytest-9.0.2, pluggy-1.6.0 -- /home/travers/projects/porygon-ai/porygon-ai/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/travers/projects/porygon-ai/porygon-history-pages/porygon-ai
+configfile: pytest.ini
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 10.0s
+timeout method: signal
+timeout func_only: False
+collecting ... collected 4 items
+
+porygon-history-pages/porygon-ai::test_replacement_after_validation_before_claim_never_executes <- ../../ux-workspace-verification/receipts/daemon-b9d524dc-independent-fixtures/test_independent_daemon_claims.py PASSED
+porygon-history-pages/porygon-ai::test_deny_wins_while_approve_waits_before_claim <- ../../ux-workspace-verification/receipts/daemon-b9d524dc-independent-fixtures/test_independent_daemon_claims.py PASSED
+porygon-history-pages/porygon-ai::test_claimed_approve_rejects_competing_deny <- ../../ux-workspace-verification/receipts/daemon-b9d524dc-independent-fixtures/test_independent_daemon_claims.py PASSED
+porygon-history-pages/porygon-ai::test_versioned_manual_scope_never_falls_back_to_heartbeat <- ../../ux-workspace-verification/receipts/daemon-b9d524dc-independent-fixtures/test_independent_daemon_claims.py PASSED
+
+=============================== warnings summary ===============================
+: 10 warnings
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/aiosqlite/core.py:63: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    result = function()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 4 passed, 10 warnings in 4.01s ========================
