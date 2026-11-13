@@ -1,0 +1,7 @@
+2026-11-12T23:48:07.278496Z  INFO ultty::control::server: Control server listening on "/home/travers/projects/tui-terminal/target/v0/ultty-ctl-3023105.sock"
+2026-11-12T23:48:07.299895Z  INFO ultty::protocol::server: Protocol server listening for tab 0 on "/home/travers/projects/tui-terminal/target/v0/un-f41a1a177425974d/ultty-3023105-tab0.sock"
+2026-11-12T23:48:07.315771Z  INFO ultty::protocol::server: Accepted connection from (unnamed) on tab 0, session 1
+2026-11-12T23:48:07.315860Z  INFO ultty::protocol::server: Session 1 bound to pane 0
+2026-11-12T23:48:07.315907Z  INFO ultty::protocol::session::commands: Session 1 client hello: version=1, caps=0x1ff1
+2026-11-12T23:48:15.229425Z  INFO ultty::control::server: Control server shut down
+2026-11-12T23:48:15.243245Z  INFO ultty::protocol::server: Protocol server shut down

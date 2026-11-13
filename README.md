@@ -71,6 +71,14 @@ Platform status: Ultty is Unix-first. Release builds exist for Linux x86_64 only
 
 Linux desktop packages install `dist/ultty.desktop` and the Ultty app icon from the hicolor icon set. Brand asset usage is documented in [docs/brand.md](docs/brand.md).
 
+### Keep a session running after closing its window
+
+`ultty-session host work` starts a persistent owner. Open a viewer with
+`ultty --attach work`, or use `--observe` for read-only access. SSH attachment
+uses a separately granted credential and an installed remote helper. See
+[persistent sessions](docs/SESSION_ATTACHMENT.md) for builds, authority,
+limits, and detach/reconnect behavior. This mode is available from source.
+
 ### Installing a release build
 
 Release builds exist for Linux x86_64 only. On other platforms, build from
@@ -126,12 +134,12 @@ Native apps auto-detect whether they're talking to Ultty. On an Ultty tab's own 
 
 ## Privacy
 
-No account, no telemetry, no network calls. Ultty does not phone home,
-check for updates, or report crashes; it contains no networking code. The
-network is reached only by programs you run in it, and by a link you
-Ctrl+click, which Ultty hands to your browser. Its sockets (the control
-socket that `ulttyctl` uses and each tab's native socket) are local Unix
-sockets that only your user can open.
+No account or telemetry. Ultty does not phone home, check for updates, or
+report crashes. Its control, native application and session attachment sockets
+are local Unix sockets restricted to your user. Explicit `--ssh HOST` attachment
+launches your SSH client and the remote session helper; Ultty opens no public
+network listener. Programs you run can use the network, and Ctrl+clicking a link
+hands it to your browser.
 
 ## ANSI Compatibility
 

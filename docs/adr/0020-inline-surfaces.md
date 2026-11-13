@@ -165,9 +165,8 @@ A surface with no visible row builds no vertices. Scrolling the viewport
 moves surfaces, so the cached native vertex buffers are rebuilt when any
 anchor's visual row changed (`scroll_dirty`), not only when a scene did.
 The grid text under a live surface is drawn and the surface's opaque root
-background covers it, as the full-scene root does today. Surfaces follow
-the in-band rule for panes: a tab with one pane. Lifting that waits for
-sessions mapping to panes (A1 follow-up).
+background covers it, as the full-scene root does today. Surfaces pair with sessions bound to their originating pane. Split-pane
+rendering clips each surface to that pane.
 
 ### 5. Transport
 
@@ -238,8 +237,7 @@ output, prose, a diff card, while a loop prints shell output under it.
 - Row grows by eight bytes on screen; scrollback rows do not grow.
 - A card that streams while the user selects over it drops the selection.
 - A surface's height cannot change after creation (see open questions).
-- Surfaces inherit the single-pane limit of in-band sessions until sessions
-  map to panes.
+- Sessions and surfaces are bound to their originating pane.
 
 ## Slices
 

@@ -169,6 +169,9 @@ pub(crate) fn render_view_to_native(
     if let Some(key) = child.native_key() {
         crate::backend::native_diff::record_native_key(region_id, key);
     }
+    if let Some(widget_id) = child.widget_id() {
+        crate::backend::native_diff::record_widget(region_id, widget_id, child.is_focusable());
+    }
     // A hidden widget is an empty `display: none` region, left out of the
     // accessibility tree too.
     let Some((content, semantics)) = shown else {

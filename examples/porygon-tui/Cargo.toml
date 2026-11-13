@@ -5,6 +5,9 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
+# Keep this standalone client independent even inside a nested git worktree.
+[workspace]
+
 [dependencies]
 ulttui = { path = "../../crates/ulttui" }
 ultty-protocol = { path = "../../crates/ultty-protocol" }

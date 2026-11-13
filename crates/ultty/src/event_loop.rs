@@ -23,6 +23,7 @@
 //! support.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 #[cfg(target_os = "linux")]
 use std::fs;
 use std::io;
@@ -135,19 +136,109 @@ pub enum TerminalEvent {
     },
     /// The program reported its progress (OSC 9;4).
     Progress(crate::protocol::ansi::Progress),
+    /// Authoritative program records changed. Read the current snapshot;
+    /// intermediate reports can be coalesced between calls to `process`.
+    ProgramStatusChanged {
+        /// Current generation in the terminal-owned status store.
+        generation: u64,
+        /// Cause of the latest change, not a complete mutation history.
+        reason: ultty_vt::program_status::StatusChangeReason,
+    },
     /// The shell started running a command (OSC 133;C).
     CommandStarted,
     /// The command finished (OSC 133;D), with the exit code the shell
     /// reported, if any.
     CommandFinished { exit_code: Option<i32> },
+    /// A command submitted through the fenced shell API completed.
+    ShellCommandFinished {
+        /// Submission identity, independent of shell row-mark counters.
+        sequence: u64,
+        /// Exit code from its matched OSC 133 C/D lifecycle.
+        exit_code: Option<i32>,
+    },
+}
+
+/// Authoritative result of one fenced shell submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellCommandOutcome {
+    /// A matching start and finish were observed after the reservation.
+    Finished {
+        /// The shell's reported exit code, if supplied.
+        exit_code: Option<i32>,
+    },
+    /// Prompt/reset/process exit invalidated the pending reservation.
+    Cancelled,
+}
+
+#[derive(Debug)]
+struct ShellReservation {
+    sequence: u64,
+    started: bool,
+}
+
+#[derive(Debug, Default)]
+struct ShellCommands {
+    next_sequence: u64,
+    prompt_ready: bool,
+    pending: Option<ShellReservation>,
+    results: VecDeque<(u64, ShellCommandOutcome)>,
+}
+
+impl ShellCommands {
+    fn finish(&mut self, outcome: ShellCommandOutcome) {
+        if let Some(pending) = self.pending.take() {
+            if self.results.len() == 64 {
+                self.results.pop_front();
+            }
+            self.results.push_back((pending.sequence, outcome));
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.prompt_ready = false;
+        self.finish(ShellCommandOutcome::Cancelled);
+    }
+
+    fn observe(&mut self, action: &crate::protocol::ansi::Action) {
+        use crate::protocol::ansi::Action;
+        match action {
+            Action::PromptStart | Action::FullReset | Action::SoftReset => self.cancel(),
+            Action::CommandStart => {
+                // A fresh editable prompt cannot inherit an older reservation.
+                self.finish(ShellCommandOutcome::Cancelled);
+                self.prompt_ready = true;
+            }
+            Action::CommandExecuted => {
+                self.prompt_ready = false;
+                if self.pending.as_ref().is_some_and(|pending| pending.started) {
+                    self.finish(ShellCommandOutcome::Cancelled);
+                } else if let Some(pending) = self.pending.as_mut() {
+                    pending.started = true;
+                }
+            }
+            Action::CommandFinished(exit_code) => {
+                if self.pending.as_ref().is_some_and(|pending| pending.started) {
+                    self.finish(ShellCommandOutcome::Finished {
+                        exit_code: *exit_code,
+                    });
+                }
+            }
+            Action::Print(_) => self.prompt_ready = false,
+            _ => {}
+        }
+    }
 }
 
 /// State shared between the UI thread and a terminal's I/O thread.
 struct State {
+    shell_commands: ShellCommands,
+    attached_exited: bool,
     terminal: Terminal,
     events: Vec<TerminalEvent>,
     /// Output was parsed since the UI last collected events.
     output_pending: bool,
+    /// Status changed without necessarily changing any grid pixels.
+    status_pending: bool,
     bytes_since_collect: usize,
     /// The PTY reported end of file or an error; the reader has stopped.
     closed: bool,
@@ -178,7 +269,11 @@ impl State {
 
     /// Whether the UI has anything to collect.
     fn ready(&self) -> bool {
-        self.output_pending || !self.events.is_empty() || self.closed || self.has_in_band()
+        self.output_pending
+            || self.status_pending
+            || !self.events.is_empty()
+            || self.closed
+            || self.has_in_band()
     }
 }
 
@@ -262,7 +357,19 @@ impl Deref for TerminalGuard<'_> {
 
 impl DerefMut for TerminalGuard<'_> {
     fn deref_mut(&mut self) -> &mut Terminal {
+        // Conservative invalidation: even a mutable borrow which makes no
+        // change is cheaper than missing a viewer-visible local mutation.
+        self.state.generation = self.state.generation.wrapping_add(1);
         &mut self.state.terminal
+    }
+}
+
+impl TerminalGuard<'_> {
+    /// Authoritative observation generation at this locked snapshot boundary.
+    /// Parsing, stream closure and local mutable access advance it, independently
+    /// of coalesced/lost display events. Scoped to this terminal's lifetime.
+    pub fn snapshot_generation(&self) -> u64 {
+        self.state.generation
     }
 }
 
@@ -316,6 +423,10 @@ pub struct EventLoop {
     exit_seen_at: Option<Instant>,
     /// Whether `ChildExited` has gone out. It goes out once.
     exit_reported: bool,
+    /// Last status generation delivered, independent of the lossy event queue.
+    status_generation: u64,
+    /// Last fenced result announced; the bounded result store is authoritative.
+    shell_result_sequence: u64,
     /// [`Terminal::uid`] of the terminal this loop drives; readable without
     /// taking the terminal lock.
     terminal_uid: u64,
@@ -356,9 +467,12 @@ impl EventLoop {
         terminal.set_inline_anchors(true);
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
+                shell_commands: ShellCommands::default(),
+                attached_exited: false,
                 terminal,
                 events: Vec::new(),
                 output_pending: false,
+                status_pending: false,
                 bytes_since_collect: 0,
                 closed: false,
                 generation: 0,
@@ -401,6 +515,8 @@ impl EventLoop {
             last_drain_bytes: 0,
             exit_seen_at: None,
             exit_reported: false,
+            status_generation: 0,
+            shell_result_sequence: 0,
             terminal_uid,
         })
     }
@@ -442,9 +558,20 @@ impl EventLoop {
         self.terminal()
     }
 
+    /// Observe whether a snapshot may have changed without consuming events.
+    pub fn snapshot_generation(&self) -> u64 {
+        self.shared.lock().generation
+    }
+
     /// Check if the child process has exited.
     pub fn has_exited(&self) -> bool {
         self.child.has_exited()
+    }
+
+    /// Whether the child exit was reported after the bounded final-output drain.
+    /// Owners must keep the PTY and its events until this boundary.
+    pub fn exit_drained(&self) -> bool {
+        self.exit_reported
     }
 
     /// Get the PTY master file descriptor.
@@ -503,7 +630,9 @@ impl EventLoop {
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
         let cell = {
             let mut terminal = self.terminal();
-            terminal.resize(Dimensions::new(cols, rows));
+            if terminal.dimensions() != Dimensions::new(cols, rows) {
+                terminal.resize(Dimensions::new(cols, rows));
+            }
             terminal.cell_pixel_size()
         };
         // Reflow rebuilt the scrollback and freed the old rows.
@@ -518,7 +647,92 @@ impl EventLoop {
     /// Fails once the PTY has closed, or when the child has stopped reading
     /// and [`MAX_OUTBOUND`] bytes are already waiting.
     pub fn send_input(&mut self, data: &[u8]) -> io::Result<()> {
-        self.enqueue(|state| state.outbound.extend_from_slice(data), data.len())
+        self.enqueue(
+            |state| {
+                if !data.is_empty() {
+                    // Further typing may edit the submitted line or interrupt
+                    // its program. Its eventual C/D is no longer attributable.
+                    state.shell_commands.cancel();
+                }
+                state.outbound.extend_from_slice(data);
+            },
+            data.len(),
+        )
+    }
+
+    /// Atomically submit one printable shell line at an observed empty prompt.
+    ///
+    /// Requires OSC 133 B, no subsequent editable input/output, an idle shell,
+    /// an empty input queue and no pending submission. Acceptance only means
+    /// queued; query `shell_command_result` for the matched completion.
+    pub fn submit_shell_command(&mut self, command: &str) -> io::Result<u64> {
+        if command.trim().is_empty() || command.chars().any(char::is_control) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "command must be one nonempty printable shell line",
+            ));
+        }
+        let len = command
+            .len()
+            .checked_add(1)
+            .filter(|len| *len <= MAX_OUTBOUND)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "command exceeds PTY input budget",
+                )
+            })?;
+        let sequence;
+        {
+            let mut state = self.shared.lock();
+            if state.closed || state.attached_exited || self.child.has_exited() {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "PTY closed"));
+            }
+            if !state.shell_commands.prompt_ready
+                || state.shell_commands.pending.is_some()
+                || !state.outbound.is_empty()
+                || state.terminal.is_alternate_screen()
+                || state.terminal.shell_integration().command_executing
+                || self.child.pty().unread_bytes().unwrap_or(1) != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "no observed empty shell prompt",
+                ));
+            }
+            sequence = state
+                .shell_commands
+                .next_sequence
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("shell submission sequence exhausted"))?;
+            // Capacity and every precondition are checked before reservation.
+            state.outbound.reserve(len);
+            state.outbound.extend_from_slice(command.as_bytes());
+            state.outbound.extend_from_slice(b"\n");
+            state.shell_commands.next_sequence = sequence;
+            state.shell_commands.prompt_ready = false;
+            state.shell_commands.pending = Some(ShellReservation {
+                sequence,
+                started: false,
+            });
+        }
+        if let Err(error) = self.reader_poller.notify() {
+            // It is already accepted. Returning a retryable error here could
+            // duplicate a command the reader consumed before notify failed.
+            tracing::warn!("accepted shell submission wake failed: {error}");
+        }
+        Ok(sequence)
+    }
+
+    /// Result for a submitted sequence, retained for the most recent 64 results.
+    /// `None` means pending, unknown, or older than the retained window.
+    pub fn shell_command_result(&self, sequence: u64) -> Option<ShellCommandOutcome> {
+        self.shared
+            .lock()
+            .shell_commands
+            .results
+            .iter()
+            .find_map(|(id, outcome)| (*id == sequence).then_some(*outcome))
     }
 
     /// Take the in-band protocol data parsed since the last call, if any.
@@ -624,6 +838,7 @@ impl EventLoop {
                 state.output_pending = false;
                 events.push(TerminalEvent::Redraw);
             }
+            state.status_pending = false;
             events.append(&mut state.events);
             self.last_drain_bytes = std::mem::take(&mut state.bytes_since_collect);
             state.closed
@@ -635,14 +850,47 @@ impl EventLoop {
         // starved I/O thread may not have read the last chunk yet), and in
         // any case after EXIT_DRAIN_CAP. waitpid alone sees the exit while
         // the final chunk can still be unread.
+        let mut exited_status = None;
         if self.child.try_wait().map_err(io::Error::other)? {
             let seen_at = *self.exit_seen_at.get_or_insert_with(Instant::now);
             let unread = || self.child.pty().unread_bytes().unwrap_or(0);
             let report = !self.exit_reported && exit_report_due(closed, seen_at.elapsed(), unread);
             if report {
                 self.exit_reported = true;
-                if let Some(status) = self.child.exit_status() {
-                    events.push(TerminalEvent::ChildExited { status });
+                let mut state = self.shared.lock();
+                state.attached_exited = true;
+                state.shell_commands.cancel();
+                state.terminal.process_exited();
+                state.generation = state.generation.wrapping_add(1);
+                exited_status = self.child.exit_status();
+            }
+        }
+        let status = {
+            let state = self.shared.lock();
+            let status = state.terminal.program_status();
+            (status.generation(), status.reason())
+        };
+        if status.0 != self.status_generation {
+            self.status_generation = status.0;
+            events.push(TerminalEvent::ProgramStatusChanged {
+                generation: status.0,
+                reason: status.1,
+            });
+        }
+        if let Some(status) = exited_status {
+            events.push(TerminalEvent::ChildExited { status });
+        }
+        {
+            let state = self.shared.lock();
+            for (sequence, outcome) in &state.shell_commands.results {
+                if *sequence > self.shell_result_sequence {
+                    if let ShellCommandOutcome::Finished { exit_code } = outcome {
+                        events.push(TerminalEvent::ShellCommandFinished {
+                            sequence: *sequence,
+                            exit_code: *exit_code,
+                        });
+                    }
+                    self.shell_result_sequence = *sequence;
                 }
             }
         }
@@ -893,7 +1141,10 @@ fn drain(
     let mut read_batches = 0usize;
     let mut read_bytes = 0usize;
     loop {
-        let n = pty.read(buf)?;
+        // The master is nonblocking. Reading and applying its bytes share
+        // submit's lock, so drained-but-unparsed old C/D markers cannot be
+        // mistaken for a newly reserved command.
+        let (n, urgent) = read_and_parse(shared, parser, buf, |buf| pty.read(buf))?;
         if n == 0 {
             if let Some(start) = start.filter(|_| read_bytes > 0) {
                 tracing::info!(
@@ -908,28 +1159,41 @@ fn drain(
         }
         read_batches += 1;
         read_bytes += n;
-        let urgent = {
-            let mut state = shared.lock();
-            let history_before = state.terminal.buffer().history_len();
-            parse_into(&mut state, parser, &buf[..n]);
-            if history_before.saturating_sub(state.terminal.buffer().history_len())
-                >= crate::heap_trim::HISTORY_DROP_LINES
-            {
-                crate::heap_trim::request();
-            }
-            let hold = state.holds_responses();
-            for response in state.terminal.take_responses() {
-                if hold {
-                    state.held_responses.extend_from_slice(&response);
-                } else {
-                    state.outbound.extend_from_slice(&response);
-                }
-            }
-            !state.events.is_empty() || state.has_in_band()
-        };
         flush_outbound(pty, shared)?;
         wakes.output(shared, urgent);
     }
+}
+
+/// Read once and apply under the input reservation lock. Production readers
+/// must be nonblocking; extraction permits deterministic read/parse race tests.
+fn read_and_parse(
+    shared: &Shared,
+    parser: &mut AnsiParser,
+    buf: &mut [u8],
+    read: impl FnOnce(&mut [u8]) -> Result<usize, PtyError>,
+) -> Result<(usize, bool), PtyError> {
+    let mut state = shared.lock();
+    let n = read(buf)?;
+    if n == 0 {
+        return Ok((0, false));
+    }
+    let history_before = state.terminal.buffer().history_len();
+    parse_into(&mut state, parser, &buf[..n]);
+    if history_before.saturating_sub(state.terminal.buffer().history_len())
+        >= crate::heap_trim::HISTORY_DROP_LINES
+    {
+        crate::heap_trim::request();
+    }
+    let hold = state.holds_responses();
+    for response in state.terminal.take_responses() {
+        if hold {
+            state.held_responses.extend_from_slice(&response);
+        } else {
+            state.outbound.extend_from_slice(&response);
+        }
+    }
+    let urgent = state.status_pending || !state.events.is_empty() || state.has_in_band();
+    Ok((n, urgent))
 }
 
 /// Rate limit for output wakes; see [`OUTPUT_WAKE_INTERVAL`].
@@ -1044,7 +1308,9 @@ fn poll_revents(pty: &Pty, events: libc::c_short) -> libc::c_short {
 fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
     use crate::protocol::ansi::{Action, AnsiOutput, WindowOp};
 
+    let status_before = state.terminal.program_status().generation();
     let State {
+        shell_commands,
         terminal,
         events,
         in_band,
@@ -1056,9 +1322,15 @@ fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
     let start = trace.then(Instant::now);
     let mut actions = 0usize;
     let mut print_actions = 0usize;
+    let mut grid_output = false;
 
     parser.feed_with_ascii_spans(data, |output| match output {
         AnsiOutput::Action(action) => {
+            shell_commands.observe(&action);
+            grid_output |= !matches!(
+                action,
+                Action::ProgramStatus(_) | Action::ProgramStatusQuery
+            );
             if trace {
                 actions += 1;
                 if matches!(action, Action::Print(_)) {
@@ -1113,6 +1385,10 @@ fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
             }
         }
         AnsiOutput::PrintAscii(bytes) => {
+            grid_output |= !bytes.is_empty();
+            if !bytes.is_empty() {
+                shell_commands.prompt_ready = false;
+            }
             if trace {
                 actions += 1;
                 print_actions += bytes.len();
@@ -1120,6 +1396,11 @@ fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
             handler.handle_ascii_span(bytes);
         }
     });
+
+    if state.attached_exited {
+        state.shell_commands.cancel();
+        state.terminal.process_exited();
+    }
 
     if let Some(start) = start {
         tracing::info!(
@@ -1132,7 +1413,8 @@ fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
         );
     }
 
-    state.output_pending = true;
+    state.output_pending |= grid_output;
+    state.status_pending |= state.terminal.program_status().generation() != status_before;
     state.bytes_since_collect += data.len();
     state.generation = state.generation.wrapping_add(1);
 }
@@ -1335,8 +1617,269 @@ fn pipeline_trace_enabled() -> bool {
 }
 
 #[cfg(test)]
+mod status_and_submission_tests {
+    use super::*;
+    use ultty_vt::program_status::{ProgramState, StatusChangeReason};
+
+    fn quiet() -> EventLoop {
+        EventLoop::with_command("/bin/sleep", &["/bin/sleep", "10"], 80, 24).unwrap()
+    }
+
+    fn output(event_loop: &EventLoop, bytes: &[u8]) {
+        parse_into(&mut event_loop.shared.lock(), &mut AnsiParser::new(), bytes);
+    }
+
+    fn prompt(event_loop: &EventLoop) {
+        output(event_loop, b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    }
+
+    #[test]
+    fn test_program_status_generation_survives_event_overflow() {
+        let mut event_loop = quiet();
+        let mut bytes = Vec::new();
+        for _ in 0..MAX_PENDING_EVENTS + 20 {
+            bytes.extend_from_slice(b"\x1b]2;title\x07");
+        }
+        bytes.extend_from_slice(b"\x1b]7501;state=working\x07\x1b]133;A\x07");
+        output(&event_loop, &bytes);
+        let events = event_loop.process().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TerminalEvent::ProgramStatusChanged {
+                generation: 2,
+                reason: StatusChangeReason::Prompt
+            }
+        )));
+        assert!(event_loop.terminal().program_status().records().is_empty());
+        assert!(!event_loop
+            .process()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::ProgramStatusChanged { .. })));
+    }
+
+    #[test]
+    fn test_program_status_only_wakes_without_grid_redraw() {
+        let mut event_loop = quiet();
+        output(&event_loop, b"\x1b]7501;state=working\x07");
+        assert!(event_loop.shared.lock().ready());
+        let events = event_loop.process().unwrap();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::ProgramStatusChanged { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::Redraw)));
+        assert!(!event_loop.shared.lock().ready());
+    }
+
+    #[test]
+    fn test_program_status_final_output_precedes_exit_cleanup_on_real_pty() {
+        let script = r#"printf '\033]7501;state=working:id=work\007\033]7501;state=done:id=done\007\033]7501;state=error:id=error\007'"#;
+        let mut event_loop =
+            EventLoop::with_command("/bin/sh", &["/bin/sh", "-c", script], 80, 24).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut exited = false;
+        while Instant::now() < deadline {
+            let events = event_loop.wait(Duration::from_millis(20)).unwrap();
+            if events
+                .iter()
+                .any(|event| matches!(event, TerminalEvent::ChildExited { .. }))
+            {
+                exited = true;
+                break;
+            }
+        }
+        assert!(exited);
+        let snapshot = event_loop.terminal().program_status_snapshot();
+        assert_eq!(snapshot.records.len(), 2);
+        assert!(snapshot
+            .records
+            .iter()
+            .all(|record| matches!(record.state, ProgramState::Done | ProgramState::Error)));
+        assert_eq!(snapshot.reason, StatusChangeReason::ProcessExit);
+    }
+
+    #[test]
+    fn test_shell_submission_stale_finish_and_concurrent_refusal() {
+        let mut event_loop = quiet();
+        output(&event_loop, b"\x1b]133;D;7\x07");
+        prompt(&event_loop);
+        let sequence = event_loop.submit_shell_command("true").unwrap();
+        assert!(event_loop.submit_shell_command("false").is_err());
+        assert_eq!(event_loop.shell_command_result(sequence), None);
+        let events = event_loop.process().unwrap();
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::ShellCommandFinished { .. })));
+        output(&event_loop, b"\x1b]133;D;9\x07");
+        assert_eq!(event_loop.shell_command_result(sequence), None);
+        let mut flood = b"\x1b]2;title\x07".repeat(MAX_PENDING_EVENTS + 1);
+        flood.extend_from_slice(b"\x1b]133;C\x07\x1b]133;D;0\x07");
+        output(&event_loop, &flood);
+        assert_eq!(
+            event_loop.shell_command_result(sequence),
+            Some(ShellCommandOutcome::Finished { exit_code: Some(0) })
+        );
+        let events = event_loop.process().unwrap();
+        assert!(events.iter().any(|event| matches!(event, TerminalEvent::ShellCommandFinished { sequence: id, exit_code: Some(0) } if *id == sequence)));
+    }
+
+    #[test]
+    fn test_shell_submission_cannot_reserve_between_read_and_parse() {
+        let mut event_loop = quiet();
+        prompt(&event_loop);
+        let shared = Arc::clone(&event_loop.shared);
+        let (read_tx, read_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            read_and_parse(&shared, &mut AnsiParser::new(), &mut [0; 128], |buf| {
+                let stale = b"\x1b]133;C\x07\x1b]133;D;0\x07";
+                buf[..stale.len()].copy_from_slice(stale);
+                read_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok(stale.len())
+            })
+            .unwrap();
+        });
+        read_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // submit_shell_command must acquire this exact lock to reserve or
+        // enqueue. The old bytes are already read but not yet applied.
+        assert!(matches!(
+            event_loop.shared.state.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        release_tx.send(()).unwrap();
+        reader.join().unwrap();
+        assert!(event_loop.submit_shell_command("true").is_err());
+        assert!(event_loop.shared.lock().shell_commands.pending.is_none());
+        assert_eq!(event_loop.shared.lock().shell_commands.next_sequence, 0);
+    }
+
+    #[test]
+    fn test_shell_submission_overflow_and_input_refusal_leave_no_reservation() {
+        let mut event_loop = quiet();
+        prompt(&event_loop);
+        assert!(event_loop
+            .submit_shell_command(&"x".repeat(MAX_OUTBOUND))
+            .is_err());
+        assert!(event_loop.shared.lock().shell_commands.pending.is_none());
+        assert_eq!(event_loop.shared.lock().shell_commands.next_sequence, 0);
+        for command in ["", "   ", "a\nb", "a\rb", "a\0b", "a\tb", "a\x1bb"] {
+            assert!(event_loop.submit_shell_command(command).is_err());
+        }
+        event_loop.send_input(b"editable").unwrap();
+        assert!(event_loop.submit_shell_command("true").is_err());
+        assert!(event_loop.shared.lock().shell_commands.pending.is_none());
+    }
+
+    #[test]
+    fn test_shell_submission_extra_input_cancels_before_start() {
+        let mut event_loop = quiet();
+        prompt(&event_loop);
+        let sequence = event_loop.submit_shell_command("true").unwrap();
+        event_loop.send_input(b"x").unwrap();
+        output(&event_loop, b"\x1b]133;C\x07\x1b]133;D;0\x07");
+        assert_eq!(
+            event_loop.shell_command_result(sequence),
+            Some(ShellCommandOutcome::Cancelled)
+        );
+        assert!(!event_loop
+            .process()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::ShellCommandFinished { .. })));
+    }
+
+    #[test]
+    fn test_shell_submission_prompt_reset_cancel_and_sequence_survives_ris() {
+        let mut event_loop = quiet();
+        for cancel in [b"\x1b]133;A\x07".as_slice(), b"\x1bc".as_slice()] {
+            // The fake child is not a shell; clear its test input queue.
+            event_loop.shared.lock().outbound.clear();
+            prompt(&event_loop);
+            let sequence = event_loop.submit_shell_command("true").unwrap();
+            output(&event_loop, cancel);
+            assert_eq!(
+                event_loop.shell_command_result(sequence),
+                Some(ShellCommandOutcome::Cancelled)
+            );
+            assert_eq!(
+                event_loop.shared.lock().shell_commands.next_sequence,
+                sequence
+            );
+        }
+    }
+
+    #[test]
+    fn test_shell_submission_instant_completion_on_real_pty() {
+        let script = r#"printf '\033]133;A\007$ \033]133;B\007'; while IFS= read -r line; do printf '\033]133;C\007'; eval "$line"; result=$?; printf '\033]133;D;%s\007\033]133;A\007$ \033]133;B\007' "$result"; done"#;
+        let mut event_loop =
+            EventLoop::with_command("/bin/sh", &["/bin/sh", "-c", script], 80, 24).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let sequence = loop {
+            event_loop.wait(Duration::from_millis(10)).unwrap();
+            if let Ok(sequence) = event_loop.submit_shell_command("true") {
+                break sequence;
+            }
+            assert!(Instant::now() < deadline, "prompt never ready");
+        };
+        while event_loop.shell_command_result(sequence).is_none() {
+            event_loop.wait(Duration::from_millis(10)).unwrap();
+            assert!(Instant::now() < deadline, "completion missing");
+        }
+        assert_eq!(
+            event_loop.shell_command_result(sequence),
+            Some(ShellCommandOutcome::Finished { exit_code: Some(0) })
+        );
+    }
+
+    #[test]
+    fn test_shell_submission_exit_without_finish_cancels_on_real_pty() {
+        let script = r#"printf '\033]133;A\007$ \033]133;B\007'; IFS= read -r line; printf '\033]133;C\007'; eval "$line""#;
+        let mut event_loop =
+            EventLoop::with_command("/bin/sh", &["/bin/sh", "-c", script], 80, 24).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let sequence = loop {
+            event_loop.wait(Duration::from_millis(10)).unwrap();
+            if let Ok(sequence) = event_loop.submit_shell_command("exit 7") {
+                break sequence;
+            }
+            assert!(Instant::now() < deadline, "prompt never ready");
+        };
+        while event_loop.shell_command_result(sequence).is_none() {
+            event_loop.wait(Duration::from_millis(10)).unwrap();
+            assert!(Instant::now() < deadline, "exit cancellation missing");
+        }
+        assert_eq!(
+            event_loop.shell_command_result(sequence),
+            Some(ShellCommandOutcome::Cancelled)
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_snapshot_revision_tracks_mutation_without_consuming_events() {
+        let event_loop =
+            EventLoop::with_command("/bin/sleep", &["/bin/sleep", "5"], 20, 3).expect("create");
+        let before = event_loop.snapshot_generation();
+        {
+            let terminal = event_loop.terminal();
+            assert_eq!(terminal.snapshot_generation(), before);
+            assert_eq!(terminal.dimensions().cols, 20);
+        }
+        assert_eq!(event_loop.snapshot_generation(), before);
+        {
+            let mut terminal = event_loop.terminal();
+            terminal.set_title("changed locally".to_owned());
+            assert_ne!(terminal.snapshot_generation(), before);
+        }
+        assert_ne!(event_loop.snapshot_generation(), before);
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -1693,6 +2236,29 @@ mod tests {
         event_loop.resize(100, 30).expect("resize");
 
         assert_eq!(reported_pixels(&event_loop), (900, 540));
+    }
+
+    #[test]
+    fn test_resize_publishes_pixel_metrics_when_grid_is_unchanged() {
+        let mut event_loop =
+            EventLoop::with_command("/bin/sleep", &["/bin/sleep", "5"], 80, 24).unwrap();
+        for (width, height) in [(8, 16), (11, 23)] {
+            event_loop.terminal().set_cell_pixel_size(width, height);
+            event_loop.resize(80, 24).unwrap();
+            let mut size = libc::winsize {
+                ws_row: 0,
+                ws_col: 0,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            // SAFETY: the child owns this live PTY fd and size is writable winsize storage.
+            assert_eq!(
+                unsafe { libc::ioctl(event_loop.child.pty_fd(), libc::TIOCGWINSZ, &mut size) },
+                0
+            );
+            assert_eq!((size.ws_col, size.ws_row), (80, 24));
+            assert_eq!((size.ws_xpixel, size.ws_ypixel), (80 * width, 24 * height));
+        }
     }
 
     #[test]

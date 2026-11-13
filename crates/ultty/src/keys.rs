@@ -12,9 +12,10 @@
 //!   specified at <https://sw.kovidgoyal.net/kitty/keyboard-protocol/> and
 //!   implemented by kitty's `key_encoding.c`, which this follows.
 //!
-//! [`key_from_winit`] and [`base_layout_key`] turn winit's view of a key
+//! With the GUI feature, `key_from_winit` and `base_layout_key` turn winit's view of a key
 //! into the encoder's.
 
+#[cfg(feature = "gui")]
 use winit::keyboard::{Key as WinitKey, KeyCode, KeyLocation, NamedKey};
 
 /// Modifier bits, in the kitty protocol's order (`1 + bits` on the wire;
@@ -709,6 +710,7 @@ fn modify_other_keys(ev: &Event, level: u8) -> Option<Vec<u8>> {
 /// `logical` is the event's logical key, `unmodified` the same key without
 /// modifiers (winit's `key_without_modifiers`). Returns `None` for keys
 /// that send nothing, such as dead keys.
+#[cfg(feature = "gui")]
 pub fn key_from_winit(
     logical: &WinitKey,
     unmodified: &WinitKey,
@@ -785,6 +787,7 @@ pub fn key_from_winit(
 }
 
 /// F1 to F35 as a number.
+#[cfg(feature = "gui")]
 fn function_key_number(named: &NamedKey) -> Option<u8> {
     use NamedKey::*;
     const KEYS: [NamedKey; 35] = [
@@ -798,6 +801,7 @@ fn function_key_number(named: &NamedKey) -> Option<u8> {
 
 /// A numeric keypad key from its logical key (which, unlike the
 /// unmodified key, reflects Num Lock).
+#[cfg(feature = "gui")]
 fn keypad_key(logical: &WinitKey) -> Option<KeypadKey> {
     Some(match logical {
         WinitKey::Character(s) => match s.as_str() {
@@ -832,6 +836,7 @@ fn keypad_key(logical: &WinitKey) -> Option<KeypadKey> {
 }
 
 /// The character of a physical key on a US layout.
+#[cfg(feature = "gui")]
 pub fn base_layout_key(code: KeyCode) -> Option<char> {
     use KeyCode::*;
     let letters = [
@@ -1454,6 +1459,7 @@ mod tests {
 
     // Translation from winit
 
+    #[cfg(feature = "gui")]
     #[test]
     fn winit_keys_translate() {
         use winit::keyboard::SmolStr;
@@ -1530,6 +1536,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "gui")]
     #[test]
     fn base_layout_keys() {
         assert_eq!(base_layout_key(KeyCode::KeyC), Some('c'));

@@ -1,0 +1,13 @@
+{
+  "source_commit": "76b8db8",
+  "command": [
+    "/home/travers/projects/tui-terminal/target/rex-features/debug/deps/ultty-4ff44926ef58480d",
+    "renderer::image::tests::gpu_pane_images_are_scoped_and_native_updates_replace_pixels",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "binary_sha256": "cfa860b9c5734ec5b5c1360bbafe798d62a02a41f98ac8b1900fb5608ac9e4dc",
+  "vulkan_icd": "/usr/share/vulkan/icd.d/lvp_icd.json",
+  "exit_code": 0
+}

@@ -19,6 +19,9 @@ use ultty_protocol::{AppMessage, PushedOverride};
 /// - Supports error injection via `inject_error()`
 /// - Tracks all events dispatched for assertion
 pub struct MockBackend {
+    /// Serialized OSC 7501 reports successfully written by the app loop.
+    pub status_reports: Vec<Vec<u8>>,
+    status_error: Option<std::io::ErrorKind>,
     events: VecDeque<Option<Event>>,
     render_count: usize,
     /// Constraints captured from each render call (newest last).
@@ -47,11 +50,30 @@ pub struct MockBackend {
     pushed_overrides: VecDeque<OverridePush>,
     /// The runner's answers to them: request id and the error, if any.
     pub override_results: Vec<(u32, Option<String>)>,
+    /// Native actions queued by the test terminal.
+    pub action_requests: VecDeque<ultty_protocol::SemanticActionRequest>,
+    /// Application acknowledgments, after focus or handler dispatch.
+    pub action_results: Vec<(u32, Option<String>)>,
 }
 
 impl MockBackend {
+    /// Fail the next status write, without affecting input or rendering.
+    pub fn fail_next_status_report(&mut self, kind: std::io::ErrorKind) {
+        self.status_error = Some(kind);
+    }
+
+    pub(super) fn write_status(&mut self, wire: &[u8]) -> crate::Result<()> {
+        if let Some(kind) = self.status_error.take() {
+            return Err(std::io::Error::from(kind).into());
+        }
+        self.status_reports.push(wire.to_vec());
+        Ok(())
+    }
+
     pub fn new(events: Vec<Option<Event>>) -> Self {
         Self {
+            status_reports: Vec::new(),
+            status_error: None,
             events: events.into(),
             render_count: 0,
             rendered_constraints: Vec::new(),
@@ -65,6 +87,8 @@ impl MockBackend {
             polls: Arc::new(AtomicUsize::new(0)),
             pushed_overrides: VecDeque::new(),
             override_results: Vec::new(),
+            action_requests: VecDeque::new(),
+            action_results: Vec::new(),
         }
     }
 
@@ -104,6 +128,7 @@ impl MockBackend {
             || !self.events.is_empty()
             || self.pending_error.is_some()
             || !self.pushed_overrides.is_empty()
+            || !self.action_requests.is_empty()
     }
 
     /// Keep polling `None` after the scripted events run out instead of

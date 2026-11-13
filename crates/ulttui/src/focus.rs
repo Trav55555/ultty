@@ -52,6 +52,11 @@ impl FocusManager {
         if crate::overrides::is_hidden(view) {
             return;
         }
+        self.register_widget(view);
+        view.for_each_child(&mut |child| self.register_view_tree(child));
+    }
+
+    fn register_widget(&mut self, view: &dyn View) {
         if view.is_focusable() {
             if let Some(id) = view.widget_id() {
                 if self.register(id.to_string()) && view.accepts_text() {
@@ -59,7 +64,6 @@ impl FocusManager {
                 }
             }
         }
-        view.for_each_child(&mut |child| self.register_view_tree(child));
     }
 
     /// Whether the focused widget takes typed text ([`View::accepts_text`]).
@@ -186,6 +190,16 @@ impl FocusManager {
     pub fn register_current_view_tree(view: &dyn View) {
         let mut current = Self::with_current(|fm| fm.clone());
         current.register_view_tree(view);
+        Self::set_current(current);
+    }
+
+    /// Register the real app root before its anonymous presentation wrapper's
+    /// children. Root hidden/text overrides stay ignored under ADR 0023; widget
+    /// identity still participates in focus and action routing.
+    pub(crate) fn register_current_app_tree(root: &dyn View, presented: &dyn View) {
+        let mut current = Self::with_current(|focus| focus.clone());
+        current.register_widget(root);
+        current.register_view_tree(presented);
         Self::set_current(current);
     }
 

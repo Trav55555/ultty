@@ -1,0 +1,8 @@
+{
+  "budget_seconds": 60,
+  "sha256": {
+    "/home/travers/projects/tui-terminal/target/rex-features/logs/integration-pid-bin/ultty-session": "99c321c69a18d00012703e51aa6b1853231eb5caf857f7bb167776ff42095166",
+    "/home/travers/projects/tui-terminal/target/rex-features/logs/integration-pid-bin/ulttyctl": "30125e736f44a071e180fc950ad976b559d4cd2adbd2fb2f8a714b4e0203d465",
+    "/home/travers/projects/tui-terminal/.worktrees/rex-features/scripts/e2e/control-pid.py": "9497e075383926efcdb1c2fdf86be1c0d7b032eeffa45bb6fadb2cc978241c1c"
+  }
+}

@@ -29,6 +29,7 @@ compile_error!(
 
 pub mod detect;
 pub mod in_band;
+pub mod program_status;
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -426,6 +427,15 @@ impl UlttyClient {
             }
         }
         Ok(())
+    }
+
+    /// Report optional program status through this client's owned output.
+    /// A successful write does not establish terminal support or task success.
+    pub fn report_status(&mut self, report: &program_status::Report) -> Result<(), Error> {
+        let wire = report
+            .encode()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        self.write_output(&wire)
     }
 
     /// Send [`UlttyClient::write_output`] text, inline surface anchors and

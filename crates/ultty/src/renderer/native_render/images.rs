@@ -15,7 +15,7 @@ impl Renderer {
         scissor: Option<Scissor>,
     ) {
         for image in deferred_images {
-            let Some(cached) = self.native_image_cache.get(&image.region_id) else {
+            let Some(cached) = self.native_image_cache.get(&image.resource) else {
                 continue;
             };
 
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn native_image_quad_preserves_geometry_and_indices() {
         let image = DeferredImageRender {
-            region_id: RegionId::new(7),
+            resource: (1, RegionId::new(7)),
             x: 10.0,
             y: 20.0,
             w: 30.0,

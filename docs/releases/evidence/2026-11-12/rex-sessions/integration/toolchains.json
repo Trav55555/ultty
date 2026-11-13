@@ -1,0 +1,4 @@
+{
+  "headless": "rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)",
+  "msrv": "rustc 1.90.0 (1159e78c4 2025-09-14)"
+}

@@ -1,0 +1,3 @@
+# Preserve captured logs and patches byte for byte.
+*.log -whitespace
+*.diff -whitespace

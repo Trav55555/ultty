@@ -1,5 +1,7 @@
 //! Terminal state management with alternate screen support.
 
+pub mod snapshot;
+
 use super::{
     Anchor, AnchorRefusal, Buffer, CursorPosition, Dimensions, Grid, ImageId, ImageStore, Palette,
     RowMarks, TerminalImage, ThemeColors,
@@ -61,7 +63,7 @@ pub const DEFAULT_TERMINAL_NAME: &str = "xterm-256color";
 const MAX_UTF8_MOUSE_VALUE: u32 = 2047;
 
 /// Mouse tracking mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum MouseMode {
     /// No mouse tracking
     #[default]
@@ -77,7 +79,7 @@ pub enum MouseMode {
 }
 
 /// Mouse encoding format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum MouseEncoding {
     /// Default X10 encoding (limited to 223 cols/rows)
     #[default]
@@ -91,7 +93,7 @@ pub enum MouseEncoding {
 }
 
 /// Terminal modes that affect behavior.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct TerminalModes {
     /// Application cursor keys (DECCKM)
     pub application_cursor_keys: bool,
@@ -173,7 +175,7 @@ pub mod kitty_keyboard {
 }
 
 /// Shell integration state for tracking command execution.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ShellIntegration {
     /// Current working directory (from OSC 7)
     pub working_directory: Option<String>,
@@ -232,6 +234,8 @@ const MAX_COMMAND_LINE_ROWS: usize = 256;
 /// - Inline images
 #[derive(Debug)]
 pub struct Terminal {
+    /// Program records belong to the PTY, not either screen.
+    program_status: crate::program_status::ProgramStatusStore,
     /// Process-unique identity of this terminal, so an embedder can key
     /// per-terminal caches (image textures) without a handle of its own.
     uid: u64,
@@ -306,6 +310,26 @@ pub struct Terminal {
 }
 
 impl Terminal {
+    /// The authoritative per-terminal program records.
+    pub fn program_status(&self) -> &crate::program_status::ProgramStatusStore {
+        &self.program_status
+    }
+
+    /// A bounded clone for a consumer whose notifications may have been lost.
+    pub fn program_status_snapshot(&self) -> crate::program_status::ProgramStatusSnapshot {
+        self.program_status.snapshot()
+    }
+
+    /// Apply a report validated by the OSC parser.
+    pub fn apply_program_status(&mut self, report: crate::program_status::ProgramStatusReport) {
+        self.program_status.apply(report);
+    }
+
+    /// Apply process-exit cleanup after final output has been parsed.
+    pub fn process_exited(&mut self) {
+        self.program_status.on_process_exit();
+    }
+
     /// Check every structural invariant of the terminal state.
     ///
     /// Returns a description of the first violation. Nothing in normal
@@ -343,6 +367,7 @@ impl Terminal {
     pub fn new(dims: Dimensions) -> Self {
         static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            program_status: crate::program_status::ProgramStatusStore::default(),
             uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             main: Buffer::new(dims),
             alternate: Buffer::with_scrollback(dims, 0), // No scrollback for alternate
@@ -904,6 +929,7 @@ impl Terminal {
 
     /// Mark prompt start (OSC 133;A).
     pub fn mark_prompt_start(&mut self) {
+        self.program_status.on_prompt();
         let row = self.grid().cursor().position.row;
         self.shell_integration.prompt_line = Some(row);
         self.shell_integration.command_executing = false;
@@ -1308,6 +1334,7 @@ impl Terminal {
     /// grid: the alternate screen, scrollback, images, hyperlinks, the
     /// selection and any pushed keyboard modes.
     pub fn reset_auxiliary_state(&mut self) {
+        self.program_status.on_ris();
         self.apply_pending_alternate_resize();
         self.alternate.grid_mut().clear();
         self.alternate.grid_mut().cursor_mut().position = CursorPosition::origin();

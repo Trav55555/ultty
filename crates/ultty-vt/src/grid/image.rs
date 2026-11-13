@@ -15,11 +15,11 @@ pub const MAX_IMAGE_STORE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_IMAGE_STORE_COUNT: usize = 1024;
 
 /// Unique identifier for terminal images.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ImageId(pub u32);
 
 /// A decoded terminal image.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TerminalImage {
     /// Unique identifier
     pub id: ImageId,

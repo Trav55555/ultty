@@ -7,7 +7,7 @@ pub type Rgb = [u8; 3];
 /// The colours the embedder draws with. Colour queries (OSC 4, 10, 11, 12)
 /// report these, so applications such as neovim and delta can tell a light
 /// theme from a dark one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThemeColors {
     /// Default foreground.
     pub foreground: Rgb,

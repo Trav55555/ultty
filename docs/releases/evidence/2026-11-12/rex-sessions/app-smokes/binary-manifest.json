@@ -1,0 +1,27 @@
+{
+  "ultty": {
+    "source": "/home/travers/projects/tui-terminal/target/rex-features/debug/ultty",
+    "copy": "/home/travers/projects/tui-terminal/target/rex-features/logs/final-app-smoke-bin/ultty",
+    "sha256": "a0c363aafc1996c0425d7ad736d171cac7d1d2d5cc566efd25b5705f906e7ae9"
+  },
+  "ulttyctl": {
+    "source": "/home/travers/projects/tui-terminal/target/rex-features/debug/ulttyctl",
+    "copy": "/home/travers/projects/tui-terminal/target/rex-features/logs/final-app-smoke-bin/ulttyctl",
+    "sha256": "93a4da1f7ad7f9602b644bf4992d4e7cc514d80bf0c37ecff187bb6a85a41409"
+  },
+  "counter-app": {
+    "source": "/home/travers/projects/tui-terminal/target/rex-features/debug/counter-app",
+    "copy": "/home/travers/projects/tui-terminal/target/rex-features/logs/final-app-smoke-bin/counter-app",
+    "sha256": "7e1296d0fa3a067275798ae75ee46de094484aea6b93fc86e246d326df5bb200"
+  },
+  "ulttui-lua": {
+    "source": "/home/travers/projects/tui-terminal/target/rex-features/debug/ulttui-lua",
+    "copy": "/home/travers/projects/tui-terminal/target/rex-features/logs/final-app-smoke-bin/ulttui-lua",
+    "sha256": "f85dc9b4c3aa82e05180b61a1a03f87dd28e09dab2b03443cacb1b38044ee98d"
+  },
+  "inline-surface": {
+    "source": "/home/travers/projects/tui-terminal/target/rex-features/debug/examples/inline-surface",
+    "copy": "/home/travers/projects/tui-terminal/target/rex-features/logs/final-app-smoke-bin/inline-surface",
+    "sha256": "13ec83b6a5b1cb68b2d21af711f6efb01a1330912755e82d6ee4103ce9a5e2eb"
+  }
+}

@@ -29,7 +29,8 @@ use crate::{
     overrides::{OverrideFormat, PushedOverride},
     style::{BorderEdges, BorderStyle, BorderType, Color, Easing, NamedColor, Style, Transition},
     surface::{SurfaceEventKind, MAX_SURFACE_ROWS, MIN_SURFACE_ROWS},
-    AppMessage, ProtocolError, RegionId, Result, TerminalMessage,
+    valid_action_widget_id, AppMessage, ProtocolError, RegionId, Result, SemanticActionKind,
+    SemanticActionRequest, TerminalMessage, MAX_ACTION_ERROR_BYTES, MAX_ACTION_WIDGET_ID_BYTES,
 };
 
 use frame::{begin_frame, decode_frame_header, finish_frame};
@@ -162,6 +163,31 @@ fn decode_string(buf: &mut impl Buf) -> Result<String> {
     let mut bytes = vec![0u8; len];
     buf.copy_to_slice(&mut bytes);
     String::from_utf8(bytes).map_err(|e| ProtocolError::InvalidUtf8(e.to_string()))
+}
+
+fn decode_action_string(buf: &mut impl Buf, limit: usize) -> Result<String> {
+    let len = decode_u32(buf)? as usize;
+    if len > limit {
+        return Err(ProtocolError::InvalidData(
+            "semantic action text exceeds limit".into(),
+        ));
+    }
+    if buf.remaining() < len {
+        return Err(ProtocolError::UnexpectedEof {
+            needed: len,
+            have: buf.remaining(),
+        });
+    }
+    let mut bytes = vec![0; len];
+    buf.copy_to_slice(&mut bytes);
+    let value =
+        String::from_utf8(bytes).map_err(|error| ProtocolError::InvalidUtf8(error.to_string()))?;
+    if value.chars().any(char::is_control) {
+        return Err(ProtocolError::InvalidData(
+            "control character in semantic action text".into(),
+        ));
+    }
+    Ok(value)
 }
 
 fn encode_option_f32(opt: Option<f32>, buf: &mut BytesMut) {
@@ -2027,6 +2053,7 @@ mod msg_type {
     pub const CLIPBOARD_SET: u16 = 0x0061;
     pub const PONG: u16 = 0x0070;
     pub const OVERRIDE_RESULT: u16 = 0x0080;
+    pub const ACTION_RESULT: u16 = 0x0081;
     pub const DISCONNECT: u16 = 0x00FF;
 
     // Terminal -> App
@@ -2041,6 +2068,7 @@ mod msg_type {
     pub const SURFACE_EVENT: u16 = 0x0026;
     pub const PING: u16 = 0x0070;
     pub const SET_OVERRIDE: u16 = 0x0080;
+    pub const INVOKE_ACTION: u16 = 0x0081;
     pub const ERROR: u16 = 0x00FF;
 }
 
@@ -2214,6 +2242,11 @@ impl Encode for AppMessage {
             }
             AppMessage::Disconnect => msg_type::DISCONNECT,
             AppMessage::Pong => msg_type::PONG,
+            AppMessage::ActionResult { request_id, error } => {
+                buf.put_u32_le(*request_id);
+                encode_option_string(error, buf);
+                msg_type::ACTION_RESULT
+            }
             AppMessage::OverrideResult { request_id, error } => {
                 buf.put_u32_le(*request_id);
                 encode_option_string(error, buf);
@@ -2444,6 +2477,19 @@ impl Decode for AppMessage {
             }
             msg_type::DISCONNECT => Ok(AppMessage::Disconnect),
             msg_type::PONG => Ok(AppMessage::Pong),
+            msg_type::ACTION_RESULT => {
+                let request_id = decode_u32(buf)?;
+                let error = match decode_u8(buf)? {
+                    0 => None,
+                    1 => Some(decode_action_string(buf, MAX_ACTION_ERROR_BYTES)?),
+                    _ => {
+                        return Err(ProtocolError::InvalidData(
+                            "invalid action option tag".into(),
+                        ))
+                    }
+                };
+                Ok(AppMessage::ActionResult { request_id, error })
+            }
             msg_type::OVERRIDE_RESULT => {
                 let request_id = decode_u32(buf)?;
                 let error = decode_option_string(buf)?;
@@ -2541,6 +2587,14 @@ impl Encode for TerminalMessage {
                 id.encode(buf);
                 buf.put_u8(*kind as u8);
                 msg_type::SURFACE_EVENT
+            }
+            TerminalMessage::InvokeAction(request) => {
+                buf.put_u32_le(request.request_id);
+                buf.put_u32_le(request.frame_id.0);
+                request.id.encode(buf);
+                encode_string(&request.widget_id, buf);
+                buf.put_u8(request.action as u8);
+                msg_type::INVOKE_ACTION
             }
             TerminalMessage::Ping => msg_type::PING,
             TerminalMessage::SetOverride { request_id, pushed } => {
@@ -2656,6 +2710,26 @@ impl Decode for TerminalMessage {
                     ProtocolError::InvalidData(format!("invalid surface event kind: {value}"))
                 })?;
                 Ok(TerminalMessage::SurfaceEvent { id, kind })
+            }
+            msg_type::INVOKE_ACTION => {
+                let request_id = decode_u32(buf)?;
+                let frame_id = FrameId(decode_u32(buf)?);
+                let id = RegionId::decode(buf)?;
+                let widget_id = decode_action_string(buf, MAX_ACTION_WIDGET_ID_BYTES)?;
+                if !valid_action_widget_id(&widget_id) {
+                    return Err(ProtocolError::InvalidData(
+                        "invalid action widget identity".into(),
+                    ));
+                }
+                let action = SemanticActionKind::from_u8(decode_u8(buf)?)
+                    .ok_or_else(|| ProtocolError::InvalidData("unknown semantic action".into()))?;
+                Ok(TerminalMessage::InvokeAction(SemanticActionRequest {
+                    request_id,
+                    frame_id,
+                    id,
+                    widget_id,
+                    action,
+                }))
             }
             msg_type::PING => Ok(TerminalMessage::Ping),
             msg_type::SET_OVERRIDE => {
@@ -3404,7 +3478,7 @@ mod tests {
     #[test]
     fn message_type_codes_match_documented_table() {
         // Mirrors docs/PROTOCOL_SPEC.md section 3.2. Update both together.
-        let app: [(&str, u16); 26] = [
+        let app: [(&str, u16); 27] = [
             ("CLIENT_HELLO", 0x0001),
             ("CREATE_REGION", 0x0010),
             ("DELETE_REGION", 0x0012),
@@ -3430,6 +3504,7 @@ mod tests {
             ("CLIPBOARD_SET", 0x0061),
             ("PONG", 0x0070),
             ("OVERRIDE_RESULT", 0x0080),
+            ("ACTION_RESULT", 0x0081),
             ("DISCONNECT", 0x00FF),
         ];
         let actual_app = [
@@ -3458,11 +3533,12 @@ mod tests {
             ("CLIPBOARD_SET", msg_type::CLIPBOARD_SET),
             ("PONG", msg_type::PONG),
             ("OVERRIDE_RESULT", msg_type::OVERRIDE_RESULT),
+            ("ACTION_RESULT", msg_type::ACTION_RESULT),
             ("DISCONNECT", msg_type::DISCONNECT),
         ];
         assert_eq!(actual_app, app);
 
-        let terminal: [(&str, u16); 12] = [
+        let terminal: [(&str, u16); 13] = [
             ("SERVER_HELLO", 0x0001),
             ("SESSION_READY", 0x0002),
             ("LAYOUT_COMPUTED", 0x0010),
@@ -3474,6 +3550,7 @@ mod tests {
             ("SURFACE_EVENT", 0x0026),
             ("PING", 0x0070),
             ("SET_OVERRIDE", 0x0080),
+            ("INVOKE_ACTION", 0x0081),
             ("ERROR", 0x00FF),
         ];
         let actual_terminal = [
@@ -3488,6 +3565,7 @@ mod tests {
             ("SURFACE_EVENT", msg_type::SURFACE_EVENT),
             ("PING", msg_type::PING),
             ("SET_OVERRIDE", msg_type::SET_OVERRIDE),
+            ("INVOKE_ACTION", msg_type::INVOKE_ACTION),
             ("ERROR", msg_type::ERROR),
         ];
         assert_eq!(actual_terminal, terminal);
@@ -3512,7 +3590,8 @@ mod tests {
         assert_eq!(CAP_SEMANTICS, 0x0200);
         assert_eq!(CAP_INPUT_CURSOR, 0x0400);
         assert_eq!(CAP_OVERRIDE_PUSH, 0x0800);
-        assert_eq!(CAP_ALL_KNOWN, 0x0FF1);
+        assert_eq!(CAP_ALL_KNOWN, 0x1FF1);
+        assert_eq!(crate::CAP_SEMANTIC_ACTIONS, 0x1000);
         // A client must answer SetOverride to ask for the bit (section 10.7).
         assert_eq!(CLIENT_DEFAULT_CAPABILITIES, 0x07F1);
         assert_eq!(MAX_OVERRIDE_SOURCE_LEN, 128 * 1024);

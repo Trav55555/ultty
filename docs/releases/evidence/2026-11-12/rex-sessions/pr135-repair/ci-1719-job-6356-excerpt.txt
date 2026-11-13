@@ -1,0 +1,4 @@
+2026-11-13T01:23:20.8852791Z Traceback (most recent call last):
+2026-11-13T01:23:20.8853186Z   File "<stdin>", line 1, in <module>
+2026-11-13T01:23:20.8853387Z ModuleNotFoundError: No module named 'PIL'
+2026-11-13T01:23:20.8867766Z FAIL: both split cards must be visible

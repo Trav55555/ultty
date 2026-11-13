@@ -41,7 +41,14 @@ impl AnsiParser {
                 self.reset();
             }
             _ => {
-                if self.osc_buffer.len() < MAX_STRING_BUFFER {
+                if self.osc_discard {
+                    return;
+                }
+                if self.osc_buffer.starts_with(b"7501;")
+                    && self.osc_buffer.len() + 1 + 3 > crate::program_status::MAX_SEQUENCE_BYTES
+                {
+                    self.osc_discard = true;
+                } else if self.osc_buffer.len() < MAX_STRING_BUFFER {
                     self.osc_buffer.push(byte);
                 } else {
                     self.reset();
@@ -61,9 +68,20 @@ impl AnsiParser {
                 self.dispatch_osc(StringTerminator::St, callback);
                 self.reset();
             }
+            _ if self.osc_discard => {
+                // An oversized report stays discarded through embedded
+                // escapes until its terminator, rather than printing its tail.
+                self.state = if byte == 0x1b {
+                    State::OscStringEsc
+                } else {
+                    State::OscString
+                };
+            }
             // Any other byte - was not a valid ST, dispatch and reprocess
             _ => {
-                self.dispatch_osc(StringTerminator::St, callback);
+                if !self.osc_buffer.starts_with(b"7501;") {
+                    self.dispatch_osc(StringTerminator::St, callback);
+                }
                 self.reset();
                 // The ESC ended the string and starts the next sequence
                 // (xterm), so `byte` is read after it, not printed.
@@ -78,6 +96,29 @@ impl AnsiParser {
     where
         F: FnMut(Action),
     {
+        if self.osc_discard {
+            return;
+        }
+        if let Some(body) = self.osc_buffer.strip_prefix(b"7501;") {
+            let terminator_bytes = match terminator {
+                StringTerminator::Bel => 1,
+                StringTerminator::St => 2,
+            };
+            if self.osc_buffer.len() + 2 + terminator_bytes
+                <= crate::program_status::MAX_SEQUENCE_BYTES
+            {
+                match crate::program_status::parse(body) {
+                    Some(crate::program_status::ParsedStatus::Query) => {
+                        callback(Action::ProgramStatusQuery);
+                    }
+                    Some(crate::program_status::ParsedStatus::Report(report)) => {
+                        callback(Action::ProgramStatus(report));
+                    }
+                    None => {}
+                }
+            }
+            return;
+        }
         let content = String::from_utf8_lossy(&self.osc_buffer);
 
         // OSC format: code ; data

@@ -20,6 +20,14 @@ impl<A: Application> App<A> {
 
         while let Some((cmd, depth)) = stack.pop() {
             match cmd {
+                Cmd::ReportStatus { report, on_result } => {
+                    let result = self.backend.report_status(&report);
+                    if let Some(on_result) = on_result {
+                        stack.push((Cmd::Message(on_result(result)), depth + 1));
+                    } else if let Err(error) = result {
+                        tracing::warn!("program status write failed: {error}");
+                    }
+                }
                 Cmd::None => {}
                 Cmd::Message(msg) => {
                     if depth >= MAX_CHAIN_DEPTH {
@@ -171,5 +179,77 @@ impl<A: Application> App<A> {
             }
         }
         produced_messages
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use crate::backend::{mock::MockBackend, Backend};
+    use crate::program_status::{Report, State};
+    use crate::widgets::{Text, View};
+
+    struct StatusApp {
+        results: Vec<bool>,
+    }
+
+    impl Application for StatusApp {
+        type Message = bool;
+
+        fn update(&mut self, success: bool) -> Cmd<bool> {
+            self.results.push(success);
+            Cmd::none()
+        }
+
+        fn view(&self) -> impl View {
+            Text::new("status")
+        }
+    }
+
+    #[test]
+    fn test_status_effects_serialize_and_report_write_failure() {
+        let mut backend = MockBackend::new(vec![]);
+        backend.fail_next_status_report(std::io::ErrorKind::BrokenPipe);
+        let mut runner =
+            App::new_with_backend(StatusApp { results: vec![] }, Backend::Mock(backend));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runner.process_cmd(
+            Cmd::batch(vec![
+                Cmd::report_status_with_result(Report::new(State::Working), |result| {
+                    result.is_ok()
+                }),
+                Cmd::report_status_with_result(Report::new(State::Done), |result| result.is_ok()),
+                Cmd::clear_status(None),
+            ]),
+            &runtime,
+        );
+        assert_eq!(runner.app.results, [false, true]);
+        let Backend::Mock(backend) = &runner.backend else {
+            panic!("mock")
+        };
+        assert_eq!(
+            backend.status_reports,
+            [
+                b"\x1b]7501;state=done\x1b\\".to_vec(),
+                b"\x1b]7501;state=clear\x1b\\".to_vec(),
+            ]
+        );
+        assert!(backend.rendered_messages.is_empty());
+    }
+
+    #[test]
+    fn test_invalid_status_writes_no_partial_bytes() {
+        let mut backend = Backend::Mock(MockBackend::new(vec![]));
+        let report = Report {
+            msg: Some("bad\ntext".into()),
+            ..Report::new(State::Done)
+        };
+        assert!(backend.report_status(&report).is_err());
+        let Backend::Mock(backend) = backend else {
+            panic!("mock")
+        };
+        assert!(backend.status_reports.is_empty());
     }
 }

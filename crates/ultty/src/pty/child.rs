@@ -7,8 +7,11 @@ use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{fork, setsid, ForkResult, Pid};
 use std::ffi::{CString, OsString};
+use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::raw::c_char;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 /// A child process running in a PTY.
@@ -65,6 +68,30 @@ impl Child {
         size: PtySize,
         env: &[(OsString, OsString)],
     ) -> Result<Self> {
+        Self::spawn_inner(program, args, working_dir, size, env, false)
+    }
+
+    /// Spawn a command, reporting failed working-directory setup or exec.
+    /// Success means the child closed its setup channel without reporting an
+    /// error, normally at exec. It does not establish application readiness.
+    pub fn spawn_checked(
+        program: &str,
+        args: &[&str],
+        working_dir: &Path,
+        size: PtySize,
+        env: &[(OsString, OsString)],
+    ) -> Result<Self> {
+        Self::spawn_inner(program, args, working_dir, size, env, true)
+    }
+
+    fn spawn_inner(
+        program: &str,
+        args: &[&str],
+        working_dir: &Path,
+        size: PtySize,
+        env: &[(OsString, OsString)],
+        strict_directory: bool,
+    ) -> Result<Self> {
         let (pty, slave) = Pty::open_with_size(size)?;
         // A child offered a native protocol socket is also told which
         // terminal that socket belongs to, so a program running somewhere
@@ -85,6 +112,18 @@ impl Child {
             }
         };
         let exec_plan = ChildExec::new(program, args, working_dir, &env)?;
+        // Allocate the receipt descriptors before fork, above stdio so dup2
+        // cannot overwrite them even when the caller has closed stdin/stdout.
+        let (read_end, write_end) =
+            UnixStream::pair().map_err(|source| PtyError::StartupFailed {
+                stage: "receipt setup",
+                source,
+            })?;
+        read_end
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .map_err(PtyError::ReadFailed)?;
+        let read_end = duplicate_above_stdio(read_end.into())?;
+        let write_end = duplicate_above_stdio(write_end.into())?;
 
         // SAFETY: the child path only performs session/fd setup and execve with
         // argv/env/cwd prepared before fork. It must not allocate or take locks.
@@ -93,19 +132,50 @@ impl Child {
                 // Parent process - we're the terminal emulator
                 // Drop slave fd in parent
                 drop(slave);
-
-                Ok(Child {
+                drop(write_end);
+                let mut child = Child {
                     pty,
                     pid: child,
                     exited: false,
                     exit_status: None,
                     term,
+                };
+                let mut receipt = UnixStream::from(read_end);
+                let mut bytes = [0u8; 5];
+                // Normally EOF means exec closed the last writer. A setup failure
+                // writes a stage and errno before _exit; no shell text involved.
+                let size = loop {
+                    match receipt.read(&mut bytes[..1]) {
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        result => break result.map_err(PtyError::ReadFailed)?,
+                    }
+                };
+                if size == 0 {
+                    return Ok(child);
+                }
+                receipt
+                    .read_exact(&mut bytes[1..])
+                    .map_err(PtyError::ReadFailed)?;
+                let errno = i32::from_ne_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+                let stage = match bytes[0] {
+                    1 => "session setup",
+                    2 => "controlling terminal",
+                    3 => "stdio setup",
+                    4 => "working directory",
+                    _ => "exec",
+                };
+                // Reap the failed child; Drop is still the failure cleanup for
+                // broken/malformed receipts and interrupted parent reads.
+                let _ = child.wait();
+                Err(PtyError::StartupFailed {
+                    stage,
+                    source: std::io::Error::from_raw_os_error(errno),
                 })
             }
             ForkResult::Child => {
                 // Child process - will become the shell
                 // This function does not return on success
-                setup_child(slave, &exec_plan);
+                setup_child(slave, &exec_plan, write_end.as_raw_fd(), strict_directory);
             }
         }
     }
@@ -370,22 +440,37 @@ fn open_fd_limit() -> libc::c_int {
 /// Close every fd above stderr in the child, so descriptors this process
 /// opened without CLOEXEC (GPU drivers do, for buffers that may hold screen
 /// contents) never reach the shell. Async-signal-safe: plain syscalls only.
-fn close_inherited_fds(fd_limit: libc::c_int) {
+fn close_inherited_fds(fd_limit: libc::c_int, receipt: libc::c_int) {
     #[cfg(target_os = "linux")]
     {
-        // SAFETY: close_range(3, ~0, 0) only closes descriptors; nothing
-        // after this point uses an fd above stderr.
-        if unsafe { libc::syscall(libc::SYS_close_range, 3, libc::c_uint::MAX, 0) } == 0 {
+        // SAFETY: close only the ranges around the owned receipt fd. All
+        // remaining child operations use stdio or that CLOEXEC descriptor.
+        let low =
+            receipt == 3 || unsafe { libc::syscall(libc::SYS_close_range, 3, receipt - 1, 0) } == 0;
+        // SAFETY: this range excludes the receipt descriptor and standard IO.
+        let high =
+            unsafe { libc::syscall(libc::SYS_close_range, receipt + 1, libc::c_uint::MAX, 0) } == 0;
+        if low && high {
             return;
         }
     }
     // Kernels before 5.9 and other Unixes: close them one by one.
     for fd in 3..fd_limit {
+        if fd == receipt {
+            continue;
+        }
         // SAFETY: closing an fd that is not open just returns EBADF.
         unsafe {
             libc::close(fd);
         }
     }
+}
+
+fn duplicate_above_stdio(fd: OwnedFd) -> Result<OwnedFd> {
+    let duplicate = nix::fcntl::fcntl(fd.as_raw_fd(), nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(3))
+        .map_err(PtyError::ExecFailed)?;
+    // SAFETY: fcntl just returned a new owned descriptor; fd owns only the original.
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
 }
 
 fn cstring_from_bytes(bytes: &[u8]) -> Result<CString> {
@@ -431,10 +516,15 @@ fn resolve_in_path<'a>(program: &'a str, paths: &std::ffi::OsStr) -> std::borrow
 /// Set up the child process (runs in child after fork).
 ///
 /// This function does not return on success - it calls exec.
-fn setup_child(slave: SlavePty, exec_plan: &ChildExec) -> ! {
+fn setup_child(
+    slave: SlavePty,
+    exec_plan: &ChildExec,
+    receipt: libc::c_int,
+    strict_directory: bool,
+) -> ! {
     // Create a new session and set controlling terminal
     if setsid().is_err() {
-        exit_child(1);
+        fail_child(receipt, 1);
     }
 
     let slave_fd = slave.into_raw_fd();
@@ -445,7 +535,7 @@ fn setup_child(slave: SlavePty, exec_plan: &ChildExec) -> ! {
     // The third argument (0) means don't steal the terminal from another session.
     unsafe {
         if libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0) < 0 {
-            exit_child(1);
+            fail_child(receipt, 2);
         }
     }
 
@@ -454,13 +544,13 @@ fn setup_child(slave: SlavePty, exec_plan: &ChildExec) -> ! {
     // fds is async-signal-safe and valid between fork and exec.
     unsafe {
         if libc::dup2(slave_fd, libc::STDIN_FILENO) < 0 {
-            exit_child(1);
+            fail_child(receipt, 3);
         }
         if libc::dup2(slave_fd, libc::STDOUT_FILENO) < 0 {
-            exit_child(1);
+            fail_child(receipt, 3);
         }
         if libc::dup2(slave_fd, libc::STDERR_FILENO) < 0 {
-            exit_child(1);
+            fail_child(receipt, 3);
         }
     }
 
@@ -473,13 +563,16 @@ fn setup_child(slave: SlavePty, exec_plan: &ChildExec) -> ! {
         }
     }
 
-    close_inherited_fds(exec_plan.fd_limit);
+    close_inherited_fds(exec_plan.fd_limit, receipt);
 
     // Change to working directory
     // SAFETY: working_dir is a NUL-terminated CString built before fork and
-    // outlives this call; chdir is async-signal-safe. Failure is tolerated.
+    // outlives this call; chdir is async-signal-safe. Legacy shell restoration
+    // tolerates missing directories; explicit launches require the requested cwd.
     unsafe {
-        libc::chdir(exec_plan.working_dir.as_ptr());
+        if libc::chdir(exec_plan.working_dir.as_ptr()) < 0 && strict_directory {
+            fail_child(receipt, 4);
+        }
     }
 
     // The Rust runtime ignores SIGPIPE and this thread may have signals
@@ -506,6 +599,31 @@ fn setup_child(slave: SlavePty, exec_plan: &ChildExec) -> ! {
             exec_plan.envp.as_ptr(),
         );
     }
+    fail_child(receipt, 5);
+}
+
+/// Only stack data and async-signal-safe syscalls are permitted after fork.
+fn fail_child(receipt: libc::c_int, stage: u8) -> ! {
+    let errno = nix::errno::Errno::last() as i32;
+    let error = errno.to_ne_bytes();
+    let bytes = [stage, error[0], error[1], error[2], error[3]];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        // SAFETY: receipt is the owned setup socket, bytes is valid
+        // stack storage, and write is async-signal-safe.
+        let written = unsafe {
+            libc::write(
+                receipt,
+                bytes[offset..].as_ptr().cast(),
+                bytes.len() - offset,
+            )
+        };
+        if written > 0 {
+            offset += written as usize;
+        } else if written == 0 || nix::errno::Errno::last() != nix::errno::Errno::EINTR {
+            break;
+        }
+    }
     exit_child(127);
 }
 
@@ -520,6 +638,58 @@ fn exit_child(code: i32) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_checked_spawn_reports_exec_and_directory_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let result = Child::spawn_checked(
+            missing.to_str().unwrap(),
+            &[],
+            dir.path(),
+            PtySize::default(),
+            &[],
+        );
+        assert!(matches!(
+            result,
+            Err(PtyError::StartupFailed { stage: "exec", .. })
+        ));
+        let result = Child::spawn_checked("/bin/true", &[], &missing, PtySize::default(), &[]);
+        assert!(matches!(
+            result,
+            Err(PtyError::StartupFailed {
+                stage: "working directory",
+                ..
+            })
+        ));
+        let mut child =
+            Child::spawn_checked("/bin/true", &[], dir.path(), PtySize::default(), &[]).unwrap();
+        assert_eq!(child.wait().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_checked_spawn_preserves_exact_argv_and_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("receipt");
+        let args = [
+            "sh",
+            "-c",
+            "printf '%s\\n%s\\n' \"$PWD\" \"$2\" > \"$1\"",
+            "argv-test",
+            output.to_str().unwrap(),
+            "space ; $HOME 'quote'\nsecond line",
+        ];
+        let mut child =
+            Child::spawn_checked("/bin/sh", &args, dir.path(), PtySize::default(), &[]).unwrap();
+        assert_eq!(child.wait().unwrap(), 0);
+        assert_eq!(
+            std::fs::read_to_string(output).unwrap(),
+            format!(
+                "{}\nspace ; $HOME 'quote'\nsecond line\n",
+                dir.path().display()
+            )
+        );
+    }
 
     #[test]
     fn path_lookup_skips_files_that_are_not_executable() {

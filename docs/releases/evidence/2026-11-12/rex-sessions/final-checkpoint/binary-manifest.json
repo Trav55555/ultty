@@ -1,0 +1,8 @@
+{
+  "source_commit": "76b8db8",
+  "gui": {
+    "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr-cache-merge-bin/ultty",
+    "sha256": "bdd84923dfb1bcd28ba71dca0731cc86f4cafe335d16c865cc69bbb4d9a9dba2"
+  },
+  "headless_and_counter_manifest": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr-integration-bin/manifest.json"
+}

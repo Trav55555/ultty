@@ -74,6 +74,23 @@ pub struct SceneSnapshot {
     focus: Option<u32>,
     /// Whether regions or lines were left out to stay within the budget.
     truncated: bool,
+    /// Actions pinned to the generation this accessibility tree describes.
+    actions: Vec<NativeActionTarget>,
+}
+
+/// An explicitly declared action target in the last published accessibility tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeActionTarget {
+    /// Native application session, scoped to this terminal owner.
+    pub session: u64,
+    /// Committed scene generation observed when the tree was published.
+    pub generation: u64,
+    /// Exact native region, never inferred from a hashed accessibility ID.
+    pub region: u32,
+    /// Application widget identity.
+    pub widget_id: String,
+    /// Operations explicitly advertised by the application.
+    pub actions: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,7 +214,62 @@ impl SceneSnapshot {
             regions,
             focus,
             truncated,
+            actions: Vec::new(),
         }
+    }
+
+    /// Bind declared actions to this visible tree and committed generation.
+    /// Call only when the session negotiated semantic actions. Ambiguous widget
+    /// identities and disabled ancestors withhold all actions.
+    pub fn with_actions(mut self, scene: &SceneTree, generation: u64) -> Self {
+        use ultty_protocol::actions::declared_actions;
+
+        let mut counts = HashMap::new();
+        for region in scene.iter_all() {
+            if let Some((widget, _)) = declared_actions(&region.metadata) {
+                *counts.entry(widget).or_insert(0_usize) += 1;
+            }
+        }
+        for visible in &self.regions {
+            let Some(region) = scene.get(RegionId::new(visible.id)) else {
+                continue;
+            };
+            let Some((widget, actions)) = declared_actions(&region.metadata) else {
+                continue;
+            };
+            if counts.get(widget) != Some(&1) {
+                continue;
+            }
+            let mut ancestor = Some(region.id);
+            let mut disabled = false;
+            while let Some(id) = ancestor {
+                let Some(node) = scene.get(id) else {
+                    disabled = true;
+                    break;
+                };
+                if node.semantics().disabled || node.semantics().hidden {
+                    disabled = true;
+                    break;
+                }
+                ancestor = node.parent;
+            }
+            if !disabled {
+                self.actions.push(NativeActionTarget {
+                    session: self.session,
+                    generation,
+                    region: region.id.0,
+                    widget_id: widget.to_owned(),
+                    actions,
+                });
+            }
+        }
+        self
+    }
+
+    /// Actions of regions present in this snapshot; the final emitter may still
+    /// omit a region because of its node budget or an accessibility ID collision.
+    pub fn action_targets(&self) -> impl Iterator<Item = &NativeActionTarget> {
+        self.actions.iter()
     }
 
     /// Copy each region's kept announcements out of `live`.
@@ -285,6 +357,18 @@ impl SceneSnapshot {
         let set = self.set_facts(region, by_id);
         let selectable = in_row_table && region.semantics.role == Role::Row;
         let mut node = region_node(region, &set, selectable);
+        if let Some(target) = self
+            .actions
+            .iter()
+            .find(|target| target.region == region.id)
+        {
+            if target.actions & ultty_protocol::actions::ACTION_FOCUS != 0 {
+                node.add_action(accesskit::Action::Focus);
+            }
+            if target.actions & ultty_protocol::actions::ACTION_ACTIVATE != 0 {
+                node.add_action(accesskit::Action::Click);
+            }
+        }
         let live = region.semantics.live != Live::Off;
         if in_live && !live {
             node.set_live(AkLive::Off);
@@ -859,6 +943,97 @@ mod tests {
 
     fn text(text: &str) -> Content {
         Content::Text(TextContent::new(text))
+    }
+
+    #[test]
+    fn test_actions_bind_published_generation_and_explicit_declaration() {
+        let mut scene = Scene::new();
+        scene.add(1, 0, text("Run")).metadata = vec![
+            ("ulttui.widget_id".into(), "run".into()),
+            ("ulttui.actions".into(), "focus,activate".into()),
+        ];
+        let captured = scene.capture(7, 0).with_actions(&scene.tree, 41);
+        let target = captured.action_targets().next().unwrap();
+        assert_eq!(
+            (target.session, target.generation, target.region),
+            (7, 41, 1)
+        );
+        assert_eq!(target.widget_id, "run");
+        let tree = build("app", &pane(vec![captured], None));
+        let node = tree
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == region_node_id(7, 1))
+            .unwrap()
+            .1
+            .clone();
+        assert!(node.supports_action(accesskit::Action::Focus));
+        assert!(node.supports_action(accesskit::Action::Click));
+
+        let unnegotiated = build("app", &pane(vec![scene.capture(7, 0)], None));
+        let node = &unnegotiated
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == region_node_id(7, 1))
+            .unwrap()
+            .1;
+        assert!(!node.supports_action(accesskit::Action::Click));
+        scene
+            .tree
+            .get_mut(RegionId::new(1))
+            .unwrap()
+            .semantics_mut()
+            .disabled = true;
+        assert_eq!(
+            scene
+                .capture(7, 0)
+                .with_actions(&scene.tree, 42)
+                .action_targets()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_actions_reject_ambiguous_ids_and_disabled_ancestors() {
+        let mut scene = Scene::new();
+        let declaration = vec![
+            ("ulttui.widget_id".into(), "run".into()),
+            ("ulttui.actions".into(), "activate".into()),
+        ];
+        scene.add(1, 0, Content::None).semantics_mut().disabled = true;
+        scene.add(2, 1, text("Run")).metadata = declaration.clone();
+        assert_eq!(
+            scene
+                .capture(7, 0)
+                .with_actions(&scene.tree, 1)
+                .action_targets()
+                .count(),
+            0
+        );
+        scene
+            .tree
+            .get_mut(RegionId::new(1))
+            .unwrap()
+            .semantics_mut()
+            .disabled = false;
+        assert_eq!(
+            scene
+                .capture(7, 0)
+                .with_actions(&scene.tree, 2)
+                .action_targets()
+                .count(),
+            1
+        );
+        scene.add(3, 0, text("Other")).metadata = declaration;
+        assert_eq!(
+            scene
+                .capture(7, 0)
+                .with_actions(&scene.tree, 3)
+                .action_targets()
+                .count(),
+            0
+        );
     }
 
     fn widget(widget: WidgetContent) -> Content {

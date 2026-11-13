@@ -1,0 +1,12 @@
+{
+  "commit": "447032b",
+  "archive_sha256": "f62c654ae84a7849c17edf6dd4bb1ec12be79a5970352cfbff8caf6ac209da8a",
+  "archive_count": 335,
+  "commit_count": 335,
+  "archive_only": [],
+  "commit_only": [],
+  "different": [],
+  "remote_source_count_before_build": 335,
+  "remote_source_count_after_gate": 335,
+  "remote_source_matches_commit": true
+}

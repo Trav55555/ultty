@@ -34,7 +34,7 @@ source ~/.local/share/ultty/shell-integration/ultty.zsh   # or ultty.bash
 
 They work alongside oh-my-zsh, pyenv and similar prompt hooks, and do
 nothing visible. Without them, everything below works except
-`last_command`, `wait` for `command_finished`, and the `command_*` events.
+`last_command`, fenced `run_and_wait`, `wait` for `command_finished`, and the `command_*` events. Direct-child jobs work without shell integration.
 Other terminals that understand OSC 133 use the same marks; the rest ignore
 them. There is no fish script yet.
 
@@ -46,54 +46,111 @@ For Claude Code, from a shell inside Ultty:
 claude mcp add ultty -- ulttyctl mcp
 ```
 
-`ulttyctl` talks to the Ultty window it runs in (through `ULTTY_PID`, which
-Ultty sets for its shells), so an agent started in an Ultty pane drives that
-window and no other. While that Ultty runs but has no control socket yet,
-commands fail rather than reach another window. Only once it has exited (a
-tmux session can outlive the window that started it) does `ulttyctl` use the
-most recently started Ultty instead, and it says so on stderr. Without
-`ULTTY_PID` it uses the most recently started one; `ulttyctl --pid <pid>`
-names an instance exactly and never falls back.
+`ulttyctl --pid <pid>` selects an instance explicitly. Otherwise it uses
+`ULTTY_PID`, which Ultty sets for its shells. Either selection fails if that
+instance exits or has no control socket; it never selects another instance.
+An invalid `ULTTY_PID` also fails unless `--pid` overrides it. When both
+selections are absent, the CLI discovers the most recently started instance.
+
+MCP authenticates discovery once, selects the window's random owner epoch and
+authentication token, and pins both for every call. It requires control schema 2. Restart MCP explicitly after replacing that
+window. Pane IDs are stable within that owner's lifetime; they are not
+global identities across terminal restarts.
+
+Global flags precede the command, including MCP: `ulttyctl --pid <pid> mcp`.
+When `--pid` selects an owner, `split` uses that owner's focused pane unless
+`--pane` explicitly names one; it does not inherit another owner's `ULTTY_PANE`.
 
 ## The tools
 
 | Tool | What it does |
 |---|---|
 | `ultty_list_panes` | Every pane: id, tab, focus, title, foreground program, working directory, size, status |
-| `ultty_run_command` | Type a command line into a pane's shell and press Enter |
+| `ultty_run_command` | Type shell text and Enter; success means input acceptance |
+| `ultty_run_and_wait` | Submit one printable shell line at an observed empty OSC 133 prompt and await its fenced completion |
+| `ultty_job_status`, `ultty_wait_job` | Inspect or wait for a direct child using the returned pane ID as its job ID |
 | `ultty_wait` | Wait for text to appear, the next command to finish (with its exit code), the bell, or a quiet period |
 | `ultty_last_command` | The last command in a pane: command line, output (last 200 lines unless asked), exit code, still running or not |
 | `ultty_read_text` | A pane's screen, optionally with scrollback |
-| `ultty_regions` | A native (ulttui) app's regions: layout, text, widget ids, focus |
+| `ultty_regions` | Native regions, exact widget IDs, declared actions and displayed generation |
+| `ultty_invoke_action` | Focus or activate an exact native widget; success requires application acknowledgement |
 | `ultty_push_override`, `ultty_clear_override` | Reshape a native app by widget id without editing its files (colour, hide, relabel, remap keys; [docs/overrides.md](overrides.md)), and take it back |
 | `ultty_type_text`, `ultty_send_key` | Type text, or press a key: `enter`, `up`, or `c` with `modifiers: "ctrl"` |
 | `ultty_search` | Find text in a pane's screen and scrollback |
 | `ultty_new_tab` | Open a tab, optionally running a program, and return its pane id |
+| `ultty_split` | Split a target pane right/down, optionally launching a program with an `args` array, and return its pane id |
+| `ultty_program_status` | Complete current OSC 7501 program records and generation |
+| `ultty_focus_pane`, `ultty_zoom_pane`, `ultty_swap_panes` | Focus, zoom or swap explicit pane IDs; swaps stay within one tab |
+| `ultty_workspace_list`, `ultty_workspace_save` | List or save named layout recipes; loading starts fresh shells |
 | `ultty_set_status` | Show what the agent is doing in the tab bar |
 | `ultty_screenshot` | The window as a PNG |
 | `ultty_info` | Window size, cursor, current tab |
 
 Tools that act on a pane take `pane` and use the focused pane without it.
+Set `pane` explicitly for unattended work.
+
+Input success means the bytes were accepted into the target's queue. A full
+or closed queue returns an error; success does not establish execution or
+completion. A native delivery error may report partial delivery to earlier
+recipients, so retrying can duplicate input.
+
+`ultty_run_command` types shell text and Enter into the foreground PTY.
+It assumes that program is a shell and does not preserve argument boundaries.
+Use `ultty_new_tab` or `ultty_split` with `command` and an `args` array for
+direct process launch. Arguments and a working directory require an explicit
+command. A successful reply means no setup or exec failure was reported during
+the startup receipt; application readiness and completion are separate gates.
 
 ### Running a command and reading the result
 
-Start the wait before the command, so a fast command cannot finish first:
+For a direct process, use structured arguments and wait by job identity:
 
-1. `ultty_new_tab` → `{"tab_index":1,"pane":4}`
-2. `ultty_set_status` `{pane: 4, state: "working", label: "running tests"}`
-3. `ultty_wait` `{pane: 4, until: "command_finished", timeout_ms: 600000}`,
-   and while it waits, `ultty_run_command` `{pane: 4, command: "cargo test"}`
-4. `ultty_last_command` `{pane: 4}` → the command line, the end of its
-   output, `exit_code`
-5. `ultty_set_status` `{pane: 4, state: "done"}`, or `"error"`
+1. `ultty_new_tab` `{command: "cargo", args: ["test"], cwd: "/path/to/project"}`
+   returns its pane ID, for example `4`.
+2. `ultty_wait_job` `{job: 4, timeout_ms: 600000}` returns the child outcome,
+   including when the child finished before the wait was registered.
 
-An MCP client that sends one call at a time can run the command first and
-then wait with `until: "quiet"`, or call `ultty_last_command` and check
-`running`.
+The owner retains up to 256 finished or explicitly closed jobs. Jobs do not
+retain output or process argument lists. Unknown or evicted IDs fail explicitly;
+closing a pane reports `closed` without claiming a process exit code (`ulttyctl`
+returns failure for that outcome). A job ID is
+valid only within its owner epoch.
+
+For an existing integrated shell, use one fenced operation:
+
+1. `ultty_run_and_wait` `{pane: 4, command: "cargo test", timeout_ms: 600000}`
+   submits text and reserves its completion under one PTY lock.
+2. `ultty_last_command` `{pane: 4}` reads the shell's captured output.
+
+The submission requires an observed empty OSC 133 prompt, no pending editable
+input or queued PTY output, and no active submission. Commands containing control
+characters are refused. Completion requires the reserved command's OSC 133 C/D
+boundary. Prompt/reset/exit cancels the reservation; a timeout does not cancel the
+command. Output remains a bounded live-terminal inspection, not a durable job log.
+
+The older `ultty_wait` with `until: "command_finished"` watches the next future
+completion; it does not identify a command. The MCP server handles calls serially,
+so a blocking wait prevents a later launch on the same connection. A quiet period
+proves only that output stopped. Prefer the identity-based operations above for
+launch-and-wait workflows.
 
 A program that prints ConEmu's progress report (`OSC 9;4;1;<percent>`, as
 Windows Terminal and Ghostty read it) gets the same progress marker without
 the socket. A status set through the socket takes precedence.
+
+### Native widget actions
+
+Read `ultty_regions`, then pass its explicit `pane`, `session`, `shown_generation`
+(as `expected_generation`), `region`, `widget_id` and `action` to
+`ultty_invoke_action`. Focus works for unique visible focusable widgets. Activation
+requires the application to register a handler; a button label alone does not
+authorize an action. The first stage supports full-scene native widgets.
+
+A stale, hidden, ambiguous, unsupported or disabled target fails. The app checks
+its committed frame again before handling the request. Success means the app
+acknowledged dispatch, not that an asynchronous task finished. After a timeout or
+connection error, reinspect state before retrying: the action may have applied.
+See [Control protocol](CONTROL_PROTOCOL.md#native-semantic-actions).
 
 ### Asking for the user
 
@@ -104,12 +161,12 @@ the window manager to flag it, as the bell does.
 ## The same from a shell
 
 ```sh
-pane=$(ulttyctl new-tab)                         # prints the new pane's id
-ulttyctl --pane "$pane" wait-for --command-done --timeout 600000 &
-ulttyctl --pane "$pane" run cargo test
-wait $!                                          # exits with cargo's status
-ulttyctl --pane "$pane" last-command --tail 50   # also exits with it
-ulttyctl --pane "$pane" status done "tests passed"
+job=$(ulttyctl new-tab cargo test)
+ulttyctl wait-job "$job" --timeout 600000  # exits with the child's observed status
+
+# In an existing, idle shell with OSC 133 integration:
+ulttyctl --pane 4 run-wait --timeout 600000 'cargo test'
+ulttyctl --pane 4 last-command --tail 50
 ```
 
 `ulttyctl --json <command>` prints the full reply as JSON. `--pane` goes
@@ -131,6 +188,25 @@ per line as things happen, until it is stopped:
 Also `notification`, `title_changed` and `process_exited`. A subscriber
 costs nothing while nothing happens; one that stops reading for more than
 1 MiB of events is disconnected.
+
+### Owner identity and replay
+
+`ulttyctl describe` reports control schema version 2, the owner's PID and random
+epoch, and supported operations. The historical `version` response describes the
+build/native protocol and remains separate. Custom workflows should wrap requests
+in `with_owner` after authenticated discovery; a mismatch fails before dispatch.
+
+`ulttyctl subscribe-v2` prints an initial response containing the current cursor
+and pane metadata/status snapshot, followed by sequenced event records. It includes
+`program_status_changed`; query `program-status` for current complete records.
+The snapshot and subscription registration share one owner dispatch boundary.
+They do not capture an atomic raw grid across every PTY parser.
+
+Resume with `ulttyctl subscribe-v2 --cursor '<cursor JSON>'`. The server keeps at
+most 512 events and 1 MiB of history even with no subscribers. A restarted owner,
+expired history or future cursor returns `resync_required` and closes the stream;
+request a fresh snapshot without a cursor. Replay, filter and checkpoint rules are
+specified in [Control protocol](CONTROL_PROTOCOL.md).
 
 ## What to know
 

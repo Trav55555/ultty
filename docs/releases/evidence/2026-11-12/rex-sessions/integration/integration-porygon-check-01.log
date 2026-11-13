@@ -1,0 +1,7 @@
+    Blocking waiting for file lock on build directory
+    Checking tungstenite v0.24.0
+    Checking webpki-roots v0.26.11
+    Checking tokio-tungstenite v0.24.0
+    Checking ulttui v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/rex-features/crates/ulttui)
+    Checking porygon-tui v0.1.0 (/home/travers/projects/tui-terminal/.worktrees/rex-features/examples/porygon-tui)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 53s

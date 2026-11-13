@@ -349,6 +349,12 @@ pub enum Action {
 
     /// Normal keypad mode (DECKPNM — ESC >)
     NormalKeypadMode,
+
+    // Keep status variants after the hot print path to avoid extra dispatch instructions.
+    /// A validated OSC 7501 record replacement or subtree clear.
+    ProgramStatus(crate::program_status::ProgramStatusReport),
+    /// OSC 7501 feature detection, answered without application text.
+    ProgramStatusQuery,
 }
 
 /// Output produced by the ANSI parser's span-aware feed path.
@@ -650,6 +656,8 @@ pub struct AnsiParser {
     /// Intermediate byte for CSI sequences (e.g., space in `CSI Ps SP q`)
     pub(super) intermediate: Option<u8>,
     pub(super) osc_buffer: Vec<u8>,
+    /// Consume the rest of an oversized status without printing its tail.
+    pub(super) osc_discard: bool,
     pub(super) dcs_buffer: Vec<u8>,
     /// The DCS string passed its size limit: swallow the rest to ST.
     pub(super) dcs_overflow: bool,
@@ -687,6 +695,7 @@ impl AnsiParser {
             marker: None,
             intermediate: None,
             osc_buffer: Vec::new(),
+            osc_discard: false,
             dcs_buffer: Vec::new(),
             dcs_overflow: false,
             dcs_params: Vec::new(),
@@ -844,6 +853,7 @@ impl AnsiParser {
         self.state = State::Ground;
         self.clear_csi();
         self.osc_buffer.clear();
+        self.osc_discard = false;
         self.dcs_buffer.clear();
         self.dcs_overflow = false;
         self.dcs_params.clear();

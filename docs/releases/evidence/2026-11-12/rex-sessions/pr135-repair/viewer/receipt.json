@@ -1,0 +1,189 @@
+{
+  "binaries": {
+    "ULTTY": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/ultty",
+      "sha256": "109cb7cefefff8d81138d1aca92eae0be700d6a7ba90bb8a4adc69f4fee531f9"
+    },
+    "ULTTY_SESSION": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/ultty-session",
+      "sha256": "ba9d44471c266e4f5c77db4ae692422d98e8e30d2e9eec057980fbed376c897d"
+    },
+    "COUNTER_APP": {
+      "path": "/home/travers/projects/tui-terminal/target/rex-features/logs/pr135-final-bin/counter-app",
+      "sha256": "7e1296d0fa3a067275798ae75ee46de094484aea6b93fc86e246d326df5bb200"
+    }
+  },
+  "screenshots": [
+    {
+      "file": "first.png",
+      "sha256": "8fa14980bc8a9014dfaed04f8b7a6353841f320882c6b45db09f5b11e4d3b995",
+      "width": 1000,
+      "height": 700,
+      "interior_ink": 206480
+    },
+    {
+      "file": "before-kill.png",
+      "sha256": "f4c196099dcd3b9ef9ff88d5b31b4aba69dddad301940bcc211989ccc4b897ea",
+      "width": 1000,
+      "height": 700,
+      "interior_ink": 79536
+    },
+    {
+      "file": "observer.png",
+      "sha256": "f4c196099dcd3b9ef9ff88d5b31b4aba69dddad301940bcc211989ccc4b897ea",
+      "width": 1000,
+      "height": 700,
+      "interior_ink": 79536
+    },
+    {
+      "file": "reattached.png",
+      "sha256": "f4c196099dcd3b9ef9ff88d5b31b4aba69dddad301940bcc211989ccc4b897ea",
+      "width": 1000,
+      "height": 700,
+      "interior_ink": 79536
+    }
+  ],
+  "phases": [
+    "graceful close preserved owner, child, native session and count",
+    "SIGKILL viewer preserved owner, child and native session",
+    "observer GUI and wire mutations refused; controller reattached to count=13"
+  ],
+  "idle_samples": [
+    {
+      "label": "controller-idle",
+      "elapsed_seconds": 1.0000694980844855,
+      "clock_ticks_per_second": 100,
+      "processes": {
+        "host": {
+          "before": {
+            "pid": 2228305,
+            "rss_kib": 7544,
+            "threads": 2,
+            "cpu_ticks": 0
+          },
+          "after": {
+            "pid": 2228305,
+            "rss_kib": 7544,
+            "threads": 2,
+            "cpu_ticks": 1
+          },
+          "cpu_ticks_delta": 1
+        },
+        "viewer": {
+          "before": {
+            "pid": 2228335,
+            "rss_kib": 119684,
+            "threads": 31,
+            "cpu_ticks": 12
+          },
+          "after": {
+            "pid": 2228335,
+            "rss_kib": 119684,
+            "threads": 31,
+            "cpu_ticks": 12
+          },
+          "cpu_ticks_delta": 0
+        }
+      }
+    },
+    {
+      "label": "owner-without-gui-viewer",
+      "elapsed_seconds": 1.0001008089166135,
+      "clock_ticks_per_second": 100,
+      "processes": {
+        "host": {
+          "before": {
+            "pid": 2228305,
+            "rss_kib": 7548,
+            "threads": 2,
+            "cpu_ticks": 3
+          },
+          "after": {
+            "pid": 2228305,
+            "rss_kib": 7548,
+            "threads": 2,
+            "cpu_ticks": 4
+          },
+          "cpu_ticks_delta": 1
+        }
+      }
+    },
+    {
+      "label": "observer-idle",
+      "elapsed_seconds": 1.0000711811007932,
+      "clock_ticks_per_second": 100,
+      "processes": {
+        "host": {
+          "before": {
+            "pid": 2228305,
+            "rss_kib": 7548,
+            "threads": 2,
+            "cpu_ticks": 4
+          },
+          "after": {
+            "pid": 2228305,
+            "rss_kib": 7548,
+            "threads": 2,
+            "cpu_ticks": 4
+          },
+          "cpu_ticks_delta": 0
+        },
+        "viewer": {
+          "before": {
+            "pid": 2229196,
+            "rss_kib": 116896,
+            "threads": 31,
+            "cpu_ticks": 12
+          },
+          "after": {
+            "pid": 2229196,
+            "rss_kib": 116896,
+            "threads": 31,
+            "cpu_ticks": 12
+          },
+          "cpu_ticks_delta": 0
+        }
+      }
+    },
+    {
+      "label": "owner-after-observer-close",
+      "elapsed_seconds": 1.002507791039534,
+      "clock_ticks_per_second": 100,
+      "processes": {
+        "host": {
+          "before": {
+            "pid": 2228305,
+            "rss_kib": 7548,
+            "threads": 2,
+            "cpu_ticks": 5
+          },
+          "after": {
+            "pid": 2228305,
+            "rss_kib": 7548,
+            "threads": 2,
+            "cpu_ticks": 6
+          },
+          "cpu_ticks_delta": 1
+        }
+      }
+    }
+  ],
+  "observer_input": {
+    "type": "error",
+    "code": "permission_denied"
+  },
+  "close_elapsed_seconds": {
+    "first": 0.06979134492576122,
+    "reattached": 0.054624930024147034
+  },
+  "identity": {
+    "owner": {
+      "pid": 2228305,
+      "epoch": "9b50d868d96d30dfb596cf837f258c3f536a9b667adad0137cff90415593d6db"
+    },
+    "pane": 0,
+    "pid": 2228310,
+    "native": 1
+  },
+  "result": "pass"
+}

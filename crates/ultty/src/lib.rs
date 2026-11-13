@@ -37,8 +37,10 @@ compile_error!(
     "ultty is currently a Unix-first runtime. Windows support requires future ConPTY and native transport work."
 );
 
+#[cfg(feature = "gui")]
 pub mod a11y;
 pub mod config;
+#[cfg(feature = "gui")]
 pub mod config_watcher;
 pub mod control;
 #[cfg(feature = "heap-stats")]
@@ -46,19 +48,28 @@ pub mod heap_stats;
 pub mod heap_trim;
 /// The terminal screen model, re-exported from [`ultty_vt`].
 pub use ultty_vt::grid;
+pub mod attach;
 pub mod platform;
 pub mod protocol;
 pub mod pty;
+pub mod runtime;
 
 pub mod event_loop;
+pub mod geometry;
 pub mod inherit_dir;
 pub mod keys;
 pub mod pane_layout;
+#[cfg(feature = "gui")]
 pub mod renderer;
 pub mod scene;
 pub mod session;
+#[cfg(feature = "gui")]
 pub mod tabs;
 pub mod terminal_manager;
 pub mod testing;
+#[cfg(feature = "gui")]
 pub mod url;
 pub mod vim;
+
+#[cfg(feature = "gui")]
+pub mod viewer;

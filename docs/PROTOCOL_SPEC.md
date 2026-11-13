@@ -107,8 +107,8 @@ within a timeout (`ulttui`: 1 s for both steps), uses ANSI.
 
 **Sessions.** A terminal opens an in-band session only when a well-formed
 `ClientHello` starts the data, so stray strings, such as a file being
-displayed, cannot open one. Ultty allows one in-band session per tab, and
-only on a tab with a single pane.
+displayed, cannot open one. Ultty allows one in-band session per pane. The
+PTY that carried the hello determines the pane and the return path.
 
 **Confirmation.** A hello alone does not show that a live app is reading
 the terminal's answers: a displayed file or a remote host's output can hold
@@ -170,8 +170,9 @@ App                                          Terminal
 | `CAP_SEMANTICS` | `0x0200` |
 | `CAP_INPUT_CURSOR` | `0x0400` |
 | `CAP_OVERRIDE_PUSH` | `0x0800` |
+| `CAP_SEMANTIC_ACTIONS` | `0x1000` |
 
-`CAP_ALL_KNOWN` is the OR of those bits. `CLIENT_DEFAULT_CAPABILITIES`, what a client asks for unless it has reason not to, is `CAP_ALL_KNOWN` without `CAP_OVERRIDE_PUSH`: that bit commits the client to answering `SetOverride` (section 10.7), so only a client with that code adds it. Capabilities are negotiated as `requested & supported`; the version is `min(client, server)`. A version below `MIN_PROTOCOL_VERSION` is rejected with `Error` 426.
+`CAP_ALL_KNOWN` is the OR of those bits. `CLIENT_DEFAULT_CAPABILITIES`, what a client asks for unless it has reason not to, is `CAP_ALL_KNOWN` without `CAP_OVERRIDE_PUSH` and `CAP_SEMANTIC_ACTIONS`. These bits commit the client to dispatching and answering override or action requests, so only a client with that code adds them. Capabilities are negotiated as `requested & supported`; the version is `min(client, server)`. A version below `MIN_PROTOCOL_VERSION` is rejected with `Error` 426.
 
 | Response | Payload in encoding order |
 |----------|---------------------------|
@@ -232,7 +233,8 @@ App and terminal codes are separate namespaces.
 | `Blur` | `0x0042` | `Subscribe` | `0x0050` |
 | `Unsubscribe` | `0x0051` | `ClipboardGet` | `0x0060` |
 | `ClipboardSet` | `0x0061` | `Pong` | `0x0070` |
-| `OverrideResult` | `0x0080` | `Disconnect` | `0x00FF` |
+| `OverrideResult` | `0x0080` | `ActionResult` | `0x0081` |
+| `Disconnect` | `0x00FF` | | |
 
 #### Terminal → App
 
@@ -243,7 +245,8 @@ App and terminal codes are separate namespaces.
 | `Resize` | `0x0022` | `FocusEvent` | `0x0023` |
 | `ScrollEvent` | `0x0024` | `ClipboardContent` | `0x0025` |
 | `SurfaceEvent` | `0x0026` | `Ping` | `0x0070` |
-| `SetOverride` | `0x0080` | `Error` | `0x00FF` |
+| `SetOverride` | `0x0080` | `InvokeAction` | `0x0081` |
+| `Error` | `0x00FF` | | |
 
 Code `0x0026` is `SetSemantics` from the app and `SurfaceEvent` from the terminal; `0x0080` is `OverrideResult` from the app and `SetOverride` from the terminal.
 
@@ -612,14 +615,14 @@ Both app messages without `CAP_INLINE_SURFACES` are `Error` 400. Like other regi
 
 **Anchoring.** The place of a surface in the text is set by an APC string the app writes to its stdout, on both transports: `ESC _ u <session_id> ; <surface_id> ; <rows> ESC \` (decimal ASCII, at most 64 bytes, at column 0). The terminal reserves `rows` rows there, and the app then prints exactly `rows` lines of fallback text, which is what a terminal that drops the string shows.
 
-**Placing.** A surface is placed, and the app gets `SurfaceEvent { kind: Placed }`, when its anchor and its `CreateSurface` have both arrived, in either order. The anchor pairs only with a session of the tab whose PTY carried it, and only while that PTY is the tab's one pane; an anchor from a pane of a split tab is released at once. Then:
+**Placing.** A surface is placed, and the app gets `SurfaceEvent { kind: Placed }`, when its anchor and its `CreateSurface` have both arrived, in either order. The anchor pairs only with a session bound to the pane whose PTY carried it. Then:
 
 - If the anchor's `rows` and the `CreateSurface`'s disagree, the surface is dropped with `Error` 400 and its rows keep the fallback text.
 - A `CreateSurface` whose anchor has not arrived 2 s later is dropped with `Error` 400. An anchor no surface claims within 2 s is released: its rows keep the fallback text and nothing more pairs with it.
 - An anchor the terminal refused (on the alternate screen, no room in the scroll region, or 1024 anchors live) drops its surface with `Error` 400 if the surface is waiting for it; a surface created after the refusal waits out its 2 s. The terminal reports at most 64 refused anchors between two pairing passes; past that a refusal is not reported, and a surface waiting for that anchor waits out its 2 s instead of getting an immediate 400.
 - A second anchor for a surface already placed is ignored and released, so another program in the tab cannot move or claim it.
 
-**Drawing.** A placed surface is drawn over its rows, at the pane's left edge and the row its first line shows on, clipped to its own rows and to the pane's grid, with the grid text drawn under it. The surface root's background covers the fallback text; a root without `bg` is filled with the terminal's background. It moves with its rows as output scrolls them and as the viewport scrolls through scrollback. A surface with no row on the screen is not drawn; nor are surfaces while the alternate screen shows, while the tab is hidden, or in a tab with more than one pane. `Hidden` and `Shown` tell the app when a surface stops and starts being drawn for any of these reasons, once per change.
+**Drawing.** A placed surface is drawn over its rows, at the pane's left edge and the row its first line shows on, clipped to its own rows and to the pane's grid, with the grid text drawn under it. The surface root's background covers the fallback text; a root without `bg` is filled with the terminal's background. It moves with its rows as output scrolls them and as the viewport scrolls through scrollback. A surface with no row on the screen is not drawn; nor are surfaces while the alternate screen shows, while the tab is hidden, or while a full scene covers the pane. `Hidden` and `Shown` tell the app when a surface stops and starts being drawn for any of these reasons, once per change.
 
 **Rasterising.** A placed surface's rows hold its scene as styled cells, so copy, search, `ulttyctl text` and `last-command` read what is drawn, in order with the text around it. Whenever its scene changed (a frame, a scroll, an animation step, a new viewport width), the next pass of the UI loop writes it into its rows, on the screen or in scrollback; a pass without a change writes nothing. The rows are written while the surface is hidden too, but not while the alternate screen shows: they are written when it goes. The cells are the region tree drawn as the GPU draws it and clipped the same way: backgrounds as cell background (a root without `bg` gives the default background), borders as box-drawing characters for their `BorderType` (`Ascii` gives `+`, `-` and `|`), text broken into lines where the renderer breaks it, `RichText` spans and region styles as foreground colour, bold, italic, underline and dim, widgets as their label or value, and images as blank cells. Borders take no room in the layout, so they are drawn last, over any content on their cells: a bordered region needs padding to keep its text clear of them. Only the visible cells of a region are visited, however large its layout. A row whose cells did not change is not written; writing one drops a selection that covers it, as streaming output does, and leaves other selections, scrolled back or not, alone. After a resize the rows are clipped or padded, not re-wrapped, and the surface is laid out and written again at the new width.
 
@@ -716,3 +719,10 @@ Supply row and column track vectors and place children with start/end `GridLine`
 1. Which additional properties should transitions support?
 2. Should app-defined widgets be added in a future version?
 3. Should terminal tabs or splits be represented?
+
+## Semantic actions
+
+[Native semantic actions](SEMANTIC_ACTIONS.md) specifies capability `0x1000`,
+request/result type `0x0081`, exact widget identity, increasing committed app
+frame IDs, explicit activation dispatch, bounds, and applied/refused replies.
+The external displayed generation and the app frame ID are separate fences.

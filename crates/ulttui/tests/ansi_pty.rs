@@ -32,6 +32,19 @@ struct Typist {
 impl Application for Typist {
     type Message = Option<char>;
 
+    fn init(&mut self) -> Cmd<Self::Message> {
+        use ulttui::program_status::{Kind, Report, State};
+        Cmd::batch(vec![
+            Cmd::report_status(Report::new(State::Working)),
+            Cmd::report_status(Report {
+                kind: Some(Kind::Question),
+                ..Report::new(State::Blocked)
+            }),
+            Cmd::report_status(Report::new(State::Done)),
+            Cmd::clear_status(None),
+        ])
+    }
+
     fn update(&mut self, msg: Option<char>) -> Cmd<Option<char>> {
         match msg {
             Some('!') => {
@@ -184,7 +197,10 @@ fn a_burst_bigger_than_one_read_is_all_delivered_and_the_loop_then_sleeps() {
         while let Ok(n @ 1..) = reader.read(&mut buf) {
             if !announced {
                 seen.extend_from_slice(&buf[..n]);
-                if seen.windows(ALT_SCREEN.len()).any(|w| w == ALT_SCREEN) {
+                let reports = b"\x1b]7501;state=working\x1b\\\x1b]7501;state=blocked:kind=question\x1b\\\x1b]7501;state=done\x1b\\\x1b]7501;state=clear\x1b\\";
+                if seen.windows(ALT_SCREEN.len()).any(|w| w == ALT_SCREEN)
+                    && seen.windows(reports.len()).any(|wire| wire == reports)
+                {
                     announced = true;
                     let _ = started_tx.send(());
                 }

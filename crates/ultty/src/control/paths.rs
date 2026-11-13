@@ -78,9 +78,7 @@ pub fn find_running_instance(dir: &Path) -> Option<ControlEndpoint> {
 pub enum InstanceRequest {
     /// No preference: the newest running instance.
     Newest,
-    /// The Ultty this command runs inside, from `ULTTY_PID`. While that
-    /// process runs, only its socket will do; once it is gone (a tmux
-    /// session can outlive the window that started it), the newest.
+    /// The Ultty selected by `ULTTY_PID`, never another process.
     Own(u32),
     /// Exactly this pid (`ulttyctl --pid`), never another.
     Exact(u32),
@@ -91,8 +89,8 @@ pub enum InstanceRequest {
 pub struct FoundInstance {
     /// Where to connect.
     pub endpoint: ControlEndpoint,
-    /// The `ULTTY_PID` that named an Ultty no longer running, when the
-    /// newest instance was taken in its place. Callers must say so.
+    /// Reserved for discovery compatibility; explicit selection never falls
+    /// back, so successful discovery always returns `None`.
     pub replaces_gone: Option<u32>,
 }
 
@@ -102,7 +100,7 @@ pub enum InstanceError {
     /// The requested Ultty runs but is not listening (still starting, or
     /// stuck). Another instance is never used in its place.
     NotListening(u32),
-    /// `--pid` named a process that is not a running Ultty.
+    /// `--pid` or `ULTTY_PID` named a process that is not a running Ultty.
     NotRunning(u32),
     /// No instance is listening at all.
     NoneRunning,
@@ -112,8 +110,8 @@ pub enum InstanceError {
 ///
 /// Ultty puts its pid in `ULTTY_PID` for every shell it starts, so
 /// `ulttyctl` run inside a window controls that window. A script that
-/// starts its own Ultty and exports `ULTTY_PID` must never reach some
-/// other window while its own is still starting up.
+/// starts its own Ultty and exports `ULTTY_PID` must never reach some other
+/// window, including after the selected process exits.
 pub fn find_instance(dir: &Path, request: InstanceRequest) -> Result<FoundInstance, InstanceError> {
     // A pid reused by some other program counts as gone.
     let is_running_ultty = |pid| libc::pid_t::try_from(pid).is_ok_and(is_running_ultty);
@@ -128,24 +126,11 @@ pub fn find_instance(dir: &Path, request: InstanceRequest) -> Result<FoundInstan
         replaces_gone: None,
     };
     match request {
-        InstanceRequest::Exact(pid) => match listening(pid) {
+        InstanceRequest::Exact(pid) | InstanceRequest::Own(pid) => match listening(pid) {
             Some(endpoint) => Ok(found(endpoint)),
             None if is_running_ultty(pid) => Err(InstanceError::NotListening(pid)),
             None => Err(InstanceError::NotRunning(pid)),
         },
-        InstanceRequest::Own(pid) => {
-            if let Some(endpoint) = listening(pid) {
-                return Ok(found(endpoint));
-            }
-            if is_running_ultty(pid) {
-                return Err(InstanceError::NotListening(pid));
-            }
-            let endpoint = find_running_instance(dir).ok_or(InstanceError::NoneRunning)?;
-            Ok(FoundInstance {
-                endpoint,
-                replaces_gone: Some(pid),
-            })
-        }
         InstanceRequest::Newest => find_running_instance(dir)
             .map(found)
             .ok_or(InstanceError::NoneRunning),
@@ -261,22 +246,19 @@ mod tests {
     }
 
     #[test]
-    fn a_gone_own_instance_falls_back_to_the_newest_and_says_so() {
+    fn a_gone_own_instance_never_falls_back_to_the_newest() {
         let dir = tempfile::tempdir().unwrap();
-        let (newest, _listener) = listen(dir.path(), 200);
+        let (_newest, _listener) = listen(dir.path(), 200);
         let gone = reaped_child_pid();
 
         assert_eq!(
             find_instance(dir.path(), InstanceRequest::Own(gone)),
-            Ok(FoundInstance {
-                endpoint: newest,
-                replaces_gone: Some(gone),
-            })
+            Err(InstanceError::NotRunning(gone))
         );
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(
             find_instance(empty.path(), InstanceRequest::Own(gone)),
-            Err(InstanceError::NoneRunning)
+            Err(InstanceError::NotRunning(gone))
         );
     }
 
@@ -284,7 +266,7 @@ mod tests {
     #[test]
     fn an_own_pid_reused_by_another_program_counts_as_gone() {
         let dir = tempfile::tempdir().unwrap();
-        let (newest, _listener) = listen(dir.path(), 200);
+        let (_newest, _listener) = listen(dir.path(), 200);
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
@@ -293,13 +275,7 @@ mod tests {
         let result = find_instance(dir.path(), InstanceRequest::Own(child.id()));
         child.kill().unwrap();
         child.wait().unwrap();
-        assert_eq!(
-            result,
-            Ok(FoundInstance {
-                endpoint: newest,
-                replaces_gone: Some(child.id()),
-            })
-        );
+        assert_eq!(result, Err(InstanceError::NotRunning(child.id())));
     }
 
     #[test]

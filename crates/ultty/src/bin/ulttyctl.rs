@@ -8,9 +8,9 @@ use ultty::control::format_response;
 use ultty::control::paths::{control_dir, ControlEndpoint, InstanceError, InstanceRequest};
 use ultty_protocol::control::{
     ControlData, ControlEnvelope, ControlEvent, ControlRequest, ControlResponse, OutputFormat,
-    PaneState, PaneStatus, SplitDirection, WaitCondition,
+    OwnerRef, PaneState, PaneStatus, SplitDirection, WaitCondition,
 };
-use ultty_protocol::{Key, Modifiers, OverrideFormat, MAX_OVERRIDE_SOURCE_LEN};
+use ultty_protocol::{Key, Modifiers, OverrideFormat, SemanticActionKind, MAX_OVERRIDE_SOURCE_LEN};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -23,16 +23,6 @@ fn main() {
     if should_print_version(&args) {
         println!("{}", version_output());
         std::process::exit(0);
-    }
-
-    if args.first().map(String::as_str) == Some("mcp") {
-        std::process::exit(match run_mcp() {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("error: {}", e);
-                1
-            }
-        });
     }
 
     let use_json = args.iter().any(|a| a == "--json");
@@ -56,6 +46,26 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let instance = match instance_request(pid_flag) {
+        Ok(instance) => instance,
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::exit(2);
+        }
+    };
+    if args.first().map(String::as_str) == Some("mcp") {
+        if args.len() != 1 {
+            eprintln!("error: instance flags must precede mcp");
+            std::process::exit(2);
+        }
+        std::process::exit(match run_mcp(instance) {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("error: {error}");
+                1
+            }
+        });
+    }
 
     let mut request = match parse_cli_request(&args) {
         Ok(request) => request,
@@ -64,16 +74,22 @@ fn main() {
             std::process::exit(2);
         }
     };
-    default_split_target(&mut request, own_pane());
+    default_split_target(
+        &mut request,
+        if pid_flag.is_none() { own_pane() } else { None },
+    );
     let read_timeout = read_timeout_for(&request, timeout_secs);
-    let endpoint = match find_instance(instance_request(pid_flag)) {
+    let endpoint = match find_instance(instance) {
         Ok(endpoint) => endpoint,
         Err(e) => {
             eprintln!("error: {}", e);
             std::process::exit(1);
         }
     };
-    let subscribe = matches!(request, ControlRequest::Subscribe { .. });
+    let subscribe = matches!(
+        request,
+        ControlRequest::Subscribe { .. } | ControlRequest::SubscribeV2 { .. }
+    );
     let request = with_auth_token(request, read_auth_token(&endpoint.token));
     // Always ask for JSON so the reply can be parsed and the exit status set
     // from it; text output is rendered here with the server's formatter.
@@ -108,6 +124,19 @@ fn main() {
     } else {
         OutputFormat::Text
     };
+    if let ControlResponse::Data(
+        ControlData::TabOpened {
+            warning: Some(warning),
+            ..
+        }
+        | ControlData::PaneOpened {
+            warning: Some(warning),
+            ..
+        },
+    ) = &response
+    {
+        eprintln!("warning: {warning}");
+    }
     print!("{}", format_response(&response, format));
     std::process::exit(exit_status(&response));
 }
@@ -119,10 +148,14 @@ fn read_timeout_for(request: &ControlRequest, read_timeout_secs: u64) -> u64 {
     // The server gives the app 5 s to answer an override push.
     const OVERRIDE_REPLY_SECS: u64 = 5;
     match request {
-        ControlRequest::WaitFor { timeout_ms, .. } => {
+        ControlRequest::WaitFor { timeout_ms, .. }
+        | ControlRequest::RunCommandAndWait { timeout_ms, .. }
+        | ControlRequest::WaitJob { timeout_ms, .. } => {
             read_timeout_secs.max(timeout_ms.div_ceil(1000) + WAIT_FOR_MARGIN_SECS)
         }
-        ControlRequest::PushOverride { .. } | ControlRequest::ClearOverride { .. } => {
+        ControlRequest::PushOverride { .. }
+        | ControlRequest::ClearOverride { .. }
+        | ControlRequest::InvokeAction { .. } => {
             read_timeout_secs.max(OVERRIDE_REPLY_SECS + WAIT_FOR_MARGIN_SECS)
         }
         _ => read_timeout_secs,
@@ -147,7 +180,11 @@ fn exit_status(response: &ControlResponse) -> i32 {
         return 1;
     }
     match response {
-        ControlResponse::Data(ControlData::WaitEvent {
+        ControlResponse::Data(ControlData::ProcessJob {
+            outcome: ultty_protocol::control::ProcessJobOutcome::Exited { status: code },
+            ..
+        })
+        | ControlResponse::Data(ControlData::WaitEvent {
             event:
                 ControlEvent::CommandFinished {
                     exit_code: Some(code),
@@ -157,6 +194,10 @@ fn exit_status(response: &ControlResponse) -> i32 {
         | ControlResponse::Data(ControlData::LastCommand {
             exit_code: Some(code),
             running: false,
+            ..
+        })
+        | ControlResponse::Data(ControlData::ShellCommandFinished {
+            exit_code: Some(code),
             ..
         }) => {
             if (0..=255).contains(code) {
@@ -172,34 +213,39 @@ fn exit_status(response: &ControlResponse) -> i32 {
 fn response_is_failure(response: &ControlResponse) -> bool {
     matches!(
         response,
-        ControlResponse::Error { .. } | ControlResponse::Data(ControlData::WaitTimeout)
+        ControlResponse::Error { .. }
+            | ControlResponse::Data(ControlData::WaitTimeout | ControlData::ResyncRequired { .. })
+            | ControlResponse::Data(ControlData::ProcessJob {
+                outcome: ultty_protocol::control::ProcessJobOutcome::Closed,
+                ..
+            })
     )
 }
 
 /// The instance to ask for: `--pid` exactly, else the Ultty this command
 /// runs inside (`ULTTY_PID`), else the newest.
-fn instance_request(pid_flag: Option<u32>) -> InstanceRequest {
-    let own_pid = std::env::var("ULTTY_PID")
-        .ok()
-        .and_then(|pid| pid.parse().ok());
-    match (pid_flag, own_pid) {
-        (Some(pid), _) => InstanceRequest::Exact(pid),
-        (None, Some(pid)) => InstanceRequest::Own(pid),
-        (None, None) => InstanceRequest::Newest,
-    }
+fn instance_request(pid_flag: Option<u32>) -> Result<InstanceRequest, String> {
+    select_instance(pid_flag, std::env::var_os("ULTTY_PID"))
 }
 
-/// Find the instance `request` names. Taking the newest instance in place
-/// of a `ULTTY_PID` that has gone is said on stderr, never done silently.
+fn select_instance(
+    pid_flag: Option<u32>,
+    environment: Option<std::ffi::OsString>,
+) -> Result<InstanceRequest, String> {
+    if let Some(pid) = pid_flag {
+        return Ok(InstanceRequest::Exact(pid));
+    }
+    Ok(match selected_pid(environment)? {
+        Some(pid) => InstanceRequest::Own(pid),
+        None => InstanceRequest::Newest,
+    })
+}
+
+/// Find exactly the selected instance. Only absent selection discovers newest.
 fn find_instance(request: InstanceRequest) -> Result<ControlEndpoint, String> {
     let dir = control_dir().map_err(|e| format!("cannot use the control directory: {}", e))?;
     match ultty::control::paths::find_instance(&dir, request) {
-        Ok(found) => {
-            if let (Some(gone), Some(used)) = (found.replaces_gone, found.endpoint.pid()) {
-                eprintln!("ulttyctl: ULTTY_PID {gone} is not running; using ultty {used}");
-            }
-            Ok(found.endpoint)
-        }
+        Ok(found) => Ok(found.endpoint),
         Err(e) => Err(instance_error_message(e, request, &dir)),
     }
 }
@@ -215,12 +261,26 @@ fn instance_error_message(error: InstanceError, request: InstanceRequest, dir: &
             "ultty {pid}{named_by} has no control socket yet in {}; not using another instance",
             dir.display()
         ),
-        InstanceError::NotRunning(pid) => format!("ultty {pid}{named_by} is not running"),
+        InstanceError::NotRunning(pid) => {
+            format!("ultty {pid}{named_by} is not running; refusing to target another instance")
+        }
         InstanceError::NoneRunning => format!(
             "no running ultty has a control socket in {} (is it running?)",
             dir.display()
         ),
     }
+}
+
+fn selected_pid(value: Option<std::ffi::OsString>) -> Result<Option<u32>, String> {
+    value
+        .map(|value| {
+            value
+                .to_str()
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|pid| *pid != 0)
+                .ok_or_else(|| "ULTTY_PID must select a positive numeric process id".to_string())
+        })
+        .transpose()
 }
 
 /// Read the control auth token that instance wrote at startup, if any.
@@ -268,6 +328,9 @@ fn take_pid_flag(mut args: Vec<String>) -> Result<(Vec<String>, Option<u32>), St
                     .ok_or_else(|| "--pid requires the pid of a running ultty".to_string())?
                     .parse()
                     .map_err(|_| "--pid requires a numeric pid".to_string())?;
+                if pid == 0 {
+                    return Err("--pid requires a positive numeric pid".into());
+                }
                 args.drain(index..index + 2);
                 return Ok((args, Some(pid)));
             }
@@ -293,6 +356,12 @@ fn remove_flag_with_value(args: Vec<String>, flag: &str) -> Vec<String> {
         result.push(arg);
     }
     result
+}
+
+fn parse_job(args: &[String]) -> Result<u64, String> {
+    args.get(1)
+        .and_then(|job| job.parse().ok())
+        .ok_or_else(|| "a numeric job ID is required".into())
 }
 
 fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
@@ -381,6 +450,40 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             index: rest.first().and_then(|arg| parse_display_tab_index(arg)),
         }),
         "focus" => Ok(ControlRequest::FocusWindow),
+        "workspace" => match rest {
+            [action] if action == "list" => Ok(ControlRequest::WorkspaceList),
+            [action, name] if action == "save" => {
+                Ok(ControlRequest::WorkspaceSave { name: name.clone() })
+            }
+            _ => Err(
+                "usage: workspace list | workspace save <name>; open with ultty --workspace <name>"
+                    .to_string(),
+            ),
+        },
+        "focus-pane" => match rest {
+            [target] => Ok(ControlRequest::FocusPane {
+                target: pane_id(target)?,
+            }),
+            _ => Err("usage: focus-pane <pane>".to_string()),
+        },
+        "zoom-pane" => match rest {
+            [target] => Ok(ControlRequest::ZoomPane {
+                target: pane_id(target)?,
+                zoomed: true,
+            }),
+            [target, state] if state == "on" || state == "off" => Ok(ControlRequest::ZoomPane {
+                target: pane_id(target)?,
+                zoomed: state == "on",
+            }),
+            _ => Err("usage: zoom-pane <pane> [on|off]".to_string()),
+        },
+        "swap-panes" => match rest {
+            [first, second] => Ok(ControlRequest::SwapPanes {
+                first: pane_id(first)?,
+                second: pane_id(second)?,
+            }),
+            _ => Err("usage: swap-panes <first> <second>".to_string()),
+        },
         "fullscreen" => Ok(ControlRequest::ToggleFullscreen),
         "opacity" => {
             let opacity = rest
@@ -401,6 +504,9 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
                 target: None,
             })
         }
+        "run-wait" => parse_run_and_wait(rest),
+        "program-status" if rest.is_empty() => Ok(ControlRequest::ProgramStatus { target: None }),
+        "program-status" => Err("usage: program-status".to_string()),
         "resize" => {
             let width = rest
                 .first()
@@ -432,7 +538,38 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             }
         }
         "wait-for" => parse_wait_for(rest),
+        "job-status" => Ok(ControlRequest::JobStatus {
+            job: parse_job(args)?,
+        }),
+        "wait-job" => {
+            let job = parse_job(args)?;
+            let timeout_ms = match args.get(2).map(String::as_str) {
+                None => 30_000,
+                Some("--timeout") if args.len() == 4 => args[3]
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|timeout| (1..=86_400_000).contains(timeout))
+                    .ok_or("job timeout must be between 1 and 86400000 ms")?,
+                _ => return Err("wait-job takes <job> [--timeout <ms>]".into()),
+            };
+            Ok(ControlRequest::WaitJob { job, timeout_ms })
+        }
+        "describe" => Ok(ControlRequest::Describe),
         "subscribe" => Ok(ControlRequest::Subscribe { target: None }),
+        "subscribe-v2" => {
+            let cursor = match args.get(1).map(String::as_str) {
+                None => None,
+                Some("--cursor") if args.len() == 3 => Some(
+                    serde_json::from_str(&args[2])
+                        .map_err(|error| format!("invalid event cursor JSON: {error}"))?,
+                ),
+                _ => return Err("subscribe-v2 takes optional --cursor '<cursor JSON>'".into()),
+            };
+            Ok(ControlRequest::SubscribeV2 {
+                cursor,
+                target: None,
+            })
+        }
         "last-command" => {
             let tail_lines = match rest {
                 [] => None,
@@ -448,6 +585,26 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
                 target: None,
             })
         }
+        "invoke-action" => match rest {
+            [pane, session, generation, region, widget_id, action] => {
+                if !ultty_protocol::valid_action_widget_id(widget_id) {
+                    return Err("invalid widget identity".into());
+                }
+                let action = match action.as_str() {
+                    "focus" => SemanticActionKind::Focus,
+                    "activate" => SemanticActionKind::Activate,
+                    _ => return Err("action must be focus or activate".into()),
+                };
+                Ok(ControlRequest::InvokeAction {
+                    target: pane.parse().map_err(|_| "pane must be a numeric ID")?,
+                    session: session.parse().map_err(|_| "session must be a numeric ID")?,
+                    expected_generation: generation.parse().map_err(|_| "generation must be a numeric ID")?,
+                    region: region.parse().map_err(|_| "region must be a u32 ID")?,
+                    widget_id: widget_id.clone(), action,
+                })
+            }
+            _ => Err("usage: invoke-action <pane> <session> <generation> <region> <widget-id> <focus|activate>".into()),
+        },
         "regions" if rest.is_empty() => Ok(ControlRequest::Regions { target: None }),
         "regions" => Err("usage: regions".to_string()),
         "override" => parse_override(rest),
@@ -460,6 +617,33 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
         }),
         _ => Err(format!("unknown command: {}", command)),
     }
+}
+
+fn parse_run_and_wait(args: &[String]) -> Result<ControlRequest, String> {
+    let (timeout_ms, command) = if args.first().is_some_and(|arg| arg == "--timeout") {
+        let timeout = args
+            .get(1)
+            .and_then(|arg| arg.parse::<u64>().ok())
+            .filter(|timeout| (1..=86_400_000).contains(timeout))
+            .ok_or_else(|| "--timeout must be between 1 and 86400000 ms".to_string())?;
+        (timeout, &args[2..])
+    } else {
+        (30_000, args)
+    };
+    if command.is_empty() {
+        return Err("usage: run-wait [--timeout <ms>] <shell text>".to_string());
+    }
+    Ok(ControlRequest::RunCommandAndWait {
+        command: command.join(" "),
+        timeout_ms,
+        target: None,
+    })
+}
+
+fn pane_id(value: &str) -> Result<u64, String> {
+    value
+        .parse()
+        .map_err(|_| "pane id must be a non-negative integer".to_string())
 }
 
 const OVERRIDE_USAGE: &str = "usage: override push <file> | override clear";
@@ -756,9 +940,12 @@ fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
         | ControlRequest::SendKey { target, .. }
         | ControlRequest::SendRaw { target, .. }
         | ControlRequest::RunCommand { target, .. }
+        | ControlRequest::RunCommandAndWait { target, .. }
+        | ControlRequest::ProgramStatus { target }
         | ControlRequest::Search { target, .. }
         | ControlRequest::WaitFor { target, .. }
         | ControlRequest::Subscribe { target }
+        | ControlRequest::SubscribeV2 { target, .. }
         | ControlRequest::SetPaneStatus { target, .. }
         | ControlRequest::LastCommand { target, .. }
         | ControlRequest::Regions { target }
@@ -877,21 +1064,75 @@ fn send_command(socket_path: &Path, command: &str, timeout_secs: u64) -> Result<
     read_response(&mut stream, timeout_secs)
 }
 
-/// Serve MCP on stdin and stdout. Each tool call finds the running Ultty
-/// afresh, so the server outlives a restarted terminal.
-fn run_mcp() -> std::io::Result<()> {
-    const MCP_READ_TIMEOUT_SECS: u64 = 10;
-    let mut send = |request: ControlRequest| {
-        let endpoint = find_instance(instance_request(None))?;
+/// The owner and credential selected once for a tool workflow. Holding
+/// both prevents rediscovery or a replaced token from silently changing it.
+struct PinnedInstance {
+    endpoint: ControlEndpoint,
+    token: Option<String>,
+    owner: OwnerRef,
+}
+
+impl PinnedInstance {
+    fn discover(instance: InstanceRequest) -> Result<Self, String> {
+        let endpoint = find_instance(instance)?;
+        let token = read_auth_token(&endpoint.token);
+        Self::discover_at(endpoint, token)
+    }
+
+    fn discover_at(endpoint: ControlEndpoint, token: Option<String>) -> Result<Self, String> {
+        let envelope = ControlEnvelope {
+            output_format: OutputFormat::Json,
+            request: with_auth_token(ControlRequest::Describe, token.clone()),
+        };
+        let command = serde_json::to_string(&envelope).map_err(|error| error.to_string())?;
+        let response =
+            send_command(&endpoint.socket, &command, 10).and_then(|raw| parse_response(&raw))?;
+        match response {
+            ControlResponse::Data(ControlData::Description {
+                schema_version: 2,
+                owner,
+                supported_operations,
+            }) if supported_operations
+                .iter()
+                .any(|operation| operation == "with_owner") =>
+            {
+                Ok(Self {
+                    endpoint,
+                    token,
+                    owner,
+                })
+            }
+            other => Err(format!(
+                "owner discovery failed; control schema 2 required: {other:?}"
+            )),
+        }
+    }
+
+    fn send(&self, request: ControlRequest) -> Result<ControlResponse, String> {
+        const MCP_READ_TIMEOUT_SECS: u64 = 10;
         let read_timeout = read_timeout_for(&request, MCP_READ_TIMEOUT_SECS);
         let envelope = ControlEnvelope {
             output_format: OutputFormat::Json,
-            request: with_auth_token(request, read_auth_token(&endpoint.token)),
+            request: with_auth_token(
+                ControlRequest::WithOwner {
+                    owner: self.owner.clone(),
+                    request: Box::new(request),
+                },
+                self.token.clone(),
+            ),
         };
         let command = serde_json::to_string(&envelope)
-            .map_err(|e| format!("failed to encode request: {}", e))?;
-        send_command(&endpoint.socket, &command, read_timeout).and_then(|raw| parse_response(&raw))
-    };
+            .map_err(|e| format!("failed to encode request: {e}"))?;
+        send_command(&self.endpoint.socket, &command, read_timeout)
+            .and_then(|raw| parse_response(&raw))
+    }
+}
+
+/// Serve MCP on stdin and stdout, pinned to the initial owner and token.
+/// Restart MCP explicitly to select a different terminal owner.
+fn run_mcp(instance: InstanceRequest) -> std::io::Result<()> {
+    let owner = PinnedInstance::discover(instance).map_err(std::io::Error::other)?;
+    let mut send = |request| owner.send(request);
     // Screenshots go to the private control directory, not a shared /tmp.
     let screenshot_dir = control_dir().ok();
     let stdin = std::io::stdin();
@@ -918,6 +1159,11 @@ fn stream_events(socket_path: &Path, command: &str, out: &mut impl Write) -> Res
         .map_err(|e| format!("failed to read reply: {}", e))?;
     match parse_response(&first)? {
         ControlResponse::Data(ControlData::Subscribed) => {}
+        ControlResponse::Data(ControlData::SubscribedV2 { .. }) => {
+            writeln!(out, "{first}")
+                .and_then(|()| out.flush())
+                .map_err(|error| format!("failed to write snapshot: {error}"))?;
+        }
         other => {
             return Err(format_response(&other, OutputFormat::Text)
                 .trim()
@@ -1014,6 +1260,9 @@ QUERY COMMANDS:
                             The last command the shell ran and its output
                             (needs OSC 133 shell integration); exits with
                             the command's status
+    invoke-action <pane> <session> <generation> <region> <widget-id> <focus|activate>
+                            Request a declared native action against exact IDs;
+                            success requires application acknowledgement
     regions                 The native apps in the pane's tab: each region
                             by depth with its content kind, accessibility
                             role, position and size in cells, metadata and
@@ -1026,6 +1275,10 @@ WAIT COMMANDS:
                             Wait for the next command to finish (exits with
                             its status; needs shell integration), the next
                             bell, or <ms> without output
+    describe                Control schema, owner epoch and supported operations
+    subscribe-v2 [--cursor '<cursor JSON>']
+                            Snapshot plus sequenced events, or bounded replay;
+                            expired cursors require a new snapshot
     subscribe               Print events as JSON lines until ultty exits:
                             pane_opened, pane_closed, command_started,
                             command_finished (needs shell integration),
@@ -1039,7 +1292,14 @@ WINDOW COMMANDS:
                             it has, if it does not reach it within 2 s
 
 EXECUTION:
-    run <command> [args]    Run a command in current tab
+    run <command> [args]    Type shell text and Enter; acknowledges input acceptance
+    run-wait [--timeout <ms>] <shell text>
+                            Submit at an empty integrated prompt and wait for
+                            the command's fenced completion
+    job-status <job>        Inspect a direct child (spawned pane ID is its job ID)
+    wait-job <job> [--timeout <ms>]
+                            Wait by job ID, including an already completed child;
+                            exits with its status, fails if explicitly closed
 
 LUA TOOLS (docs/lua.md):
     lua open <file> [--split right|down] [--exec <cmd>]... [--allow-exec]
@@ -1103,12 +1363,27 @@ EXAMPLES:
     ulttyctl search "error"
     ulttyctl wait-for "$ " --timeout 5000
     ulttyctl resize 1920 1080
-    ulttyctl run nvim src/main.rs
+    ulttyctl run nvim src/main.rs  # types shell text plus Enter
     ulttyctl --json info
 
 EXIT STATUS:
     0 on success, 1 when Ultty reports an error, a wait-for times out, or
     Ultty cannot be reached, 2 for a bad command line.
+
+TARGETS AND INPUT:
+    ULTTY_PID selects one window strictly. If it is invalid or unavailable,
+    the command fails. Without it, discover the newest running window.
+    MCP pins its initial window and token; restart MCP to select another.
+    Input success means queue acceptance, not execution or completion.
+    run types shell text; new-tab and split preserve process argument boundaries.
+    run-wait [--timeout <ms>] <shell text> requires an observed empty OSC 133
+    prompt, submits one printable line and waits for its fenced completion.
+    Timeout does not cancel the command. program-status reads current OSC 7501
+    records; status changes are coalescible notifications to query again.
+    focus-pane <pane>, zoom-pane <pane> [on|off], swap-panes <first> <second>
+    use explicit pane IDs; swapping is limited to one tab.
+    workspace list | workspace save <name> manages saved layout recipes.
+    Open one with ultty --workspace <name>; it starts fresh shells.
 "#
     );
 }
@@ -1117,8 +1392,8 @@ EXIT STATUS:
 mod tests {
     use super::{
         default_split_target, exit_status, parse_cli_request, parse_response, read_response,
-        read_timeout_for, response_is_failure, should_print_version, take_pid_flag, version_output,
-        with_auth_token, LuaOpen,
+        read_timeout_for, response_is_failure, select_instance, selected_pid, should_print_version,
+        take_pid_flag, version_output, with_auth_token, LuaOpen, PinnedInstance,
     };
 
     use std::io::Write;
@@ -1128,11 +1403,307 @@ mod tests {
     use std::time::Duration;
 
     use ultty_protocol::control::{
-        ControlData, ControlEvent, ControlRequest, ControlResponse, PaneState, PaneStatus,
-        SplitDirection, WaitCondition,
+        ControlData, ControlEvent, ControlRequest, ControlResponse, OwnerRef, PaneState,
+        PaneStatus, SplitDirection, WaitCondition,
     };
     use ultty_protocol::OverrideFormat;
 
+    #[test]
+    fn test_invoke_action_cli_preserves_exact_target_and_waits_for_ack() {
+        let args =
+            ["invoke-action", "1", "2", "3", "4", "increment", "activate"].map(str::to_string);
+        let request = parse_cli_request(&args).unwrap();
+        assert_eq!(
+            request,
+            ControlRequest::InvokeAction {
+                target: 1,
+                session: 2,
+                expected_generation: 3,
+                region: 4,
+                widget_id: "increment".into(),
+                action: ultty_protocol::SemanticActionKind::Activate
+            }
+        );
+        assert!(read_timeout_for(&request, 1) >= 10);
+        let mut bad = args.clone();
+        bad[4] = "4294967296".into();
+        assert!(parse_cli_request(&bad).is_err());
+        let mut bad = args.clone();
+        bad[6] = "edit".into();
+        assert!(parse_cli_request(&bad).is_err());
+        let mut bad = args;
+        bad[5] = String::new();
+        assert!(parse_cli_request(&bad).is_err());
+    }
+
+    #[test]
+    fn test_versioned_and_job_cli_requests() {
+        let words = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| (*part).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            parse_cli_request(&words(&["describe"])).unwrap(),
+            ControlRequest::Describe
+        );
+        assert_eq!(
+            parse_cli_request(&words(&["job-status", "7"])).unwrap(),
+            ControlRequest::JobStatus { job: 7 }
+        );
+        assert_eq!(
+            parse_cli_request(&words(&["wait-job", "7", "--timeout", "50"])).unwrap(),
+            ControlRequest::WaitJob {
+                job: 7,
+                timeout_ms: 50
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&words(&["subscribe-v2"])).unwrap(),
+            ControlRequest::SubscribeV2 {
+                cursor: None,
+                target: None
+            }
+        );
+        assert!(parse_cli_request(&words(&["subscribe-v2", "--cursor", "bad"])).is_err());
+    }
+
+    #[test]
+    fn test_owner_selection_distinguishes_missing_and_invalid_environment() {
+        assert_eq!(selected_pid(None).unwrap(), None);
+        assert_eq!(selected_pid(Some("42".into())).unwrap(), Some(42));
+        for value in ["", "zero", "0", "-1", "4294967296"] {
+            assert!(selected_pid(Some(value.into())).is_err(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn test_pid_flag_selection_overrides_environment_and_pins_mcp_target() {
+        use ultty::control::paths::InstanceRequest;
+        assert_eq!(select_instance(None, None), Ok(InstanceRequest::Newest));
+        assert_eq!(
+            select_instance(None, Some("42".into())),
+            Ok(InstanceRequest::Own(42))
+        );
+        assert!(select_instance(None, Some("invalid".into())).is_err());
+        assert_eq!(
+            select_instance(Some(7), Some("invalid".into())),
+            Ok(InstanceRequest::Exact(7))
+        );
+        let (command, pid) = take_pid_flag(args("--pid 7 mcp")).unwrap();
+        assert_eq!(command, args("mcp"));
+        assert_eq!(
+            select_instance(pid, Some("42".into())),
+            Ok(InstanceRequest::Exact(7))
+        );
+    }
+
+    #[test]
+    fn test_fenced_run_and_workspace_cli_contracts() {
+        let words = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            parse_cli_request(&words(&[
+                "--pane",
+                "7",
+                "run-wait",
+                "--timeout",
+                "50",
+                "false"
+            ]))
+            .unwrap(),
+            ControlRequest::RunCommandAndWait {
+                command: "false".to_string(),
+                timeout_ms: 50,
+                target: Some(7)
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&words(&["--pane", "7", "program-status"])).unwrap(),
+            ControlRequest::ProgramStatus { target: Some(7) }
+        );
+        assert_eq!(
+            parse_cli_request(&words(&["focus-pane", "7"])).unwrap(),
+            ControlRequest::FocusPane { target: 7 }
+        );
+        assert_eq!(
+            parse_cli_request(&words(&["zoom-pane", "7", "off"])).unwrap(),
+            ControlRequest::ZoomPane {
+                target: 7,
+                zoomed: false
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&words(&["swap-panes", "7", "8"])).unwrap(),
+            ControlRequest::SwapPanes {
+                first: 7,
+                second: 8
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&words(&["workspace", "save", "work"])).unwrap(),
+            ControlRequest::WorkspaceSave {
+                name: "work".to_string()
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&words(&["workspace", "list"])).unwrap(),
+            ControlRequest::WorkspaceList
+        );
+        assert!(parse_cli_request(&words(&["run-wait", "--timeout", "0", "false"])).is_err());
+        assert_eq!(
+            exit_status(&ControlResponse::Data(ControlData::ShellCommandFinished {
+                pane: 7,
+                sequence: 1,
+                exit_code: Some(7)
+            })),
+            7
+        );
+    }
+
+    #[test]
+    fn test_mcp_authenticated_discovery_pins_epoch_and_rejects_older_schema() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+        use ultty::control::paths::ControlEndpoint;
+        use ultty_protocol::control::ControlEnvelope;
+        for schema_version in [1, 2] {
+            let dir = tempfile::tempdir().unwrap();
+            let endpoint = ControlEndpoint::for_pid(dir.path(), 100);
+            let listener = UnixListener::bind(&endpoint.socket).unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let envelope: ControlEnvelope = serde_json::from_str(&line).unwrap();
+                assert!(
+                    matches!(envelope.request, ControlRequest::WithToken { token, request } if token == "original" && *request == ControlRequest::Describe)
+                );
+                let response = ControlResponse::Data(ControlData::Description {
+                    schema_version,
+                    owner: OwnerRef {
+                        pid: 100,
+                        epoch: "initial-epoch".into(),
+                    },
+                    supported_operations: vec!["with_owner".into()],
+                });
+                writeln!(stream, "{}", serde_json::to_string(&response).unwrap()).unwrap();
+                drop(stream);
+                if schema_version == 2 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut line = String::new();
+                    BufReader::new(&stream).read_line(&mut line).unwrap();
+                    let envelope: ControlEnvelope = serde_json::from_str(&line).unwrap();
+                    let ControlRequest::WithToken { token, request } = envelope.request else {
+                        panic!("missing auth");
+                    };
+                    assert_eq!(token, "original");
+                    assert!(
+                        matches!(*request, ControlRequest::WithOwner { owner, request } if owner.epoch == "initial-epoch" && *request == ControlRequest::GetInfo)
+                    );
+                    writeln!(
+                        stream,
+                        "{}",
+                        serde_json::to_string(&ControlResponse::Error {
+                            code: 409,
+                            message: "owner changed".into()
+                        })
+                        .unwrap()
+                    )
+                    .unwrap();
+                }
+            });
+            let owner = PinnedInstance::discover_at(endpoint.clone(), Some("original".into()));
+            if schema_version == 2 {
+                std::fs::write(&endpoint.token, "replacement").unwrap();
+                assert!(matches!(
+                    owner.unwrap().send(ControlRequest::GetInfo).unwrap(),
+                    ControlResponse::Error { code: 409, .. }
+                ));
+            } else {
+                assert!(owner.is_err());
+            }
+            server.join().unwrap();
+        }
+        assert_eq!(
+            exit_status(&ControlResponse::Data(ControlData::ProcessJob {
+                job: 1,
+                pid: 10,
+                outcome: ultty_protocol::control::ProcessJobOutcome::Closed
+            })),
+            1
+        );
+    }
+
+    #[test]
+    fn test_pinned_mcp_owner_keeps_its_original_token() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+        use ultty::control::paths::ControlEndpoint;
+        use ultty_protocol::control::ControlEnvelope;
+
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = ControlEndpoint::for_pid(dir.path(), 100);
+        let listener = UnixListener::bind(&endpoint.socket).unwrap();
+        std::fs::write(&endpoint.token, "replacement-token").unwrap();
+        let owner = PinnedInstance {
+            endpoint,
+            token: Some("original-token".to_string()),
+            owner: OwnerRef {
+                pid: 100,
+                epoch: "pinned-epoch".into(),
+            },
+        };
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(&stream).read_line(&mut request).unwrap();
+            let envelope: ControlEnvelope = serde_json::from_str(&request).unwrap();
+            let ControlRequest::WithToken { token, request } = envelope.request else {
+                panic!("missing auth");
+            };
+            assert_eq!(token, "original-token");
+            assert!(
+                matches!(*request, ControlRequest::WithOwner { owner, .. } if owner.epoch == "pinned-epoch")
+            );
+            stream
+                .write_all(b"{\"status\":\"error\",\"code\":403,\"message\":\"stale owner\"}\n")
+                .unwrap();
+        });
+        assert!(matches!(
+            owner.send(ControlRequest::GetInfo).unwrap(),
+            ControlResponse::Error { code: 403, .. }
+        ));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn test_pinned_mcp_owner_does_not_discover_another_window() {
+        use std::os::unix::net::UnixListener;
+        use ultty::control::paths::ControlEndpoint;
+
+        let dir = tempfile::tempdir().unwrap();
+        let newer = ControlEndpoint::for_pid(dir.path(), 200);
+        let listener = UnixListener::bind(&newer.socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let owner = PinnedInstance {
+            endpoint: ControlEndpoint::for_pid(dir.path(), 100),
+            token: Some("original-token".to_string()),
+            owner: OwnerRef {
+                pid: 100,
+                epoch: "pinned-epoch".into(),
+            },
+        };
+        assert!(owner.send(ControlRequest::GetInfo).is_err());
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
     #[test]
     fn read_response_retries_until_delayed_writer_closes() {
         let (mut reader, mut writer) = UnixStream::pair().unwrap();
@@ -1369,6 +1940,7 @@ mod tests {
         );
         assert!(take_pid_flag(args("--pid")).is_err());
         assert!(take_pid_flag(args("--pid me ping")).is_err());
+        assert!(take_pid_flag(args("--pid 0 ping")).is_err());
     }
 
     #[test]

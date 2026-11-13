@@ -322,7 +322,7 @@ impl Renderer {
         terminal: &Terminal,
         overlay: &OverlayState,
         path: &std::path::Path,
-        native_sessions: &[&crate::protocol::NativeSession],
+        native_sessions: &[&dyn crate::scene::view::NativeRenderSource],
     ) -> anyhow::Result<()> {
         let (texture, view) = self.create_screenshot_texture();
 
@@ -393,6 +393,18 @@ impl Renderer {
 
         self.render_screenshot_chrome(&mut encoder, &view, overlay);
 
+        if !native_sessions
+            .iter()
+            .any(|session| session.is_full_scene())
+        {
+            self.render_images(
+                &mut encoder,
+                &view,
+                terminal,
+                (0.0, self.tab_bar_height),
+                None,
+            );
+        }
         // Render text
         self.text_renderer.render(
             &mut encoder,
@@ -444,7 +456,7 @@ impl Renderer {
         &mut self,
         terminal: &Terminal,
         overlay: &OverlayState,
-        native_sessions: &[&crate::protocol::NativeSession],
+        native_sessions: &[&dyn crate::scene::view::NativeRenderSource],
     ) -> anyhow::Result<Vec<u8>> {
         let (texture, view) = self.create_screenshot_texture();
         self.tab_bar_height = overlay
@@ -504,6 +516,18 @@ impl Renderer {
             render_pass.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
         }
 
+        if !native_sessions
+            .iter()
+            .any(|session| session.is_full_scene())
+        {
+            self.render_images(
+                &mut encoder,
+                &view,
+                terminal,
+                (0.0, self.tab_bar_height),
+                None,
+            );
+        }
         self.text_renderer.render(
             &mut encoder,
             &view,

@@ -51,7 +51,8 @@ not know panes, so the app binds after each `poll`:
   peer is in no pane's foreground (`app &`) stays unbound: not drawn, not
   announced, no input; binding is retried when it next sends a frame.
 - An **in-band** session binds to the pane whose PTY carried its hello.
-  Lifting §1.3's one-pane restriction is its own slice.
+  The §1.3 one-pane restriction has since been lifted; each pane's PTY
+  carries its own in-band session.
 
 The binding is for the session's life. Splitting the tab, moving focus,
 switching tabs and dragging dividers leave it alone. Closing the pane

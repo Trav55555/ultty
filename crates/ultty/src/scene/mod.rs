@@ -8,6 +8,7 @@ pub mod region;
 pub mod semantics;
 pub(crate) mod text_layout;
 pub mod tree;
+pub mod view;
 
 pub use region::Region;
 pub use tree::{SceneTree, SearchMatch};

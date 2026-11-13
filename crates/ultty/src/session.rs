@@ -3,7 +3,13 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
+use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_SAVE: AtomicU64 = AtomicU64::new(1);
+const MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Session data that can be saved and restored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +67,60 @@ pub struct TerminalData {
     pub is_focused: bool,
 }
 
+fn validate_workspace_name(name: &str) -> io::Result<()> {
+    if name.is_empty()
+        || name.len() > 64
+        || matches!(name, "." | ".." | "last")
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+    {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "workspace name must be 1-64 ASCII letters, digits, dots, dashes or underscores; last is reserved"));
+    }
+    Ok(())
+}
+
+fn validate_layout(layout: &LayoutData, depth: usize, seen: &mut [bool]) -> io::Result<()> {
+    let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
+    if depth > 16 {
+        return Err(invalid("workspace layout exceeds depth limit"));
+    }
+    match layout {
+        LayoutData::Pane { index } => {
+            let value = seen
+                .get_mut(*index)
+                .ok_or_else(|| invalid("workspace pane index out of bounds"))?;
+            if *value {
+                return Err(invalid("workspace layout repeats a pane"));
+            }
+            *value = true;
+        }
+        LayoutData::Split {
+            direction,
+            children,
+        } => {
+            if !matches!(direction.as_str(), "Horizontal" | "Vertical")
+                || children.len() < 2
+                || children.len() > seen.len()
+            {
+                return Err(invalid("invalid workspace split"));
+            }
+            let mut total = 0.0f32;
+            for (child, weight) in children {
+                if !weight.is_finite() || *weight <= 0.0 {
+                    return Err(invalid("invalid workspace split weight"));
+                }
+                total += *weight;
+                validate_layout(child, depth + 1, seen)?;
+            }
+            if !total.is_finite() {
+                return Err(invalid("workspace split weight overflow"));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl SessionData {
     /// Create a new empty session.
     pub fn new() -> Self {
@@ -82,22 +142,141 @@ impl SessionData {
         Self::sessions_dir().map(|p| p.join("last.json"))
     }
 
+    /// Resolve a named workspace without accepting directory traversal.
+    /// `last` is reserved for automatic window restoration.
+    pub fn named_path(name: &str) -> io::Result<PathBuf> {
+        validate_workspace_name(name)?;
+        Self::sessions_dir()
+            .map(|dir| dir.join(format!("{name}.json")))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no configuration directory"))
+    }
+
+    /// Save a validated layout recipe atomically under a workspace name.
+    pub fn save_named(&self, name: &str) -> io::Result<()> {
+        self.validate()?;
+        self.save(&Self::named_path(name)?)
+    }
+
+    /// Load and validate a named layout before restoring fresh shells.
+    pub fn load_named(name: &str) -> io::Result<Self> {
+        let saved = Self::load(&Self::named_path(name)?)?;
+        saved.validate()?;
+        Ok(saved)
+    }
+
+    /// List saved workspace names, excluding automatic last-session state.
+    pub fn workspace_names() -> io::Result<Vec<String>> {
+        let dir = Self::sessions_dir()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no configuration directory"))?;
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                if validate_workspace_name(name).is_ok() {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// Validate a requested layout before creating any processes.
+    pub fn validate(&self) -> io::Result<()> {
+        let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
+        if self.version != 1 {
+            return Err(invalid("unsupported workspace version"));
+        }
+        if self.tabs.is_empty() || self.tabs.len() > 128 || self.active_tab_index >= self.tabs.len()
+        {
+            return Err(invalid("invalid workspace tab count or active tab"));
+        }
+        let mut total = 0usize;
+        for tab in &self.tabs {
+            total = total.saturating_add(tab.terminals.len());
+            if tab.terminals.is_empty() || total > 1024 {
+                return Err(invalid("invalid workspace pane count"));
+            }
+            if !matches!(tab.split_direction.as_str(), "Horizontal" | "Vertical") {
+                return Err(invalid("invalid workspace split direction"));
+            }
+            if let Some(layout) = &tab.layout {
+                let mut seen = vec![false; tab.terminals.len()];
+                validate_layout(layout, 0, &mut seen)?;
+                if seen.iter().any(|seen| !seen) {
+                    return Err(invalid("workspace layout omits a pane"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Save session to a file.
     pub fn save(&self, path: &Path) -> io::Result<()> {
         // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
 
-        let json = serde_json::to_string_pretty(self)
+        let json = serde_json::to_vec_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        fs::write(path, json)
+        if json.len() as u64 > MAX_SESSION_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "workspace exceeds size limit",
+            ));
+        }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let temporary = parent.join(format!(
+            ".ultty-save-{}-{}",
+            std::process::id(),
+            NEXT_SAVE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        let result = (|| {
+            file.write_all(&json)?;
+            file.sync_all()?;
+            fs::rename(&temporary, path)?;
+            fs::File::open(parent)?.sync_all()
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
     }
 
     /// Load session from a file.
     pub fn load(path: &PathBuf) -> io::Result<Self> {
-        let json = fs::read_to_string(path)?;
-        serde_json::from_str(&json).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let mut json = Vec::new();
+        fs::File::open(path)?
+            .take(MAX_SESSION_BYTES + 1)
+            .read_to_end(&mut json)?;
+        if json.len() as u64 > MAX_SESSION_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "workspace exceeds size limit",
+            ));
+        }
+        serde_json::from_slice(&json).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Save as the "last" session (auto-save on exit).
@@ -164,6 +343,62 @@ fn chrono_timestamp() -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_workspace_names_cannot_escape_storage() {
+        for name in ["", ".", "..", "../other", "a/b", "/tmp/x", "last", "a\\b"] {
+            assert!(SessionData::named_path(name).is_err(), "{name}");
+        }
+        assert!(SessionData::named_path("dev-remote_2")
+            .unwrap()
+            .ends_with("dev-remote_2.json"));
+    }
+
+    #[test]
+    fn test_workspace_validation_rejects_duplicate_missing_and_invalid_weights() {
+        let mut session = sample_session();
+        session.validate().unwrap();
+        session.tabs[0].layout = Some(LayoutData::Split {
+            direction: "Horizontal".to_owned(),
+            children: vec![
+                (LayoutData::Pane { index: 0 }, 0.5),
+                (LayoutData::Pane { index: 0 }, 0.5),
+            ],
+        });
+        assert!(session.validate().is_err());
+        session.tabs[0].layout = Some(LayoutData::Pane { index: 0 });
+        assert!(session.validate().is_err());
+        session.tabs[0].layout = Some(LayoutData::Split {
+            direction: "Horizontal".to_owned(),
+            children: vec![
+                (LayoutData::Pane { index: 0 }, 1.0),
+                (LayoutData::Pane { index: 1 }, f32::INFINITY),
+            ],
+        });
+        assert!(session.validate().is_err());
+        session.tabs[0].layout = None;
+        session.version = 2;
+        assert!(session.validate().is_err());
+    }
+
+    #[test]
+    fn test_atomic_save_replaces_complete_file_privately() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("workspace.json");
+        fs::write(&path, "old contents").unwrap();
+        let session = sample_session();
+        session.save(&path).unwrap();
+        assert_eq!(
+            SessionData::load(&path).unwrap().tabs.len(),
+            session.tabs.len()
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     // ── Helpers ──────────────────────────────────────────────────────
 
