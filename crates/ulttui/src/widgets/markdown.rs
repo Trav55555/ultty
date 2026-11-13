@@ -368,64 +368,69 @@ impl MarkdownView {
             };
             let mut column = 0;
             let mut logical_column = 0;
-            for (span_index, span) in rich.spans.into_iter().enumerate() {
+            // Segment the complete rendered block before wrapping: a combining
+            // mark or ZWJ can cross a Markdown style boundary. The first
+            // scalar's span supplies style and link identity for that cluster.
+            let text: String = rich.spans.iter().map(|span| span.text.as_str()).collect();
+            let mut span_index = 0;
+            let mut span_end = rich.spans.first().map_or(0, |span| span.text.len());
+            for (offset, cluster) in text.grapheme_indices(true) {
+                while offset >= span_end && span_index + 1 < rich.spans.len() {
+                    span_index += 1;
+                    span_end += rich.spans[span_index].text.len();
+                }
                 let target = targets.get(span_index).copied().flatten();
-                let mut style = span.style;
+                let mut style = rich.spans[span_index].style.clone();
                 style.dim |= dim;
-                for cluster in span.text.graphemes(true) {
-                    if cluster == "\n" || cluster == "\r\n" {
+                if cluster == "\n" || cluster == "\r\n" {
+                    let mut completed =
+                        PreparedMarkdownRow::new(std::mem::replace(&mut row, RichText::new()));
+                    completed.hard_break = true;
+                    completed.links = std::mem::take(&mut links);
+                    rows.push(completed);
+                    column = 0;
+                    logical_column = 0;
+                    continue;
+                }
+                let expanded;
+                let cluster = if cluster == "\t" {
+                    expanded = " ".repeat(8 - logical_column % 8);
+                    expanded.as_str()
+                } else {
+                    cluster
+                };
+                // Expanded tabs may span several narrow rows.
+                for grapheme in cluster.graphemes(true) {
+                    let cells = grapheme.width().max(1);
+                    if column > 0 && column + cells > width {
                         let mut completed =
                             PreparedMarkdownRow::new(std::mem::replace(&mut row, RichText::new()));
-                        completed.hard_break = true;
                         completed.links = std::mem::take(&mut links);
                         rows.push(completed);
                         column = 0;
-                        logical_column = 0;
-                        continue;
                     }
-                    let expanded;
-                    let cluster = if cluster == "\t" {
-                        expanded = " ".repeat(8 - logical_column % 8);
-                        expanded.as_str()
-                    } else {
-                        cluster
-                    };
-                    // Expanded tabs may span several narrow rows.
-                    for grapheme in cluster.graphemes(true) {
-                        let cells = grapheme.width().max(1);
-                        if column > 0 && column + cells > width {
-                            let mut completed = PreparedMarkdownRow::new(std::mem::replace(
-                                &mut row,
-                                RichText::new(),
-                            ));
-                            completed.links = std::mem::take(&mut links);
-                            rows.push(completed);
-                            column = 0;
-                        }
-                        if let Some(target) = target.filter(|target| target.len() <= 2048) {
-                            let start: usize = row.spans.iter().map(|span| span.text.len()).sum();
-                            let end = start + grapheme.len();
-                            if let Some(last) = links
-                                .last_mut()
-                                .filter(|last| last.1 == start && last.2 == target)
-                            {
-                                last.1 = end;
-                            } else {
-                                links.push((start, end, target.to_string()));
-                            }
-                        }
-                        if let Some(last) = row.spans.last_mut().filter(|last| last.style == style)
+                    if let Some(target) = target.filter(|target| target.len() <= 2048) {
+                        let start: usize = row.spans.iter().map(|span| span.text.len()).sum();
+                        let end = start + grapheme.len();
+                        if let Some(last) = links
+                            .last_mut()
+                            .filter(|last| last.1 == start && last.2 == target)
                         {
-                            last.text.push_str(grapheme);
+                            last.1 = end;
                         } else {
-                            row.spans.push(ultty_protocol::Span {
-                                text: grapheme.into(),
-                                style: style.clone(),
-                            });
+                            links.push((start, end, target.to_string()));
                         }
-                        column += cells;
-                        logical_column += cells;
                     }
+                    if let Some(last) = row.spans.last_mut().filter(|last| last.style == style) {
+                        last.text.push_str(grapheme);
+                    } else {
+                        row.spans.push(ultty_protocol::Span {
+                            text: grapheme.into(),
+                            style: style.clone(),
+                        });
+                    }
+                    column += cells;
+                    logical_column += cells;
                 }
             }
             let mut completed = PreparedMarkdownRow::new(row);
@@ -1813,6 +1818,25 @@ mod tests {
             .flat_map(|frame| appends(frame))
             .collect::<Vec<_>>()
             .join("|")
+    }
+
+    #[test]
+    fn wrapping_keeps_graphemes_crossing_style_boundaries_together() {
+        let view = MarkdownView::new("**e**\u{301}A");
+        let text = |row: &PreparedMarkdownRow| {
+            row.content
+                .spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>()
+        };
+        let wide: Vec<_> = view.prepared_rows(2).iter().map(text).collect();
+        let narrow: Vec<_> = view.prepared_rows(1).iter().map(text).collect();
+        assert_eq!(wide, ["e\u{301}A"]);
+        assert_eq!(narrow, ["e\u{301}", "A"]);
+        let emoji = MarkdownView::new("**👩**\u{200d}💻A");
+        let rows: Vec<_> = emoji.prepared_rows(2).iter().map(text).collect();
+        assert_eq!(rows, ["👩\u{200d}💻", "A"]);
     }
 
     #[test]
