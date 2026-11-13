@@ -98,6 +98,7 @@ impl App {
                 } else {
                     // A button held when focus went will not be seen released.
                     self.native_mouse_capture.clear();
+                    self.cancel_native_transcript_selection();
                 }
                 if self.terminal().is_some_and(|t| t.modes().focus_reporting) {
                     // Send focus in/out escape sequence
@@ -209,7 +210,11 @@ impl App {
         // A program tracking the mouse gets its presses, except with Shift
         // held, which selects text as in other terminals. A release goes
         // where its press went.
-        let report_to_program = self.terminal().is_some_and(|t| t.mouse_tracking_enabled())
+        let report_to_program = !self.native_transcript_selection_active()
+            && !(state == ElementState::Pressed
+                && button == MouseButton::Left
+                && self.native_transcript_at_pointer())
+            && self.terminal().is_some_and(|t| t.mouse_tracking_enabled())
             && if state == ElementState::Pressed {
                 !self.modifiers.shift_key()
             } else {
@@ -417,6 +422,11 @@ impl App {
                 if button != MouseButton::Left {
                     return;
                 }
+                if self.begin_native_transcript_selection() {
+                    self.mouse_pressed = true;
+                    return;
+                }
+                self.cancel_native_transcript_selection();
 
                 let (col, row) = self.pixel_to_cell(
                     self.mouse_pos.x,
@@ -489,6 +499,14 @@ impl App {
                 self.needs_redraw = true;
             }
             ElementState::Released => {
+                if button == MouseButton::Left && self.native_transcript_selection_active() {
+                    self.end_native_transcript_selection();
+                    self.mouse_pressed = false;
+                    if self.config.behavior.copy_on_select {
+                        self.native_transcript_copy();
+                    }
+                    return;
+                }
                 self.mouse_pressed = false;
                 self.reported_button = None;
                 self.divider_dragging = None;
@@ -526,6 +544,10 @@ impl App {
 
     /// Handle mouse drag for selection.
     fn handle_mouse_drag(&mut self) {
+        if self.native_transcript_selection_active() {
+            self.update_native_transcript_selection();
+            return;
+        }
         // Handle tab bar dragging
         if self.tab_bar.is_dragging() {
             let x = self.mouse_pos.x as f32;
@@ -885,7 +907,7 @@ impl App {
     }
 
     /// Copy text to clipboard.
-    fn copy_to_clipboard(&mut self, text: &str) {
+    pub(super) fn copy_to_clipboard(&mut self, text: &str) {
         if let Some(clipboard) = &mut self.clipboard {
             if let Err(e) = clipboard.set_text(text.to_string()) {
                 tracing::warn!("Failed to copy to clipboard: {}", e);
@@ -1203,6 +1225,9 @@ impl App {
 
         // Handle copy shortcut (Ctrl+Shift+C)
         if self.check_keybinding(&event, &self.config.keybindings.copy.clone()) {
+            if self.native_transcript_copy() {
+                return;
+            }
             if let Some(text) = self.terminal().and_then(|t| t.selected_text()) {
                 self.copy_to_clipboard(&text);
             }

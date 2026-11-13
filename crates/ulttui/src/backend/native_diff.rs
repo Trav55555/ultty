@@ -24,6 +24,7 @@ use ultty_protocol::{
 pub(super) struct RegionSnapshot {
     pub(super) parent: RegionId,
     pub(super) key: Option<String>,
+    pub(super) metadata: Vec<(String, String)>,
     pub(super) widget: Option<WidgetIdentity>,
     pub(super) constraints: Constraints,
     pub(super) style: Style,
@@ -40,7 +41,7 @@ pub(super) struct RegionSnapshot {
 /// Regions the terminal currently retains: stable ids plus sibling order.
 #[derive(Debug)]
 pub(crate) struct RetainedTree {
-    regions: HashMap<RegionId, RegionSnapshot>,
+    pub(super) regions: HashMap<RegionId, RegionSnapshot>,
     /// Ordered children per parent; parents include the terminal's root.
     children: HashMap<RegionId, Vec<RegionId>>,
     /// Next never-used stable id. Ids are never recycled, so a region id
@@ -161,6 +162,7 @@ impl RetainedTree {
 pub(crate) struct FrameNotes {
     /// Native keys ([`crate::widgets::View::native_key`]).
     pub(crate) keys: HashMap<RegionId, String>,
+    pub(crate) metadata: HashMap<RegionId, Vec<(String, String)>>,
     pub(crate) widgets: HashMap<RegionId, WidgetIdentity>,
     /// Live regions whose text is markdown prose still arriving: an inline
     /// opener at the end of it may yet turn into styling, so it is not
@@ -183,6 +185,17 @@ pub(crate) fn record_native_key(id: RegionId, key: &str) {
     NOTES_RECORDER.with(|recorder| {
         if let Some(notes) = recorder.borrow_mut().as_mut() {
             notes.keys.insert(id, key.to_string());
+        }
+    });
+}
+
+/// Record extra native region metadata for the current frame.
+pub(crate) fn record_native_metadata(id: RegionId, metadata: Vec<(String, String)>) {
+    NOTES_RECORDER.with(|recorder| {
+        if let Some(notes) = recorder.borrow_mut().as_mut() {
+            if !metadata.is_empty() {
+                notes.metadata.insert(id, metadata);
+            }
         }
     });
 }
@@ -232,6 +245,7 @@ pub(crate) fn take_frame_notes() -> FrameNotes {
 
 struct ProvisionalNode {
     key: Option<String>,
+    metadata: Vec<(String, String)>,
     widget: Option<WidgetIdentity>,
     constraints: Constraints,
     style: Style,
@@ -560,6 +574,7 @@ fn parse_provisional_tree(
                     *id,
                     ProvisionalNode {
                         key: notes.keys.get(id).cloned(),
+                        metadata: notes.metadata.get(id).cloned().unwrap_or_default(),
                         widget: notes.widgets.get(id).cloned(),
                         constraints: constraints.clone(),
                         style: style.clone(),
@@ -674,6 +689,7 @@ fn reconcile_children(
             RegionSnapshot {
                 parent: stable_parent,
                 key: effective_keys[index].map(str::to_string),
+                metadata: node.metadata.clone(),
                 widget: node.widget.clone(),
                 constraints: node.constraints.clone(),
                 style: node.style.clone(),
@@ -1230,6 +1246,7 @@ mod tests {
             super::RegionSnapshot {
                 parent: ROOT,
                 key: None,
+                metadata: Vec::new(),
                 widget: None,
                 constraints: Constraints::default(),
                 style: Style::default(),

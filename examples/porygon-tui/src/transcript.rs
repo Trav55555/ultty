@@ -16,6 +16,9 @@ pub(crate) struct Transcript {
     width: usize,
     entries: Vec<Entry>,
     ends: Vec<usize>,
+    logical_ends: Vec<usize>,
+    revision: u64,
+    conversation_id: Option<String>,
 }
 
 struct Entry {
@@ -23,37 +26,81 @@ struct Entry {
     body: String,
     color: Color,
     rows: Vec<Row>,
+    starts: Vec<usize>,
+    logical_len: usize,
     assistant: bool,
 }
 
 impl Entry {
+    fn rendered_bytes(&self) -> impl Iterator<Item = u8> + '_ {
+        self.rows.iter().flat_map(|row| {
+            row.content
+                .spans
+                .iter()
+                .flat_map(|span| span.text.bytes())
+                .chain(std::iter::once(b'\n').take(usize::from(row.hard_break)))
+        })
+    }
+
     fn matches(&self, heading: &str, body: &str, color: Color) -> bool {
         self.heading == heading && self.body == body && self.color == color
     }
 
     fn new(heading: String, body: String, color: Color, width: usize, assistant: bool) -> Self {
         let header = || {
-            plain_row(ultty_protocol::RichText::new().span(&heading, Style::new().fg(color).bold()))
+            let mut row = plain_row(
+                ultty_protocol::RichText::new().span(&heading, Style::new().fg(color).bold()),
+            );
+            row.hard_break = true;
+            row
         };
         let markdown = MarkdownView::new(&body).with_visible_link_targets();
         let mut rows = vec![header()];
         rows.extend(markdown.prepared_rows(width));
-        rows.push(plain_row(ultty_protocol::RichText::new()));
+        if let Some(last) = rows.last_mut() {
+            last.hard_break = true;
+        }
+        let mut separator = plain_row(ultty_protocol::RichText::new());
+        separator.hard_break = true;
+        rows.push(separator);
+        let mut logical_len = 0usize;
+        let mut starts = Vec::with_capacity(rows.len());
+        for row in &rows {
+            starts.push(logical_len);
+            logical_len += row
+                .content
+                .spans
+                .iter()
+                .map(|span| span.text.len())
+                .sum::<usize>();
+            logical_len += usize::from(row.hard_break);
+        }
         Self {
             heading,
             body,
             color,
             rows,
+            starts,
+            logical_len,
             assistant,
         }
     }
 }
 
 impl Transcript {
-    pub(crate) fn sync(&mut self, width: usize, messages: &[ChatMessage], tools: &[ToolCall]) {
-        if self.width != width {
-            self.entries.clear();
-            self.width = width;
+    pub(crate) fn sync(
+        &mut self,
+        width: usize,
+        messages: &[ChatMessage],
+        tools: &[ToolCall],
+        conversation_id: Option<&str>,
+    ) {
+        let width_changed = self.width != width;
+        self.width = width;
+        let mut changed = self.conversation_id.as_deref() != conversation_id
+            || self.entries.len() != messages.len() + tools.len();
+        if self.conversation_id.as_deref() != conversation_id {
+            self.conversation_id = conversation_id.map(str::to_owned);
         }
         self.entries.truncate(messages.len() + tools.len());
         for (index, message) in messages.iter().enumerate() {
@@ -63,12 +110,13 @@ impl Transcript {
                 _ => ("System", Color::Rgb(136, 136, 136)),
             };
             let heading = format!("{name}  {}", message.timestamp);
-            self.update(
+            changed |= self.update(
                 index,
                 heading,
                 &message.content,
                 color,
                 message.role == "assistant",
+                width_changed,
             );
         }
         for (index, tool) in tools.iter().enumerate() {
@@ -87,34 +135,57 @@ impl Transcript {
             if let Some(result) = &tool.result {
                 body.push_str(&format_tool_result_with_diff(result));
             }
-            self.update(
+            changed |= self.update(
                 messages.len() + index,
                 format!("{}  {status}", tool.name),
                 &body,
                 color,
                 false,
+                width_changed,
             );
         }
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
         self.ends.clear();
+        self.logical_ends.clear();
+        let mut logical_end = 0;
         let mut end = 0;
         for entry in &self.entries {
             end += entry.rows.len();
             self.ends.push(end);
+            logical_end += entry.logical_len;
+            self.logical_ends.push(logical_end);
         }
     }
 
-    fn update(&mut self, index: usize, heading: String, body: &str, color: Color, assistant: bool) {
-        if self.entries.get(index).is_some_and(|entry| {
+    fn update(
+        &mut self,
+        index: usize,
+        heading: String,
+        body: &str,
+        color: Color,
+        assistant: bool,
+        width_changed: bool,
+    ) -> bool {
+        let same = self.entries.get(index).is_some_and(|entry| {
             entry.matches(&heading, body, color) && entry.assistant == assistant
-        }) {
-            return;
+        });
+        if same && !width_changed {
+            return false;
         }
         let entry = Entry::new(heading, body.into(), color, self.width, assistant);
+        let changed = !same
+            || self
+                .entries
+                .get(index)
+                .is_none_or(|old| !old.rendered_bytes().eq(entry.rendered_bytes()));
         if let Some(slot) = self.entries.get_mut(index) {
             *slot = entry;
         } else {
             self.entries.push(entry);
         }
+        changed
     }
 
     pub(crate) fn height(&self, working: bool) -> usize {
@@ -171,7 +242,22 @@ impl Transcript {
             } else {
                 row
             };
-            column = column.child(row);
+            let index = start + offset;
+            let entry = self.ends.partition_point(|end| *end <= index);
+            let previous_rows = entry
+                .checked_sub(1)
+                .map_or(0, |previous| self.ends[previous]);
+            let previous_bytes = entry
+                .checked_sub(1)
+                .map_or(0, |previous| self.logical_ends[previous]);
+            let logical_start = previous_bytes + self.entries[entry].starts[index - previous_rows];
+            let metadata = format!(
+                "{}:{}:{}",
+                self.revision,
+                logical_start,
+                u8::from(row.hard_break)
+            );
+            column = column.child(row.with_selection_metadata(metadata));
             visible += 1;
         }
         if working && visible < height && start + visible >= self.height(false) {
@@ -204,7 +290,7 @@ mod tests {
             timestamp: "now".into(),
             content: "- [x] done\n\n```\nlet x = 1;\n```".into(),
         };
-        transcript.sync(80, &[message], &[]);
+        transcript.sync(80, &[message], &[], None);
         let rows: Vec<_> = transcript.rows(0, usize::MAX).collect();
         let checkbox = rows
             .iter()
@@ -246,7 +332,7 @@ mod tests {
             timestamp: "now".into(),
             content: "See [guide](https://example.org/path)".into(),
         };
-        transcript.sync(80, &[message], &[]);
+        transcript.sync(80, &[message], &[], None);
         let text = transcript
             .rows(0, usize::MAX)
             .flat_map(|row| &row.content.spans)
@@ -258,7 +344,7 @@ mod tests {
     #[test]
     fn ten_thousand_messages_reach_both_ends_with_bounded_visible_tree() {
         let mut transcript = Transcript::default();
-        transcript.sync(76, &messages(10_000), &[]);
+        transcript.sync(76, &messages(10_000), &[], None);
         assert!(transcript.height(false) > 4096);
         let bottom = transcript.height(false) - 20;
         let visible = transcript
@@ -282,21 +368,80 @@ mod tests {
     }
 
     #[test]
+    fn width_dependent_rule_invalidates_selection_revision() {
+        let mut transcript = Transcript::default();
+        let mut source = messages(1);
+        source[0].content = "before\n\n---\n\nafter".into();
+        transcript.sync(80, &source, &[], None);
+        let revision = transcript.revision;
+        transcript.sync(20, &source, &[], None);
+        assert_ne!(transcript.revision, revision);
+    }
+
+    #[test]
+    fn tab_rendered_text_and_offsets_do_not_change_with_soft_wrap() {
+        let mut transcript = Transcript::default();
+        let mut source = messages(1);
+        source[0].content = "```\naaaaa\tX\n```".into();
+        transcript.sync(80, &source, &[], None);
+        let flatten = |transcript: &Transcript| {
+            transcript.entries[0]
+                .rows
+                .iter()
+                .map(|row| {
+                    let mut text = row
+                        .content
+                        .spans
+                        .iter()
+                        .map(|span| span.text.as_str())
+                        .collect::<String>();
+                    if row.hard_break {
+                        text.push('\n');
+                    }
+                    text
+                })
+                .collect::<String>()
+        };
+        let expected = flatten(&transcript);
+        assert!(expected.contains("aaaaa   X"));
+        let revision = transcript.revision;
+        transcript.sync(4, &source, &[], None);
+        assert_eq!(flatten(&transcript), expected);
+        assert_eq!(transcript.revision, revision);
+    }
+
+    #[test]
+    fn selection_revision_stays_stable_on_reflow_and_changes_on_edit() {
+        let mut transcript = Transcript::default();
+        let mut source = messages(1);
+        source[0].content = "width-sensitive é 雪 and more".into();
+        transcript.sync(80, &source, &[], None);
+        let revision = transcript.revision;
+        let length = transcript.logical_ends[0];
+        transcript.sync(6, &source, &[], None);
+        assert_eq!(transcript.revision, revision);
+        assert_eq!(transcript.logical_ends[0], length);
+        source[0].content.push('!');
+        transcript.sync(6, &source, &[], None);
+        assert_ne!(transcript.revision, revision);
+    }
+
+    #[test]
     fn source_replacement_width_and_truncation_refresh_cached_rows() {
         let mut transcript = Transcript::default();
         let mut source = messages(3);
-        transcript.sync(76, &source, &[]);
+        transcript.sync(76, &source, &[], None);
         let original = transcript.height(false);
         source[1].content = "changed\n\nsecond paragraph".into();
-        transcript.sync(76, &source, &[]);
+        transcript.sync(76, &source, &[], None);
         assert!(transcript
             .rows(0, usize::MAX)
             .flat_map(|row| &row.content.spans)
             .any(|span| span.text.contains("changed")));
-        transcript.sync(4, &source, &[]);
+        transcript.sync(4, &source, &[], None);
         assert!(transcript.height(false) > original);
         source.clear();
-        transcript.sync(4, &source, &[]);
+        transcript.sync(4, &source, &[], None);
         assert_eq!(transcript.height(false), 0);
     }
 }

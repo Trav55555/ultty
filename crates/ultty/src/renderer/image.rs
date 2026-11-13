@@ -701,11 +701,13 @@ mod tests {
         ) -> Vec<PaneDraw<'a>> {
             vec![
                 PaneDraw {
+                    selection: Vec::new(),
                     terminal: a,
                     info: PaneInfo::new(0.0, 0.0, 128.0, 96.0, true),
                     sessions: vec![left],
                 },
                 PaneDraw {
+                    selection: Vec::new(),
                     terminal: b,
                     info: PaneInfo::new(128.0, 0.0, 128.0, 96.0, true),
                     sessions: vec![right],
@@ -758,11 +760,13 @@ mod tests {
         let b = TerminalSnapshot::capture(&b).unwrap().to_view().unwrap();
         let panes = [
             PaneDraw {
+                selection: Vec::new(),
                 terminal: &a,
                 info: PaneInfo::new(0.0, 0.0, 128.0, 96.0, true),
                 sessions: vec![],
             },
             PaneDraw {
+                selection: Vec::new(),
                 terminal: &b,
                 info: PaneInfo::new(128.0, 0.0, 128.0, 96.0, true),
                 sessions: vec![],
@@ -785,6 +789,7 @@ mod tests {
             .unwrap();
         fn single(terminal: &Terminal) -> [PaneDraw<'_>; 1] {
             [PaneDraw {
+                selection: Vec::new(),
                 terminal,
                 info: PaneInfo::new(0.0, 0.0, 128.0, 96.0, true),
                 sessions: vec![],
@@ -823,11 +828,13 @@ mod tests {
         assert_ne!(updated.uid(), a.uid());
         let updated_panes = [
             PaneDraw {
+                selection: Vec::new(),
                 terminal: &updated,
                 info: PaneInfo::new(0.0, 0.0, 128.0, 96.0, true),
                 sessions: vec![],
             },
             PaneDraw {
+                selection: Vec::new(),
                 terminal: &b,
                 info: PaneInfo::new(128.0, 0.0, 128.0, 96.0, true),
                 sessions: vec![],

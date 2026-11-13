@@ -9,6 +9,7 @@ mod control_resize;
 mod control_wait;
 mod input;
 mod native_panes;
+mod native_selection;
 mod pacing;
 mod render;
 mod update;
@@ -193,6 +194,7 @@ pub struct App {
     mouse_pos: PhysicalPosition<f64>,
     /// Whether left mouse button is pressed (for selection drag)
     mouse_pressed: bool,
+    native_selection: native_selection::NativeSelectionState,
     /// The button held down while the program reports the mouse: drags are
     /// reported with it and its release names it.
     reported_button: Option<ultty::grid::MouseButton>,
@@ -519,6 +521,7 @@ impl App {
             native_search_query: String::new(),
             native_search_index: 0,
             native_mouse_capture: native_panes::MouseCapture::default(),
+            native_selection: native_selection::NativeSelectionState::default(),
             url_row_buf: Vec::new(),
             url_hyperlink_grid: Vec::new(),
             url_hyperlink_map: std::collections::HashMap::new(),

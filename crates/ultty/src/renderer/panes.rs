@@ -332,7 +332,7 @@ impl Renderer {
                         session,
                         origin,
                         Some(bounds),
-                        None,
+                        (!pane.selection.is_empty()).then_some(pane.selection.as_slice()),
                         0,
                         &mut native,
                     );
@@ -954,11 +954,13 @@ mod image_tests {
         let without = terminal_with_image(false);
         let panes = [
             PaneDraw {
+                selection: Vec::new(),
                 terminal: &without,
                 info: PaneInfo::new(0.0, 0.0, 190.0, 200.0, true),
                 sessions: Vec::new(),
             },
             PaneDraw {
+                selection: Vec::new(),
                 terminal: &with_image,
                 info: PaneInfo::new(200.0, 0.0, 190.0, 200.0, false),
                 sessions: Vec::new(),

@@ -97,6 +97,7 @@ impl PorygonTui {
             self.message_content_width_cols(),
             &self.messages,
             &self.tool_calls,
+            self.conversation_id.as_deref(),
         );
         transcript.height(self.waiting_response) as f32
     }
@@ -297,6 +298,7 @@ impl PorygonTui {
             self.message_content_width_cols(),
             &self.messages,
             &self.tool_calls,
+            self.conversation_id.as_deref(),
         );
         transcript.view(
             self.chat_scroll.scroll_position().1.max(0.0) as usize,
@@ -687,7 +689,10 @@ impl PorygonTui {
                 "Ctrl+X then Enter: newline.",
                 "Shift+Enter: newline when terminal supports it.",
                 "Paste: insert text without sending.",
-                "Ctrl+Y: copy latest reply. In review, c copies evidence.",
+                "Ctrl+Y: copy raw reply. Review: c copies evidence.",
+                "Native: drag selects; Ctrl+Shift+C: copy selection.",
+                "Native Ultty: Ctrl+click a link to open it.",
+                "ANSI: use your terminal's selection and copy controls.",
                 "Ctrl+C: stop active work.",
                 "Ctrl+C when idle: save draft and quit.",
                 "With a draft, press Ctrl+C twice to quit.",

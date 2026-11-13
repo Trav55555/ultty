@@ -130,6 +130,8 @@ pub struct PaneDraw<'a> {
     pub terminal: &'a Terminal,
     pub info: PaneInfo,
     pub sessions: Vec<&'a dyn crate::scene::view::NativeRenderSource>,
+    /// Visible native selection highlights in this pane.
+    pub selection: Vec<crate::scene::SearchMatch>,
 }
 
 /// Information about a pane for rendering.

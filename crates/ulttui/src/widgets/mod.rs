@@ -169,6 +169,7 @@ pub(crate) fn render_view_to_native(
     if let Some(key) = child.native_key() {
         crate::backend::native_diff::record_native_key(region_id, key);
     }
+    crate::backend::native_diff::record_native_metadata(region_id, child.native_metadata());
     if let Some(widget_id) = child.widget_id() {
         crate::backend::native_diff::record_widget(region_id, widget_id, child.is_focusable());
     }
@@ -321,6 +322,11 @@ pub trait View {
         self.widget_id()
     }
 
+    /// Optional, bounded metadata attached to this native region.
+    fn native_metadata(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     fn is_focusable(&self) -> bool {
         false
     }
@@ -408,6 +414,10 @@ impl<T: View> View for &T {
 
     fn native_key(&self) -> Option<&str> {
         (*self).native_key()
+    }
+
+    fn native_metadata(&self) -> Vec<(String, String)> {
+        (*self).native_metadata()
     }
 
     fn is_focusable(&self) -> bool {

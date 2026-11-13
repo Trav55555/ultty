@@ -381,6 +381,7 @@ impl Viewer {
             .filter_map(|pane| {
                 let [x, y, w, h] = pane.rect?;
                 Some(PaneDraw {
+                    selection: Vec::new(),
                     terminal: &pane.terminal,
                     info: PaneInfo::new(x * cw, y * ch, w * cw, h * ch, Some(pane.id) == focused),
                     sessions: pane

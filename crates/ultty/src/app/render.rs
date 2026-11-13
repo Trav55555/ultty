@@ -237,12 +237,14 @@ impl App {
         // what the user is looking at.
         if let Some(ref server) = self.runtime.protocol {
             if server.pane_or_unbound_sessions(pane).next().is_some() {
-                let search_matches =
-                    if self.native_search_active && !self.native_search_matches.is_empty() {
-                        Some(self.native_search_matches.as_slice())
-                    } else {
-                        None
-                    };
+                let selection_matches = self.native_transcript_highlights(pane);
+                let search_matches = if !selection_matches.is_empty() {
+                    Some(selection_matches.as_slice())
+                } else if self.native_search_active && !self.native_search_matches.is_empty() {
+                    Some(self.native_search_matches.as_slice())
+                } else {
+                    None
+                };
 
                 // Collect live region IDs (across all tabs and surfaces, so
                 // switching tabs does not evict images of hidden sessions)
@@ -292,7 +294,10 @@ impl App {
             return false;
         }
 
-        let panes = pane_draws(&locked, self.runtime.protocol.as_ref());
+        let mut panes = pane_draws(&locked, self.runtime.protocol.as_ref());
+        for (pane, locked_pane) in panes.iter_mut().zip(&locked) {
+            pane.selection = self.native_transcript_highlights(locked_pane.id);
+        }
 
         // Check if bell is still active
         let bell_active = self
@@ -360,6 +365,7 @@ pub(super) fn pane_draws<'a>(
         .map(|pane| PaneDraw {
             terminal: &pane.terminal,
             info: pane.info,
+            selection: Vec::new(),
             sessions: server.map_or_else(Vec::new, |server| {
                 server
                     .pane_sessions(pane.id)

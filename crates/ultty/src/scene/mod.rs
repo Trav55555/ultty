@@ -5,6 +5,7 @@ pub(crate) mod geometry;
 pub mod layout;
 pub mod raster;
 pub mod region;
+pub mod selection;
 pub mod semantics;
 pub(crate) mod text_layout;
 pub mod tree;
