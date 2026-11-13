@@ -63,10 +63,13 @@ impl AnsiBackend {
         terminal::enable_raw_mode()?;
         io::stdout().execute(EnterAlternateScreen)?;
         io::stdout().execute(crossterm::event::EnableMouseCapture)?;
+        io::stdout().execute(crossterm::event::EnableBracketedPaste)?;
 
         let backend = CrosstermBackend::new(io::stdout());
         self.terminal = Some(Terminal::new(backend)?);
-        self.size = self.window_size();
+        // The first poll must report the size to the application, including
+        // when this backend is initialized again after shutdown.
+        self.size = None;
 
         Ok(())
     }
@@ -98,6 +101,11 @@ impl AnsiBackend {
         }
     }
 
+    /// Deadline for resolving an ambiguous lone escape byte.
+    pub fn deadline(&self) -> Option<std::time::Instant> {
+        self.reader.deadline()
+    }
+
     /// Whether events were decoded that `poll_event` has not returned yet.
     pub fn has_pending_events(&mut self) -> crate::Result<bool> {
         Ok(self.reader.has_events())
@@ -116,7 +124,7 @@ impl AnsiBackend {
                 if !self.reader.read_available(fd)? {
                     tracing::info!("the terminal hung up; quitting");
                     self.input = None;
-                    return Ok(Some(Event::Quit));
+                    return Ok(Some(Event::TransportClosed));
                 }
             }
         }
@@ -148,6 +156,7 @@ impl Default for AnsiBackend {
 /// was ever enabled.
 pub fn restore_terminal() -> io::Result<()> {
     let mut stdout = io::stdout();
+    stdout.execute(crossterm::event::DisableBracketedPaste)?;
     stdout.execute(crossterm::event::DisableMouseCapture)?;
     stdout.execute(LeaveAlternateScreen)?;
     if terminal::is_raw_mode_enabled()? {
@@ -179,6 +188,79 @@ pub fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pty_size_is_reported_initially_and_once_per_change() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let mut master = -1;
+        let mut slave = -1;
+        let mut size = libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: both fd pointers and the initial winsize are valid; optional pointers are null.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    &size,
+                )
+            },
+            0
+        );
+        // SAFETY: openpty returned two distinct owned descriptors.
+        let master = unsafe { File::from_raw_fd(master) };
+        // SAFETY: the slave descriptor is owned and has not been closed.
+        let slave = unsafe { File::from_raw_fd(slave) };
+        let mut backend = AnsiBackend::new();
+        backend.input = Some(Input::DevTty(slave));
+        assert!(matches!(
+            backend.poll_event().unwrap(),
+            Some(Event::Resize {
+                width: 80,
+                height: 24
+            })
+        ));
+        assert!(backend.poll_event().unwrap().is_none());
+        size.ws_col = 120;
+        size.ws_row = 40;
+        // SAFETY: master is an open PTY and size points to a valid winsize.
+        assert_eq!(
+            unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+            0
+        );
+        assert!(matches!(
+            backend.poll_event().unwrap(),
+            Some(Event::Resize {
+                width: 120,
+                height: 40
+            })
+        ));
+        assert!(backend.poll_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn closed_input_reports_transport_closure() {
+        use std::os::unix::net::UnixStream;
+        let (writer, reader) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let mut backend = AnsiBackend::new();
+        backend.input = Some(Input::DevTty(File::from(std::os::fd::OwnedFd::from(
+            reader,
+        ))));
+        drop(writer);
+        assert!(matches!(
+            backend.poll_event().unwrap(),
+            Some(Event::TransportClosed)
+        ));
+        assert!(backend.poll_event().unwrap().is_none());
+    }
 
     #[test]
     fn restore_terminal_is_idempotent_without_an_active_session() {

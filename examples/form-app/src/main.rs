@@ -114,6 +114,7 @@ enum Message {
     FocusNext,
     FocusPrev,
     AppendChar(char),
+    Paste(String),
     DeleteChar,
     Submit,
     Validate,
@@ -150,6 +151,11 @@ impl Application for FormApp {
             }
             Message::AppendChar(c) => {
                 self.fields[self.active_field].value.push(c);
+                self.fields[self.active_field].revalidate();
+                Cmd::none()
+            }
+            Message::Paste(text) => {
+                self.fields[self.active_field].value.push_str(&text);
                 self.fields[self.active_field].revalidate();
                 Cmd::none()
             }
@@ -218,6 +224,7 @@ impl Application for FormApp {
             };
         }
         match event {
+            Event::Paste { text, .. } => Some(Message::Paste(text.clone())),
             Event::Key(key_event) => match key_event.key {
                 Key::Tab => {
                     if key_event.modifiers.shift {

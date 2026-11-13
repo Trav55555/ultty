@@ -142,6 +142,8 @@ pub trait Application: Sized {
     /// Applications own interactive state. The runner annotates key events with
     /// the current `focused_id`, then forwards the event here. Rendered `View`
     /// values are treated as output and are not mutated by the runner.
+    /// Returning a message for [`Event::Quit`] handles the request; return
+    /// [`Cmd::Quit`] from `update` to exit. An unhandled quit exits by default.
     fn on_event(&mut self, _event: &Event) -> Option<Self::Message> {
         None
     }
@@ -486,65 +488,73 @@ impl<A: Application> App<A> {
             .poll_event()?
             .and_then(|event| self.prepare_event(event))
         {
+            if matches!(&event, Event::TransportClosed) {
+                return Ok(false);
+            }
             if matches!(&event, Event::Quit) {
                 if let Some(msg) = self.app.on_event(&event) {
                     self.msg_queue.push_back(msg);
+                    self.drain_messages(rt);
+                    self.poll_spawned_tasks(rt);
+                    self.poll_subscriptions();
+                    self.drain_messages(rt);
+                    if self.quit_requested {
+                        return Ok(false);
+                    }
+                    self.needs_render = true;
+                } else {
+                    return Ok(false);
                 }
-                self.drain_messages(rt);
-                self.poll_spawned_tasks(rt);
-                self.poll_subscriptions();
-                self.drain_messages(rt);
-                return Ok(false);
-            }
+            } else {
+                let mut forward_to_app = true;
+                let mut allow_navigation = true;
+                let mut event_changed_state = false;
+                if !self.screen_stack.is_empty() {
+                    let action = {
+                        let top_screen = self
+                            .screen_stack
+                            .last_mut()
+                            .expect("screen stack checked as non-empty");
+                        top_screen.on_event(&event)
+                    };
+                    event_changed_state = true;
 
-            let mut forward_to_app = true;
-            let mut allow_navigation = true;
-            let mut event_changed_state = false;
-            if !self.screen_stack.is_empty() {
-                let action = {
-                    let top_screen = self
-                        .screen_stack
-                        .last_mut()
-                        .expect("screen stack checked as non-empty");
-                    top_screen.on_event(&event)
-                };
-                event_changed_state = true;
-
-                match action {
-                    ScreenAction::Continue => {}
-                    ScreenAction::Dismiss => {
-                        if let Some(mut screen) = self.screen_stack.pop() {
-                            screen.on_unmount();
+                    match action {
+                        ScreenAction::Continue => {}
+                        ScreenAction::Dismiss => {
+                            if let Some(mut screen) = self.screen_stack.pop() {
+                                screen.on_unmount();
+                            }
+                            forward_to_app = false;
+                            event_changed_state = true;
                         }
-                        forward_to_app = false;
+                        ScreenAction::Consumed => {
+                            forward_to_app = false;
+                            allow_navigation = false;
+                        }
+                    }
+                }
+
+                // The app (and its focused widget) sees every key first; Tab only
+                // drives focus navigation when the app leaves it unhandled.
+                let mut handled_by_app = false;
+                if forward_to_app {
+                    event_changed_state = true;
+                    if let Some(msg) = self.app.on_event(&event) {
+                        self.msg_queue.push_back(msg);
+                        handled_by_app = true;
+                    }
+                }
+
+                if let Event::Key(ref key_event) = event {
+                    if allow_navigation && !handled_by_app && self.handle_navigation(key_event) {
                         event_changed_state = true;
                     }
-                    ScreenAction::Consumed => {
-                        forward_to_app = false;
-                        allow_navigation = false;
-                    }
                 }
-            }
 
-            // The app (and its focused widget) sees every key first; Tab only
-            // drives focus navigation when the app leaves it unhandled.
-            let mut handled_by_app = false;
-            if forward_to_app {
-                event_changed_state = true;
-                if let Some(msg) = self.app.on_event(&event) {
-                    self.msg_queue.push_back(msg);
-                    handled_by_app = true;
+                if event_changed_state {
+                    self.needs_render = true;
                 }
-            }
-
-            if let Event::Key(ref key_event) = event {
-                if allow_navigation && !handled_by_app && self.handle_navigation(key_event) {
-                    event_changed_state = true;
-                }
-            }
-
-            if event_changed_state {
-                self.needs_render = true;
             }
         }
 
@@ -619,6 +629,10 @@ impl<A: Application> App<A> {
     /// Note the focused widget on a key event and apply the user's key
     /// remaps. `None` when a remap moved focus and used up the key.
     fn prepare_event(&mut self, mut event: Event) -> Option<Event> {
+        if let Event::Paste { focused_id, .. } = &mut event {
+            *focused_id = self.focus.focused_id().map(str::to_string);
+            return Some(event);
+        }
         let Event::Key(key_event) = &mut event else {
             return Some(event);
         };
@@ -1276,7 +1290,11 @@ mod async_tests {
 
         fn update(&mut self, msg: char) -> Cmd<char> {
             self.updates.lock().unwrap().push(msg);
-            Cmd::none()
+            if msg == 'q' {
+                Cmd::Quit
+            } else {
+                Cmd::none()
+            }
         }
 
         fn on_event(&mut self, event: &Event) -> Option<Self::Message> {
@@ -1485,6 +1503,100 @@ mod async_tests {
 
         assert!(should_continue);
         assert_eq!(mock_render_count(&runner), 0);
+    }
+
+    #[test]
+    fn handled_quit_can_cancel_or_confirm_before_exit() {
+        struct ConfirmApp {
+            busy: bool,
+            armed: bool,
+            draft: String,
+        }
+        enum Msg {
+            Cancel,
+            Warn,
+            Exit,
+        }
+        impl Application for ConfirmApp {
+            type Message = Msg;
+            fn on_event(&mut self, event: &Event) -> Option<Msg> {
+                if !matches!(event, Event::Quit) {
+                    return None;
+                }
+                Some(if self.busy {
+                    Msg::Cancel
+                } else if !self.armed {
+                    Msg::Warn
+                } else {
+                    Msg::Exit
+                })
+            }
+            fn update(&mut self, msg: Msg) -> Cmd<Msg> {
+                match msg {
+                    Msg::Cancel => {
+                        self.busy = false;
+                        Cmd::none()
+                    }
+                    Msg::Warn => {
+                        self.armed = true;
+                        Cmd::none()
+                    }
+                    Msg::Exit => Cmd::Quit,
+                }
+            }
+            fn view(&self) -> impl View {
+                Text::new(&self.draft)
+            }
+        }
+        let app = ConfirmApp {
+            busy: true,
+            armed: false,
+            draft: "keep".into(),
+        };
+        let backend = Backend::Mock(MockBackend::new(vec![
+            Some(Event::Quit),
+            Some(Event::Quit),
+            Some(Event::Quit),
+        ]));
+        let mut runner = App::new_with_backend(app, backend);
+        let rt = test_runtime();
+        assert!(runner.run_tick(&rt).unwrap());
+        assert!(!runner.app.busy);
+        assert_eq!(runner.app.draft, "keep");
+        assert!(runner.run_tick(&rt).unwrap());
+        assert!(runner.app.armed);
+        assert_eq!(runner.app.draft, "keep");
+        assert!(!runner.run_tick(&rt).unwrap());
+    }
+
+    #[test]
+    fn transport_closure_exits_even_when_app_consumes_quit() {
+        struct ConsumeAll(Arc<Mutex<usize>>);
+        impl Application for ConsumeAll {
+            type Message = ();
+            fn on_event(&mut self, _: &Event) -> Option<()> {
+                *self.0.lock().unwrap() += 1;
+                Some(())
+            }
+            fn view(&self) -> impl View {
+                Text::new("test")
+            }
+        }
+        let calls = Arc::new(Mutex::new(0));
+        let backend = Backend::Mock(MockBackend::new(vec![Some(Event::TransportClosed)]));
+        let mut runner = App::new_with_backend(ConsumeAll(calls.clone()), backend);
+        assert!(!runner.run_tick(&test_runtime()).unwrap());
+        assert_eq!(*calls.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn unhandled_quit_still_exits() {
+        let app = RecursiveApp {
+            updates: Arc::new(Mutex::new(Vec::new())),
+        };
+        let backend = Backend::Mock(MockBackend::new(vec![Some(Event::Quit)]));
+        let mut runner = App::new_with_backend(app, backend);
+        assert!(!runner.run_tick(&test_runtime()).unwrap());
     }
 
     #[test]

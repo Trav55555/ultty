@@ -630,7 +630,7 @@ impl NativeBackend {
             self.pending_actions.clear();
             self.action_targets.clear();
             self.presented_frame = None;
-            self.pending_events.push_back(Event::Quit);
+            self.pending_events.push_back(Event::TransportClosed);
         }
 
         Ok(())
@@ -638,6 +638,10 @@ impl NativeBackend {
 
     fn convert_input_event(&mut self, input: InputEvent) -> Option<Event> {
         match input.event_type {
+            InputType::KeyDown {
+                key: Key::Char('c' | 'C'),
+                modifiers,
+            } if modifiers == Modifiers::CTRL => Some(Event::Quit),
             InputType::KeyDown { key, modifiers } => Some(Event::Key(crate::event::KeyEvent {
                 key: self.convert_key(key),
                 modifiers: self.convert_modifiers(modifiers),
@@ -674,20 +678,10 @@ impl NativeBackend {
                     modifiers: self.convert_modifiers(input.modifiers),
                 }))
             }
-            InputType::TextInput { text } => {
-                // Convert bulk text input into individual key events.
-                // Queue all into pending_events (not returning the first separately,
-                // which would place it after the rest when the caller pushes it back).
-                for ch in text.chars() {
-                    self.pending_events
-                        .push_back(Event::Key(crate::event::KeyEvent {
-                            key: crate::event::Key::Char(ch),
-                            modifiers: crate::event::Modifiers::default(),
-                            focused_id: None,
-                        }));
-                }
-                None
-            }
+            InputType::TextInput { text } => Some(Event::Paste {
+                text,
+                focused_id: None,
+            }),
             _ => None,
         }
     }
@@ -757,6 +751,46 @@ mod tests {
 
     use super::NativeBackend;
     use crate::widgets::{Button, Column};
+
+    #[test]
+    fn native_control_c_is_a_quit_request_only_without_other_modifiers() {
+        use crate::event::Event;
+        use ultty_protocol::{InputEvent, InputType, Key, Modifiers, RegionId};
+
+        let mut backend = NativeBackend::new();
+        let mut convert = |key, modifiers| {
+            backend.convert_input_event(InputEvent {
+                region_id: RegionId(1),
+                event_type: InputType::KeyDown { key, modifiers },
+                x: 0.0,
+                y: 0.0,
+                modifiers,
+            })
+        };
+        assert!(matches!(
+            convert(Key::Char('c'), Modifiers::CTRL),
+            Some(Event::Quit)
+        ));
+        assert!(matches!(
+            convert(Key::Char('C'), Modifiers::CTRL),
+            Some(Event::Quit)
+        ));
+        for modifiers in [
+            Modifiers::NONE,
+            Modifiers::CTRL.union(Modifiers::ALT),
+            Modifiers::CTRL.union(Modifiers::META),
+            Modifiers::CTRL.union(Modifiers::SHIFT),
+        ] {
+            assert!(matches!(
+                convert(Key::Char('c'), modifiers),
+                Some(Event::Key(_))
+            ));
+        }
+        assert!(matches!(
+            convert(Key::Char('x'), Modifiers::CTRL),
+            Some(Event::Key(_))
+        ));
+    }
 
     /// Backend writing into one end of a socket pair; returns the reader end.
     fn backend_over_pair() -> (NativeBackend, UnixStream) {

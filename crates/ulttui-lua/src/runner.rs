@@ -356,6 +356,19 @@ impl Application for LuaApp {
                 Some(edit) => edit.map(Msg::Script),
                 None => Some(Msg::Script(key_msg(key))),
             },
+            Event::Paste { text, focused_id } => {
+                let id = focused_id.as_deref()?;
+                let (value, cursor) = self.script.input_state(id)?;
+                // Lua input nodes are single-line.
+                let text = ulttui::widgets::TextInput::normalize_paste(text, false);
+                let (value, cursor) =
+                    ulttui::edit::apply(&value, cursor, &ulttui::edit::EditOp::Insert(text));
+                Some(Msg::Script(ScriptMsg::Input {
+                    id: id.to_owned(),
+                    value,
+                    cursor,
+                }))
+            }
             Event::Click { id } => Some(Msg::Script(ScriptMsg::Click { id: id.clone() })),
             _ => None,
         }

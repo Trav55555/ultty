@@ -219,7 +219,7 @@ impl Backend {
     pub fn deadline(&self) -> Option<Instant> {
         match self {
             Backend::Native(b) => b.deadline(),
-            Backend::Ansi(_) => None,
+            Backend::Ansi(b) => b.deadline(),
             #[cfg(any(test, feature = "test-utils"))]
             Backend::Mock(_) => None,
         }

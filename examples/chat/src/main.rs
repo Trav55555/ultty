@@ -116,6 +116,7 @@ impl ChatApp {
 enum Message {
     Send,
     AppendChar(char),
+    Paste(String),
     DeleteChar,
     StreamWord,
 }
@@ -127,6 +128,7 @@ impl Application for ChatApp {
         match msg {
             Message::Send => self.send_message(),
             Message::AppendChar(c) => self.input.push(c),
+            Message::Paste(text) => self.input.push_str(&text),
             Message::DeleteChar => {
                 self.input.pop();
             }
@@ -145,6 +147,7 @@ impl Application for ChatApp {
 
     fn on_event(&mut self, event: &Event) -> Option<Message> {
         match event {
+            Event::Paste { text, .. } => Some(Message::Paste(text.clone())),
             Event::Key(key_event) => match key_event.key {
                 Key::Enter => Some(Message::Send),
                 Key::Backspace => Some(Message::DeleteChar),
