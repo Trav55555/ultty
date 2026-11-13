@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use super::history::{History, RowPacker};
-use super::{AnchorTag, Cell, CellFlags, Dimensions, Grid, Row, RowMarks, RowView};
+use super::{AnchorTag, Cell, CellFlags, Dimensions, Grid, ImageStore, Row, RowMarks, RowView};
 
 /// Default scrollback buffer size (lines).
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
@@ -82,6 +82,9 @@ pub struct Buffer {
     /// number (`evicted` plus absolute index). Lines evicted since are
     /// pruned.
     rewritten_lines: BTreeMap<usize, u64>,
+    /// Inline images (Sixel) placed on this screen. Each screen keeps its
+    /// own, as foot does (`normal.sixel_images`, `alt.sixel_images`).
+    images: ImageStore,
     /// Rows looked at for anchor bookkeeping, so tests can bound its cost.
     #[cfg(test)]
     anchor_visits: std::cell::Cell<usize>,
@@ -459,9 +462,20 @@ impl Buffer {
             next_anchor_serial: 1,
             rewrites: 0,
             rewritten_lines: BTreeMap::new(),
+            images: ImageStore::new(),
             #[cfg(test)]
             anchor_visits: std::cell::Cell::new(0),
         }
+    }
+
+    /// This screen's inline images.
+    pub fn images(&self) -> &ImageStore {
+        &self.images
+    }
+
+    /// Mutable access to this screen's inline images.
+    pub fn images_mut(&mut self) -> &mut ImageStore {
+        &mut self.images
     }
 
     /// How many rows have been evicted from the front of history so far.

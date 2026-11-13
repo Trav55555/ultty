@@ -43,14 +43,13 @@ pub struct TerminalImage {
 ///
 /// Bounded by [`MAX_IMAGE_STORE_BYTES`] and [`MAX_IMAGE_STORE_COUNT`]; the
 /// oldest images are evicted first.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ImageStore {
     images: HashMap<ImageId, TerminalImage>,
     /// Insertion order (front = oldest) for eviction
     order: VecDeque<ImageId>,
     /// Sum of `data.len()` over all stored images
     total_bytes: usize,
-    next_id: u32,
 }
 
 impl ImageStore {
@@ -60,7 +59,6 @@ impl ImageStore {
             images: HashMap::new(),
             order: VecDeque::new(),
             total_bytes: 0,
-            next_id: 0,
         }
     }
 
@@ -93,13 +91,6 @@ impl ImageStore {
     /// Total RGBA bytes currently stored.
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
-    }
-
-    /// Allocate a new image ID.
-    pub fn allocate_id(&mut self) -> ImageId {
-        let id = ImageId(self.next_id);
-        self.next_id += 1;
-        id
     }
 
     /// Get an image by ID.
