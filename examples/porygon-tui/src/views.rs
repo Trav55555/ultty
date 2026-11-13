@@ -97,6 +97,7 @@ impl PorygonTui {
             self.message_content_width_cols(),
             &self.messages,
             &self.tool_calls,
+            self.conversation_id.as_deref(),
         );
         transcript.height(self.waiting_response) as f32
     }
@@ -297,6 +298,7 @@ impl PorygonTui {
             self.message_content_width_cols(),
             &self.messages,
             &self.tool_calls,
+            self.conversation_id.as_deref(),
         );
         transcript.view(
             self.chat_scroll.scroll_position().1.max(0.0) as usize,

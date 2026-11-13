@@ -12,6 +12,32 @@ mod cache;
 mod images;
 mod widgets;
 
+// Keep a grapheme in one shaping run even when its source styles differ.
+// Its first scalar supplies the style, so rendering and hit testing share cells.
+fn selectable_spans(rich: &ultty_protocol::RichText) -> Vec<ultty_protocol::Span> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let text: String = rich.spans.iter().map(|span| span.text.as_str()).collect();
+    let mut result: Vec<ultty_protocol::Span> = Vec::new();
+    let mut span_index = 0;
+    let mut span_end = rich.spans.first().map_or(0, |span| span.text.len());
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        while offset >= span_end && span_index + 1 < rich.spans.len() {
+            span_index += 1;
+            span_end += rich.spans[span_index].text.len();
+        }
+        let style = &rich.spans[span_index].style;
+        if let Some(last) = result.last_mut().filter(|span| span.style == *style) {
+            last.text.push_str(grapheme);
+        } else {
+            result.push(ultty_protocol::Span {
+                text: grapheme.to_owned(),
+                style: style.clone(),
+            });
+        }
+    }
+    result
+}
+
 /// Where an inline surface is drawn: its root, its height in rows, and
 /// the pixel row its top is at.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -643,7 +669,18 @@ impl Renderer {
                     let mut cursor_x = cx;
                     let mut line_idx = 0usize;
 
-                    for span in &rich_text.spans {
+                    let selectable = region
+                        .metadata
+                        .iter()
+                        .any(|(key, _)| key == "transcript-row-v1");
+                    let normalized;
+                    let spans = if selectable {
+                        normalized = selectable_spans(rich_text);
+                        &normalized
+                    } else {
+                        &rich_text.spans
+                    };
+                    for span in spans {
                         let resolved = span
                             .style
                             .fg
@@ -714,10 +751,15 @@ impl Renderer {
                                 let chunk = &segment[byte_pos..chunk_end];
 
                                 let span_y = cy + line_idx as f32 * cell_h;
-                                let (verts, idxs, advance) =
+                                let (verts, idxs, advance) = if selectable {
+                                    self.text_renderer.build_cell_text_vertices(
+                                        chunk, cursor_x, span_y, fg_color, bold, italic,
+                                    )
+                                } else {
                                     self.text_renderer.build_styled_text_vertices(
                                         chunk, cursor_x, span_y, fg_color, bold, italic,
-                                    );
+                                    )
+                                };
                                 append_clipped_glyphs(
                                     &verts,
                                     &idxs,
@@ -953,7 +995,25 @@ mod tests {
 
 #[cfg(test)]
 mod scissor_tests {
-    use super::scissor_for;
+    use super::{scissor_for, selectable_spans};
+
+    #[test]
+    fn selectable_text_keeps_graphemes_together_across_style_boundaries() {
+        let normal = ultty_protocol::Style::default();
+        let bold = ultty_protocol::Style::new().bold();
+        let rich = ultty_protocol::RichText::new()
+            .span("e", normal.clone())
+            .span("\u{301}A👩", bold.clone())
+            .span("\u{200d}💻B", normal.clone());
+        let spans = selectable_spans(&rich);
+        assert_eq!(
+            spans.iter().map(|s| s.text.as_str()).collect::<String>(),
+            "e\u{301}A👩\u{200d}💻B"
+        );
+        assert_eq!(spans[0].text, "e\u{301}");
+        assert_eq!(spans[1].text, "A👩\u{200d}💻");
+        assert_eq!(spans[2].text, "B");
+    }
 
     #[test]
     fn a_pane_rectangle_becomes_a_whole_pixel_scissor_rounded_outwards() {

@@ -19,6 +19,16 @@ fn url_regex() -> &'static Regex {
     })
 }
 
+/// Find an HTTP(S) URL containing the given UTF-8 byte position in text.
+pub fn url_at_text(text: &str, byte_offset: usize) -> Option<String> {
+    url_regex()
+        .find_iter(text)
+        .find(|item| {
+            item.start() <= byte_offset && byte_offset < item.end() && item.end() < text.len()
+        })
+        .map(|item| item.as_str().to_owned())
+}
+
 /// A detected URL with its position in the terminal grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedUrl {

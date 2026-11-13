@@ -38,6 +38,9 @@ pub struct PreparedMarkdownRow {
     pub content: RichText,
     /// Native semantics for the first row of a completed task item.
     pub semantics: Semantics,
+    /// Whether the next row starts after a real line break.
+    pub hard_break: bool,
+    selection_metadata: Option<String>,
     final_block: bool,
     final_row: bool,
     defer_while_streaming: bool,
@@ -49,10 +52,18 @@ impl PreparedMarkdownRow {
         Self {
             content,
             semantics: Semantics::default(),
+            hard_break: false,
+            selection_metadata: None,
             final_block: false,
             final_row: false,
             defer_while_streaming: false,
         }
+    }
+
+    /// Attach bounded transcript selection metadata to this row.
+    pub fn with_selection_metadata(mut self, metadata: String) -> Self {
+        self.selection_metadata = Some(metadata);
+        self
     }
 
     /// Apply live metadata to this visible row of the active response.
@@ -91,6 +102,12 @@ impl View for PreparedMarkdownRow {
     }
     fn semantics(&self) -> Semantics {
         self.semantics.clone()
+    }
+    fn native_metadata(&self) -> Vec<(String, String)> {
+        self.selection_metadata
+            .as_ref()
+            .map(|value| vec![("transcript-row-v1".into(), value.clone())])
+            .unwrap_or_default()
     }
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
         self.widget().render_ansi(frame, area);
@@ -318,28 +335,30 @@ impl MarkdownView {
             let dim = matches!(block, Block::CodeBlock { .. } | Block::BlockQuote { .. });
             let mut row = RichText::new();
             let mut column = 0;
+            let mut logical_column = 0;
             for span in rich.spans {
                 let mut style = span.style;
                 style.dim |= dim;
                 for cluster in span.text.graphemes(true) {
                     if cluster == "\n" || cluster == "\r\n" {
-                        rows.push(PreparedMarkdownRow::new(std::mem::replace(
-                            &mut row,
-                            RichText::new(),
-                        )));
+                        let mut completed =
+                            PreparedMarkdownRow::new(std::mem::replace(&mut row, RichText::new()));
+                        completed.hard_break = true;
+                        rows.push(completed);
                         column = 0;
+                        logical_column = 0;
                         continue;
                     }
                     let expanded;
                     let cluster = if cluster == "\t" {
-                        expanded = " ".repeat(8 - column % 8);
+                        expanded = " ".repeat(8 - logical_column % 8);
                         expanded.as_str()
                     } else {
                         cluster
                     };
                     // Expanded tabs may span several narrow rows.
                     for grapheme in cluster.graphemes(true) {
-                        let cells = grapheme.width();
+                        let cells = grapheme.width().max(1);
                         if column > 0 && column + cells > width {
                             rows.push(PreparedMarkdownRow::new(std::mem::replace(
                                 &mut row,
@@ -357,10 +376,13 @@ impl MarkdownView {
                             });
                         }
                         column += cells;
+                        logical_column += cells;
                     }
                 }
             }
-            rows.push(PreparedMarkdownRow::new(row));
+            let mut completed = PreparedMarkdownRow::new(row);
+            completed.hard_break = !final_block;
+            rows.push(completed);
             if final_block {
                 let defer = matches!(block, Block::ListItem { spans, task: None, .. } if may_become_task(spans));
                 for row in &mut rows[first_row..] {

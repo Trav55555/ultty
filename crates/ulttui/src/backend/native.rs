@@ -34,20 +34,34 @@ pub const REGION_ID_METADATA_KEY: &str = "id";
 /// Name every region this frame creates that has a native key, so tools
 /// reading the terminal's scene can find it. A retained region keeps its
 /// key, so it is named once.
-fn name_new_regions(messages: &mut Vec<AppMessage>, tree: &RetainedTree) {
-    let names: Vec<AppMessage> = messages
-        .iter()
-        .filter_map(|message| match message {
-            AppMessage::CreateRegion { id, .. } => {
-                tree.key_of(*id).map(|key| AppMessage::SetRegionMetadata {
-                    id: *id,
-                    metadata: vec![(REGION_ID_METADATA_KEY.to_string(), key.to_string())],
-                })
+fn update_region_metadata(
+    messages: &mut Vec<AppMessage>,
+    previous: &RetainedTree,
+    next: &RetainedTree,
+) {
+    let mut ids: Vec<_> = next.regions.keys().copied().collect();
+    ids.sort_by_key(|id| id.0);
+    for id in ids {
+        let region = &next.regions[&id];
+        let mut metadata = region.metadata.clone();
+        metadata.retain(|(key, _)| key != REGION_ID_METADATA_KEY);
+        if let Some(key) = &region.key {
+            metadata.push((REGION_ID_METADATA_KEY.into(), key.clone()));
+        }
+        let mut prior = previous.regions.get(&id).map(|old| {
+            let mut entries = old.metadata.clone();
+            entries.retain(|(key, _)| key != REGION_ID_METADATA_KEY);
+            if let Some(key) = &old.key {
+                entries.push((REGION_ID_METADATA_KEY.into(), key.clone()));
             }
-            _ => None,
-        })
-        .collect();
-    messages.extend(names);
+            entries
+        });
+        if prior.as_ref() != Some(&metadata)
+            && (!metadata.is_empty() || prior.take().is_some_and(|p| !p.is_empty()))
+        {
+            messages.push(AppMessage::SetRegionMetadata { id, metadata });
+        }
+    }
 }
 
 /// How long the terminal has to answer `ClientHello` with `SessionReady`.
@@ -273,7 +287,7 @@ impl NativeBackend {
             },
         );
         if self.supports_capability(CAP_REGION_METADATA) {
-            name_new_regions(&mut optimized_messages, &next_tree);
+            update_region_metadata(&mut optimized_messages, &self.retained, &next_tree);
         }
         let supports_actions = self.supports_capability(CAP_SEMANTIC_ACTIONS)
             && self.supports_capability(CAP_REGION_METADATA);
@@ -394,6 +408,7 @@ impl NativeBackend {
         if let Some(key) = view.native_key() {
             record_native_key(region_id, key);
         }
+        super::native_diff::record_native_metadata(region_id, view.native_metadata());
 
         if let Some(widget_id) = view.widget_id() {
             super::native_diff::record_widget(region_id, widget_id, view.is_focusable());
@@ -1032,6 +1047,44 @@ mod tests {
             names(&second),
             vec![(button_labels(&second)[0].0, "c".to_string())]
         );
+    }
+
+    #[test]
+    fn metadata_updates_and_clears_on_retained_regions() {
+        struct MetadataView(Option<&'static str>);
+        impl crate::widgets::View for MetadataView {
+            fn native_key(&self) -> Option<&str> {
+                Some("stable")
+            }
+            fn native_metadata(&self) -> Vec<(String, String)> {
+                self.0
+                    .map(|value| vec![("selection".into(), value.into())])
+                    .unwrap_or_default()
+            }
+        }
+        let (mut backend, mut reader) = backend_over_pair();
+        backend.negotiated_capabilities = ultty_protocol::CAP_REGION_METADATA;
+        backend.render(&MetadataView(Some("first"))).unwrap();
+        let first = drain_messages(&mut reader);
+        let (id, metadata) = first
+            .iter()
+            .find_map(|message| match message {
+                AppMessage::SetRegionMetadata { id, metadata } => Some((*id, metadata)),
+                _ => None,
+            })
+            .unwrap();
+        assert!(metadata.contains(&("id".into(), "stable".into())));
+        assert!(metadata.contains(&("selection".into(), "first".into())));
+        backend.render(&MetadataView(Some("second"))).unwrap();
+        let second = drain_messages(&mut reader);
+        assert!(second.iter().any(|message| matches!(message, AppMessage::SetRegionMetadata { id: sent, metadata } if *sent == id && metadata.contains(&("selection".into(), "second".into())) && metadata.contains(&("id".into(), "stable".into())))));
+        backend.render(&MetadataView(None)).unwrap();
+        let third = drain_messages(&mut reader);
+        assert!(third.iter().any(|message| matches!(message, AppMessage::SetRegionMetadata { id: sent, metadata } if *sent == id && metadata == &vec![("id".into(), "stable".into())])));
+        backend.render(&MetadataView(None)).unwrap();
+        assert!(!drain_messages(&mut reader)
+            .iter()
+            .any(|message| matches!(message, AppMessage::SetRegionMetadata { .. })));
     }
 
     fn semantics_sent(messages: &[AppMessage]) -> Vec<ultty_protocol::Semantics> {
