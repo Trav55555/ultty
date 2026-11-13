@@ -46,10 +46,6 @@ pub enum Progress {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", content = "params")]
 pub enum Action {
-    /// A validated OSC 7501 record replacement or subtree clear.
-    ProgramStatus(crate::program_status::ProgramStatusReport),
-    /// OSC 7501 feature detection, answered without application text.
-    ProgramStatusQuery,
     /// Print a character to the current cursor position
     Print(char),
 
@@ -353,6 +349,12 @@ pub enum Action {
 
     /// Normal keypad mode (DECKPNM — ESC >)
     NormalKeypadMode,
+
+    // Keep status variants after the hot print path to avoid extra dispatch instructions.
+    /// A validated OSC 7501 record replacement or subtree clear.
+    ProgramStatus(crate::program_status::ProgramStatusReport),
+    /// OSC 7501 feature detection, answered without application text.
+    ProgramStatusQuery,
 }
 
 /// Output produced by the ANSI parser's span-aware feed path.
