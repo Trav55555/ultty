@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
 use ulttui::prelude::*;
 use ulttui::toast::Toast;
 use ulttui::widgets::{parse_unified_diff, DiffKind};
@@ -191,62 +190,6 @@ fn wmo_description(code: i32) -> (String, String) {
         95..=99 => ("⛈".into(), "Thunderstorm".into()),
         _ => ("🌡".into(), "Unknown".into()),
     }
-}
-
-pub async fn fetch_sessions(
-    client: &reqwest::Client,
-    daemon_url: &str,
-) -> Result<Vec<SessionInfo>, String> {
-    let url = format!("{daemon_url}/session/list");
-    let response = client
-        .get(&url)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("daemon returned {}", response.status()));
-    }
-    response.json().await.map_err(|e| e.to_string())
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionResumeResponse {
-    messages: Vec<SessionMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionMessage {
-    role: String,
-    content: String,
-    timestamp: Option<String>,
-}
-
-pub async fn fetch_session(
-    client: &reqwest::Client,
-    daemon_url: &str,
-    id: &str,
-) -> Result<Vec<ChatMessage>, String> {
-    let url = format!("{daemon_url}/session/{id}");
-    let response = client
-        .get(&url)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("daemon returned {}", response.status()));
-    }
-    let body: SessionResumeResponse = response.json().await.map_err(|e| e.to_string())?;
-    Ok(body
-        .messages
-        .into_iter()
-        .map(|msg| ChatMessage {
-            role: msg.role,
-            content: msg.content,
-            timestamp: msg.timestamp.unwrap_or_else(format_timestamp),
-        })
-        .collect())
 }
 
 pub async fn save_session(
@@ -1558,64 +1501,14 @@ impl PorygonTui {
                 Cmd::none()
             }
             Msg::OpenConversations => self.open_conversations(),
-            Msg::ConversationsListed(result) => {
-                match result {
-                    Ok(rows) => {
-                        self.conversations.rows = rows;
-                        self.conversations.error = None;
-                    }
-                    Err(error) => self.conversations.error = Some(error),
-                }
+            Msg::MoreConversations => self.fetch_conversation_page(),
+            Msg::ConversationsListed(offset, result) => {
+                self.conversations_listed(offset, result);
                 Cmd::none()
             }
             Msg::LoadConversation(id, generation) => self.load_conversation(id, generation),
             Msg::ConversationLoaded(id, generation, result) => {
                 self.conversation_loaded(id, generation, result)
-            }
-            Msg::SessionsFetched(sessions) => {
-                let mut table = String::from("**Saved Sessions:**\n\n");
-                if sessions.is_empty() {
-                    table.push_str("No saved sessions found.");
-                } else {
-                    table.push_str("| ID | Name | Date | Messages |\n");
-                    table.push_str("|---|---|---|---|\n");
-                    for session in sessions {
-                        let name = session.name.unwrap_or_else(|| "Unnamed".to_string());
-                        let date = session.date.unwrap_or_else(|| "Unknown".to_string());
-                        let count = session.message_count.unwrap_or(0);
-                        table.push_str(&format!(
-                            "| {} | {} | {} | {} |\n",
-                            session.id, name, date, count
-                        ));
-                    }
-                    table.push_str("\nUse `/resume <id>` to load a session.");
-                }
-                self.messages.push(ChatMessage {
-                    role: "system".into(),
-                    content: table,
-                    timestamp: format_timestamp(),
-                });
-                self.auto_scroll_chat();
-                Cmd::none()
-            }
-            Msg::SessionResumed(messages) => {
-                if self.run_unresolved || self.pending_approval.is_some() {
-                    return Cmd::ShowToast(Toast::warning(
-                        "Resolve the current run before loading another session.",
-                    ));
-                }
-                self.current_response = None;
-                self.messages = messages;
-                self.messages.insert(
-                    0,
-                    ChatMessage {
-                        role: "system".into(),
-                        content: "Session resumed.".into(),
-                        timestamp: format_timestamp(),
-                    },
-                );
-                self.auto_scroll_chat();
-                Cmd::ShowToast(Toast::success("Session resumed"))
             }
             Msg::SessionSaved => {
                 self.messages.push(ChatMessage {
@@ -2273,28 +2166,7 @@ impl PorygonTui {
             }
             Msg::ExitRequested => {
                 self.flush_drafts();
-                if self.connected && self.messages.len() > 1 {
-                    let daemon_url = self.daemon_url.clone();
-                    let client = self.client.clone();
-                    let session_id = self.session_id.clone();
-                    let messages = self.messages[1..].to_vec();
-                    Cmd::batch(vec![
-                        Cmd::spawn(async move {
-                            let _ = save_session(
-                                &client,
-                                &daemon_url,
-                                session_id.as_deref(),
-                                None,
-                                &messages,
-                            )
-                            .await;
-                            Msg::SessionSaved
-                        }),
-                        Cmd::Quit,
-                    ])
-                } else {
-                    Cmd::Quit
-                }
+                Cmd::Quit
             }
         }
     }
@@ -2336,49 +2208,8 @@ impl PorygonTui {
                 self.auto_scroll_chat();
                 Cmd::ShowToast(Toast::success("Chat cleared"))
             }
-            CommandAction::FetchSessions => {
-                if !self.connected {
-                    self.messages.push(ChatMessage {
-                        role: "system".into(),
-                        content: "Not connected to daemon. Cannot fetch sessions.".into(),
-                        timestamp: format_timestamp(),
-                    });
-                    self.auto_scroll_chat();
-                    return Cmd::none();
-                }
-                let daemon_url = self.daemon_url.clone();
-                let client = self.client.clone();
-                Cmd::spawn(async move {
-                    match fetch_sessions(&client, &daemon_url).await {
-                        Ok(sessions) => Msg::SessionsFetched(sessions),
-                        Err(err) => Msg::SessionError(err),
-                    }
-                })
-            }
-            CommandAction::ResumeSession { id } => {
-                if self.run_unresolved || self.pending_approval.is_some() {
-                    return Cmd::ShowToast(Toast::warning(
-                        "Resolve the current run before loading another session.",
-                    ));
-                }
-                if !self.connected {
-                    self.messages.push(ChatMessage {
-                        role: "system".into(),
-                        content: "Not connected to daemon. Cannot resume session.".into(),
-                        timestamp: format_timestamp(),
-                    });
-                    self.auto_scroll_chat();
-                    return Cmd::none();
-                }
-                let daemon_url = self.daemon_url.clone();
-                let client = self.client.clone();
-                Cmd::spawn(async move {
-                    match fetch_session(&client, &daemon_url, &id).await {
-                        Ok(messages) => Msg::SessionResumed(messages),
-                        Err(err) => Msg::SessionError(err),
-                    }
-                })
-            }
+            CommandAction::FetchSessions => self.open_conversations(),
+            CommandAction::ResumeSession { id } => self.resume_conversation(id),
             CommandAction::SaveSession { name } => {
                 if !self.connected {
                     self.messages.push(ChatMessage {
@@ -2392,7 +2223,7 @@ impl PorygonTui {
                 let daemon_url = self.daemon_url.clone();
                 let client = self.client.clone();
                 let session_id = self.session_id.clone();
-                let messages = self.messages[1..].to_vec();
+                let messages = self.messages.clone();
                 Cmd::spawn(async move {
                     match save_session(
                         &client,

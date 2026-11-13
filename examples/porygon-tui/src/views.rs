@@ -637,6 +637,7 @@ impl PorygonTui {
                 "Keys and commands",
                 "F2: conversations; search, Enter to open, Ctrl+N new.",
                 "F3: work and run review. F4: attention.",
+                "In conversations, Ctrl+L loads older conversations.",
                 "Esc or F1: back to your draft",
                 "",
                 "Enter: send when ready; keep draft while busy.",
@@ -855,6 +856,7 @@ mod tests {
             for expected in [
                 "Keys and commands",
                 "F2: conversations; search, Enter to open, Ctrl+N new.",
+                "In conversations, Ctrl+L loads older conversations.",
                 "back to your draft",
                 "Ctrl+X then Enter: newline.",
                 "save draft and quit.",

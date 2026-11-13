@@ -8,14 +8,6 @@ pub struct ChatMessage {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct SessionInfo {
-    pub id: String,
-    pub name: Option<String>,
-    pub date: Option<String>,
-    pub message_count: Option<usize>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 pub struct MemoryResult {
     pub content: String,
     pub score: Option<f64>,

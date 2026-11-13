@@ -53,6 +53,9 @@ pub(crate) struct Conversations {
     selected: usize,
     pending: Option<(String, u64)>,
     generation: u64,
+    next_offset: usize,
+    loading: bool,
+    has_more: bool,
     active: Option<String>,
     run: Option<String>,
     unresolved: bool,
@@ -282,17 +285,30 @@ impl PorygonTui {
         self.conversations.query.clear();
         self.conversations.selected = 0;
         self.conversations.error = None;
+        self.conversations.rows.clear();
+        self.conversations.loading = false;
+        self.conversations.next_offset = 0;
+        self.conversations.has_more = true;
+        self.fetch_conversation_page()
+    }
+
+    pub(crate) fn fetch_conversation_page(&mut self) -> Cmd<Msg> {
+        if self.conversations.loading || !self.conversations.has_more {
+            return Cmd::none();
+        }
         let Some(connection) = self.connection.clone() else {
             self.conversations.error = Some("Connect to the daemon to load conversations.".into());
             return Cmd::none();
         };
+        self.conversations.loading = true;
+        let offset = self.conversations.next_offset;
         Cmd::spawn(async move {
             let result = async {
                 let url = connection.endpoint(&["conversations"])?;
                 connection
                     .client
                     .get(url)
-                    .query(&[("limit", 200)])
+                    .query(&[("limit", 200), ("offset", offset)])
                     .send()
                     .await
                     .map_err(|e| e.to_string())?
@@ -303,8 +319,57 @@ impl PorygonTui {
                     .map_err(|e| e.to_string())
             }
             .await;
-            Msg::ConversationsListed(result)
+            Msg::ConversationsListed(offset, result)
         })
+    }
+
+    pub(crate) fn conversations_listed(
+        &mut self,
+        offset: usize,
+        result: Result<Vec<Conversation>, String>,
+    ) {
+        if offset != self.conversations.next_offset {
+            return;
+        }
+        self.conversations.loading = false;
+        match result {
+            Ok(rows) => {
+                self.conversations.next_offset += rows.len();
+                self.conversations.has_more = rows.len() == 200;
+                for row in rows {
+                    if !self
+                        .conversations
+                        .rows
+                        .iter()
+                        .any(|existing| existing.id == row.id)
+                    {
+                        self.conversations.rows.push(row);
+                    }
+                }
+                self.conversations.error = None;
+            }
+            Err(error) => self.conversations.error = Some(error),
+        }
+    }
+
+    pub(crate) fn resume_conversation(&mut self, id: String) -> Cmd<Msg> {
+        if self.connection.is_none() {
+            return Cmd::ShowToast(Toast::warning(
+                "Configure the daemon connection before opening a conversation.",
+            ));
+        }
+
+        if !self.can_switch() {
+            return Cmd::ShowToast(Toast::warning(
+                "Resolve current work before switching conversations.",
+            ));
+        }
+        self.persist_conversation();
+        self.conversations.open = true;
+        self.conversations.generation = self.conversations.generation.wrapping_add(1);
+        let generation = self.conversations.generation;
+        self.conversations.pending = Some((id.clone(), generation));
+        self.load_conversation(id, generation)
     }
 
     pub(crate) fn conversation_event(&mut self, event: &Event) -> Option<Msg> {
@@ -314,6 +379,7 @@ impl PorygonTui {
                 self.conversations.open = false;
                 self.conversations.pending = None;
             }
+            Key::Char('l') if key.modifiers.ctrl => return Some(Msg::MoreConversations),
             Key::Up => self.conversations.selected = self.conversations.selected.saturating_sub(1),
             Key::Down => {
                 self.conversations.selected = (self.conversations.selected + 1)
@@ -470,6 +536,17 @@ impl PorygonTui {
                 "Conversations · Esc back · Ctrl+N new · Enter open",
             ))
             .child(Text::new(format!("Search: {}", self.conversations.query)));
+        view = view.child(Text::new(format!(
+            "Search covers {} loaded conversations · {}",
+            self.conversations.rows.len(),
+            if self.conversations.loading {
+                "loading older conversations…"
+            } else if self.conversations.has_more {
+                "Ctrl+L loads older conversations"
+            } else {
+                "all conversations loaded"
+            }
+        )));
         if let Some(error) = &self.conversations.error {
             view = view.child(Text::new(error.clone()));
         }
@@ -711,5 +788,72 @@ mod tests {
         app.conversation_loaded("same".into(), 1, Ok(Vec::new()));
         assert!(app.conversation_id.is_none());
         assert_eq!(app.conversations.pending, Some(("same".into(), 2)));
+    }
+    #[test]
+    fn test_older_pages_extend_search_and_ignore_stale_offsets() {
+        let mut app = PorygonTui::new();
+        let page = (0..200)
+            .map(|index| Conversation {
+                id: format!("conversation-{index}"),
+                title: Some(format!("recent {index}")),
+                updated_at: "today".into(),
+                message_count: 1,
+            })
+            .collect();
+        app.conversations_listed(0, Ok(page));
+        assert!(app.conversations.has_more);
+        assert_eq!(app.conversations.next_offset, 200);
+        app.conversations.query = "older".into();
+        assert!(app.conversations.filtered().is_empty());
+        app.conversations_listed(
+            200,
+            Ok(vec![Conversation {
+                id: "old".into(),
+                title: Some("older investigation".into()),
+                updated_at: "yesterday".into(),
+                message_count: 7,
+            }]),
+        );
+        assert_eq!(app.conversations.filtered().len(), 1);
+        assert!(!app.conversations.has_more);
+        app.conversations_listed(0, Ok(Vec::new()));
+        assert_eq!(app.conversations.rows.len(), 201);
+    }
+
+    #[test]
+    fn test_resume_command_uses_guarded_conversation_identity() {
+        let mut app = PorygonTui::new();
+        app.connection = Some(
+            crate::connection::Connection::from_values("http://127.0.0.1:18789", "fixture")
+                .unwrap(),
+        );
+        app.conversation_id = Some("original".into());
+        app.input.set_value("/resume destination");
+        app.handle_update(Msg::SendMessage);
+        let generation = app.conversations.generation;
+        assert_eq!(
+            app.conversations.pending,
+            Some(("destination".into(), generation))
+        );
+        assert_eq!(app.conversation_id.as_deref(), Some("original"));
+        app.conversation_loaded("destination".into(), generation, Ok(Vec::new()));
+        assert_eq!(app.conversation_id.as_deref(), Some("destination"));
+        app.run_unresolved = true;
+        app.input.set_value("/resume forbidden");
+        app.handle_update(Msg::SendMessage);
+        assert_eq!(app.conversation_id.as_deref(), Some("destination"));
+        assert!(app.conversations.pending.is_none());
+    }
+
+    #[test]
+    fn test_sessions_command_opens_picker_and_save_accepts_empty_transcript() {
+        let mut app = PorygonTui::new();
+        app.input.set_value("/sessions");
+        app.handle_update(Msg::SendMessage);
+        assert!(app.conversations.open);
+        app.connected = true;
+        app.messages.clear();
+        app.input.set_value("/save");
+        app.handle_update(Msg::SendMessage);
     }
 }

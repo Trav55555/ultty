@@ -249,7 +249,8 @@ impl PorygonTui {
 enum Msg {
     FlushDrafts,
     OpenConversations,
-    ConversationsListed(Result<Vec<conversations::Conversation>, String>),
+    MoreConversations,
+    ConversationsListed(usize, Result<Vec<conversations::Conversation>, String>),
     LoadConversation(String, u64),
     ConversationLoaded(String, u64, Result<Vec<ChatMessage>, String>),
     Init,
@@ -288,8 +289,6 @@ enum Msg {
     InspectRun,
     RunObserved(String, u64, Result<connection::RunSnapshot, String>),
     StopObserved(String, u64, Result<connection::RunSnapshot, String>),
-    SessionsFetched(Vec<SessionInfo>),
-    SessionResumed(Vec<ChatMessage>),
     SessionSaved,
     SessionForked(String),
     SessionExported(String),
