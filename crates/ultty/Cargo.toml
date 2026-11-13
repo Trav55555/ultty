@@ -116,6 +116,7 @@ ulttui = { path = "../ulttui" }
 assets = [
     { source = "target/x86_64-unknown-linux-gnu/release/ultty", dest = "/usr/bin/ultty", mode = "755" },
     { source = "target/x86_64-unknown-linux-gnu/release/ulttyctl", dest = "/usr/bin/ulttyctl", mode = "755" },
+    { source = "target/x86_64-unknown-linux-gnu/release/ultty-session", dest = "/usr/bin/ultty-session", mode = "755" },
     { source = "../../dist/ultty.desktop", dest = "/usr/share/applications/ultty.desktop", mode = "644" },
     { source = "../../dist/icons/hicolor/scalable/apps/ultty.svg", dest = "/usr/share/icons/hicolor/scalable/apps/ultty.svg", mode = "644" },
     { source = "../../dist/icons/hicolor/32x32/apps/ultty.png", dest = "/usr/share/icons/hicolor/32x32/apps/ultty.png", mode = "644" },
@@ -137,6 +138,7 @@ libxkbcommon = "*"
 assets = [
     ["target/release/ultty", "usr/bin/ultty", "755"],
     ["target/release/ulttyctl", "usr/bin/ulttyctl", "755"],
+    ["target/release/ultty-session", "usr/bin/ultty-session", "755"],
     ["../../dist/ultty.desktop", "usr/share/applications/ultty.desktop", "644"],
     ["../../dist/icons/hicolor/scalable/apps/ultty.svg", "usr/share/icons/hicolor/scalable/apps/ultty.svg", "644"],
     ["../../dist/icons/hicolor/32x32/apps/ultty.png", "usr/share/icons/hicolor/32x32/apps/ultty.png", "644"],

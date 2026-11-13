@@ -56,7 +56,7 @@ jobs:
         run: |
           cd "target/$TARGET/release"
           mkdir -p package/dist
-          cp ultty ulttyctl package/
+          cp ultty ulttyctl ultty-session package/
           cp ../../../dist/ultty.desktop package/dist/
           cp -R ../../../dist/icons package/dist/
           cp -R ../../../dist/terminfo package/dist/
