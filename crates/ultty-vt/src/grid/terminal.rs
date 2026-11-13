@@ -3,8 +3,8 @@
 pub mod snapshot;
 
 use super::{
-    Anchor, AnchorRefusal, Buffer, CursorPosition, Dimensions, Grid, ImageStore, Palette, RowMarks,
-    TerminalImage, ThemeColors,
+    Anchor, AnchorRefusal, Buffer, CursorPosition, Dimensions, Grid, ImageId, ImageStore, Palette,
+    RowMarks, TerminalImage, ThemeColors,
 };
 
 /// Most anchor events kept for the embedder; past it the oldest go.
@@ -269,8 +269,9 @@ pub struct Terminal {
     palette: Palette,
     /// Shell integration state
     shell_integration: ShellIntegration,
-    /// Inline images (Sixel, etc.)
-    images: ImageStore,
+    /// The id the next inline image gets. One counter for both screens, so
+    /// an id names one image whichever screen it is on.
+    next_image_id: u32,
     /// Pending responses to send back to PTY
     pending_responses: Vec<Vec<u8>>,
     /// Hyperlink ID to URI mapping (OSC 8)
@@ -347,14 +348,17 @@ impl Terminal {
                 self.hyperlinks.len()
             ));
         }
-        if self.images.len() > super::image::MAX_IMAGE_STORE_COUNT
-            || self.images.total_bytes() > super::image::MAX_IMAGE_STORE_BYTES
-        {
-            return Err(format!(
-                "image store holds {} images / {} bytes, beyond its limits",
-                self.images.len(),
-                self.images.total_bytes()
-            ));
+        for (screen, buffer) in [("main", &self.main), ("alternate", &self.alternate)] {
+            let images = buffer.images();
+            if images.len() > super::image::MAX_IMAGE_STORE_COUNT
+                || images.total_bytes() > super::image::MAX_IMAGE_STORE_BYTES
+            {
+                return Err(format!(
+                    "{screen} screen image store holds {} images / {} bytes, beyond its limits",
+                    images.len(),
+                    images.total_bytes()
+                ));
+            }
         }
         Ok(())
     }
@@ -378,7 +382,7 @@ impl Terminal {
             cell_pixel_size: None,
             palette: Palette::default(),
             shell_integration: ShellIntegration::default(),
-            images: ImageStore::new(),
+            next_image_id: 0,
             pending_responses: Vec::new(),
             hyperlinks: std::collections::HashMap::new(),
             hyperlink_ids: std::collections::HashMap::new(),
@@ -600,14 +604,18 @@ impl Terminal {
             self.swap_kitty_keyboard_state();
             self.alternate.grid_mut().clear();
             self.alternate.grid_mut().cursor_mut().position = CursorPosition::origin();
+            // The screen starts empty, images included.
+            self.alternate.images_mut().clear();
             self.selection = None;
         }
     }
 
-    /// Leave alternate screen buffer.
+    /// Leave alternate screen buffer. Its images go with it, as in foot,
+    /// which frees the alternate screen's sixels when it switches back.
     pub fn leave_alternate_screen(&mut self) {
         if self.using_alternate {
             self.using_alternate = false;
+            self.alternate.images_mut().clear();
             self.swap_kitty_keyboard_state();
             self.selection = None;
         }
@@ -1117,14 +1125,21 @@ impl Terminal {
         self.uid
     }
 
-    /// Get the image store.
+    /// The active screen's image store.
     pub fn images(&self) -> &ImageStore {
-        &self.images
+        self.buffer().images()
     }
 
-    /// Get mutable access to the image store.
+    /// Mutable access to the active screen's image store.
     pub fn images_mut(&mut self) -> &mut ImageStore {
-        &mut self.images
+        self.buffer_mut().images_mut()
+    }
+
+    /// A fresh image id, unique across both screens.
+    pub fn allocate_image_id(&mut self) -> ImageId {
+        let id = ImageId(self.next_image_id);
+        self.next_image_id += 1;
+        id
     }
 
     // === Hyperlink support (OSC 8) ===
@@ -1264,7 +1279,7 @@ impl Terminal {
         let cell_height = image.cell_height;
         let start_col = image.start_col;
 
-        self.images.add(image);
+        self.images_mut().add(image);
 
         let dims = self.dimensions();
         let cursor = self.grid_mut().cursor_mut();
@@ -1334,7 +1349,8 @@ impl Terminal {
                 anchor,
             });
         }
-        self.images.clear();
+        self.main.images_mut().clear();
+        self.alternate.images_mut().clear();
         self.hyperlinks.clear();
         self.hyperlink_ids.clear();
         self.hyperlink_order.clear();
@@ -2018,7 +2034,7 @@ mod tests {
             height: 1,
             data: vec![0; 4],
             start_col: 0,
-            start_row: 0,
+            line: 0,
             cell_width: 1,
             cell_height: 1,
         };
@@ -2074,7 +2090,7 @@ mod tests {
             height: 16,
             data: vec![0; 24 * 16 * 4],
             start_col: 4,
-            start_row: 0,
+            line: 0,
             cell_width: 3,
             cell_height: 1,
         };
@@ -2095,7 +2111,7 @@ mod tests {
             height: 64,
             data: vec![0; 32 * 64 * 4],
             start_col: 9,
-            start_row: 2,
+            line: 2,
             cell_width: 4,
             cell_height: 4,
         };

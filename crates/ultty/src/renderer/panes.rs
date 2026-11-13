@@ -913,3 +913,78 @@ mod tests {
         assert!(pane_cursor_blink_visible(false, false));
     }
 }
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use crate::grid::{Dimensions, TerminalHandler};
+    use crate::protocol::ansi::AnsiParser;
+
+    /// A terminal showing a red sixel three cells wide at its top-left.
+    fn terminal_with_image(image: bool) -> Terminal {
+        let mut terminal = Terminal::new(Dimensions::new(10, 4));
+        if image {
+            // 24 x 12 pixels in a red palette entry: three 8-pixel cells
+            // by one 16-pixel cell, two sixel bands.
+            let sixel = b"\x1bPq#0;2;100;0;0#0!24~-!24~\x1b\\";
+            let mut parser = AnsiParser::new();
+            let mut handler = TerminalHandler::new(&mut terminal);
+            parser.feed(sixel, |action| handler.handle(action));
+        }
+        terminal
+    }
+
+    fn pixel(png_bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
+        let decoder = png::Decoder::new(png_bytes);
+        let mut reader = decoder.read_info().expect("png header");
+        let mut buf = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).expect("png frame");
+        let channels = info.color_type.samples();
+        let at = (y as usize * info.width as usize + x as usize) * channels;
+        [buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]
+    }
+
+    #[test]
+    fn panes_draw_their_images_clipped_to_the_pane() {
+        let Ok(mut renderer) = pollster::block_on(Renderer::new_headless(400, 200)) else {
+            eprintln!("no GPU adapter; skipped");
+            return;
+        };
+        let with_image = terminal_with_image(true);
+        let without = terminal_with_image(false);
+        let panes = [
+            PaneDraw {
+                terminal: &without,
+                info: PaneInfo::new(0.0, 0.0, 190.0, 200.0, true),
+                sessions: Vec::new(),
+            },
+            PaneDraw {
+                terminal: &with_image,
+                info: PaneInfo::new(200.0, 0.0, 190.0, 200.0, false),
+                sessions: Vec::new(),
+            },
+        ];
+        let dir = std::env::temp_dir().join(format!("ultty-pane-image-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("panes.png");
+        renderer
+            .capture_panes_screenshot(&panes, &OverlayState::default(), &path)
+            .expect("screenshot");
+        let png_bytes = std::fs::read(&path).expect("png");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (cell_w, cell_h) = renderer.cell_dimensions();
+        let top = renderer.tab_bar_height();
+        let (x, y) = (1.5 * cell_w, top + 0.5 * cell_h);
+        let in_pane_with_image = pixel(&png_bytes, (200.0 + x) as u32, y as u32);
+        let in_pane_without = pixel(&png_bytes, x as u32, y as u32);
+        assert!(
+            in_pane_with_image[0] > 200 && in_pane_with_image[1] < 60 && in_pane_with_image[2] < 60,
+            "expected red inside the image, got {in_pane_with_image:?}"
+        );
+        assert!(
+            in_pane_without[0] < 100,
+            "no image in the first pane, got {in_pane_without:?}"
+        );
+    }
+}

@@ -3,7 +3,11 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use super::history::{History, RowPacker};
-use super::{AnchorTag, Cell, CellFlags, Dimensions, Grid, Row, RowMarks, RowView};
+use super::{
+    AnchorTag, Cell, CellFlags, Dimensions, Grid, ImageStore, Row, RowMarks, RowView, ScrollRegion,
+};
+
+mod images;
 
 /// Default scrollback buffer size (lines).
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
@@ -82,6 +86,9 @@ pub struct Buffer {
     /// number (`evicted` plus absolute index). Lines evicted since are
     /// pruned.
     rewritten_lines: BTreeMap<usize, u64>,
+    /// Inline images (Sixel) placed on this screen. Each screen keeps its
+    /// own, as foot does (`normal.sixel_images`, `alt.sixel_images`).
+    images: ImageStore,
     /// Rows looked at for anchor bookkeeping, so tests can bound its cost.
     #[cfg(test)]
     anchor_visits: std::cell::Cell<usize>,
@@ -130,6 +137,12 @@ struct Rewrap {
     cursor_at: Option<(usize, usize)>,
     /// Empty, unmarked lines not yet emitted: dropped if nothing follows.
     pending_empty: usize,
+    /// Images whose top row is in a logical line not yet laid out, oldest
+    /// first: the line's index, the image's offset in it, and its slot.
+    watched: VecDeque<(usize, usize, usize)>,
+    /// Where each watched image went: its slot and the index among the rows
+    /// made of the row holding its top-left corner.
+    placed: Vec<(usize, usize)>,
 }
 
 impl Rewrap {
@@ -146,6 +159,28 @@ impl Rewrap {
             cursor: None,
             cursor_at: None,
             pending_empty: 0,
+            watched: VecDeque::new(),
+            placed: Vec::new(),
+        }
+    }
+
+    /// The image in `slot` has its top-left corner `offset` cells into the
+    /// logical line being gathered.
+    fn watch_image(&mut self, slot: usize, offset: usize) {
+        self.watched.push_back((self.lines, offset, slot));
+    }
+
+    /// Place the images watched in logical line `index`, whose rows are
+    /// `start..self.total`, on the row their corner wrapped to.
+    fn place_images(&mut self, index: usize, start: usize) {
+        let rows = (self.total - start).max(1);
+        let cols = usize::from(self.cols).max(1);
+        while self.watched.front().is_some_and(|w| w.0 == index) {
+            let Some((_, offset, slot)) = self.watched.pop_front() else {
+                break;
+            };
+            self.placed
+                .push((slot, start + (offset / cols).min(rows - 1)));
         }
     }
 
@@ -182,7 +217,9 @@ impl Rewrap {
         }
         let index = self.lines;
         self.lines += 1;
-        if line.is_empty() && marks.is_empty() {
+        // A line holding an image's corner is content even if blank.
+        let holds_image = self.watched.back().is_some_and(|w| w.0 == index);
+        if line.is_empty() && marks.is_empty() && !holds_image {
             self.pending_empty += 1;
             return;
         }
@@ -224,12 +261,19 @@ impl Rewrap {
         }
         let made = self.total;
         self.push_row(new_row);
+        self.place_images(index, made);
         made
     }
 
     /// Wrap logical line `index` to the new width, placing the cursor if it
     /// is in this line.
     fn lay_out(&mut self, index: usize, line: &[ReflowCell], marks: RowMarks) {
+        let start = self.total;
+        self.lay_out_rows(index, line, marks);
+        self.place_images(index, start);
+    }
+
+    fn lay_out_rows(&mut self, index: usize, line: &[ReflowCell], marks: RowMarks) {
         let cursor_col = match self.cursor {
             // Allow the cursor at len(): one past the last character.
             Some((cursor_line, col)) if cursor_line == index => Some(col.min(line.len())),
@@ -378,6 +422,11 @@ impl AnchorRuns {
 }
 
 impl Buffer {
+    /// Restore a validated viewer's absolute line origin before anchor hints.
+    pub(super) fn restore_view_line_origin(&mut self, evicted: usize) {
+        self.evicted = evicted;
+    }
+
     /// Restore validated viewer anchor locations without reserving or erasing rows.
     pub(super) fn restore_view_anchors(&mut self, anchors: &[(u16, u64, Anchor, usize)]) {
         self.anchors.clear();
@@ -475,9 +524,20 @@ impl Buffer {
             next_anchor_serial: 1,
             rewrites: 0,
             rewritten_lines: BTreeMap::new(),
+            images: ImageStore::new(),
             #[cfg(test)]
             anchor_visits: std::cell::Cell::new(0),
         }
+    }
+
+    /// This screen's inline images.
+    pub fn images(&self) -> &ImageStore {
+        &self.images
+    }
+
+    /// Mutable access to this screen's inline images.
+    pub fn images_mut(&mut self) -> &mut ImageStore {
+        &mut self.images
     }
 
     /// How many rows have been evicted from the front of history so far.
@@ -595,6 +655,7 @@ impl Buffer {
             }
             self.history.push(row, &self.grid.styles);
         }
+        self.prune_evicted_images();
     }
 
     /// Push lines from grid top into history (called when grid scrolls up).
@@ -611,6 +672,7 @@ impl Buffer {
             self.note_row_to_history(row.anchor());
             self.history.push_row(&row, &mut packer);
         }
+        self.prune_evicted_images();
     }
 
     /// Get a row at the given visual index (accounting for scroll).
@@ -1066,6 +1128,9 @@ impl Buffer {
 
     /// Clear scrollback history.
     pub fn clear_history(&mut self) {
+        // Images in scrollback go with it (foot's `term_erase` for ED 3).
+        let top = self.screen_top_line();
+        self.images.retain_mut(|image| image.line >= top);
         self.evicted += self.history.len();
         self.history.clear();
         self.scroll_offset = 0;
@@ -1088,6 +1153,7 @@ impl Buffer {
         let excess = self.history.len().saturating_sub(max_history);
         self.history.drop_front(excess);
         self.evicted += excess;
+        self.prune_evicted_images();
         self.scroll_offset = self.scroll_offset.min(self.history.len());
         excess
     }
@@ -1125,15 +1191,32 @@ impl Buffer {
             // just because the window got shorter. Whatever is still too
             // much moves from the top into history.
             let cursor_row = self.grid.cursor().position.row as usize;
+            let image_bottom = self
+                .images
+                .images()
+                .filter_map(|image| image.line.checked_add(usize::from(image.cell_height)))
+                .max()
+                .unwrap_or(0)
+                .saturating_sub(self.screen_top_line())
+                .min(old_rows);
             let blank_below = (cursor_row + 1..old_rows)
                 .rev()
                 .take_while(|&row| {
-                    self.grid
-                        .row(row as u16)
-                        .is_some_and(|row| row.is_blank() && row.anchor().is_none())
+                    row >= image_bottom
+                        && self
+                            .grid
+                            .row(row as u16)
+                            .is_some_and(|row| row.is_blank() && row.anchor().is_none())
                 })
                 .count();
             let rows_to_move = (old_rows - new_rows).saturating_sub(blank_below);
+            self.shift_images_for_scroll_up(
+                ScrollRegion {
+                    top: 0,
+                    bottom: old_rows.saturating_sub(1) as u16,
+                },
+                rows_to_move,
+            );
             self.save_top_rows(rows_to_move);
             // Remove those rows from the grid (shift everything up)
             self.grid.remove_top_rows(rows_to_move);
@@ -1173,6 +1256,9 @@ impl Buffer {
         // while the old pages are freed as their rows are read, so the
         // scrollback is never held unpacked all at once.
         let mut out = Rewrap::new(new_dims.cols, new_rows, self.max_history);
+        // Images follow the row that holds their top-left corner.
+        let mut images = images::ImagesInReflow::new(self);
+        let mut old_index = 0;
 
         // Each cell carries the extra codepoints of its grapheme cluster so
         // reflow keeps them. Shell marks of a logical line, gathered from
@@ -1195,10 +1281,14 @@ impl Buffer {
             }
         };
 
+        let history_rows = self.history.len();
         std::mem::take(&mut self.history).drain(|row| {
             let row = RowView::history(row);
+            let this_row = old_index;
+            old_index += 1;
             if runs.keep(row.anchor()) {
                 finish_open(&mut out, &mut current_line, &mut current_marks, &mut open);
+                images.visit_row(this_row, &mut out, 0);
                 let made = out.finish_tagged(&row.to_row());
                 if row.anchor().is_first() {
                     runs.placed(row.anchor().tag(), made);
@@ -1206,6 +1296,7 @@ impl Buffer {
                 return;
             }
             // Laid out as text from its cells, so a stale tag goes with it.
+            images.visit_row(this_row, &mut out, current_line.len());
             push_reflow_cells(&mut current_line, &row);
             current_marks = current_marks.or(row.marks());
             open = row.is_wrapped();
@@ -1223,9 +1314,12 @@ impl Buffer {
             .iter()
             .map(|row| runs.keep(row.anchor()))
             .collect();
+        let image_on: Vec<bool> = (0..grid_rows.len())
+            .map(|idx| images.on_row(history_rows + idx))
+            .collect();
         let has_content = |idx: usize| {
             let row = &grid_rows[idx];
-            !row.is_blank() || !row.marks().is_empty() || kept[idx]
+            !row.is_blank() || !row.marks().is_empty() || kept[idx] || image_on[idx]
         };
         let last_content_row = (0..grid_rows.len()).rposition(has_content).unwrap_or(0);
 
@@ -1241,6 +1335,7 @@ impl Buffer {
                 if idx == old_cursor_row {
                     out.set_cursor(old_cursor_col);
                 }
+                images.visit_row(history_rows + idx, &mut out, 0);
                 let made = out.finish_tagged(row);
                 if row.anchor().is_first() {
                     runs.placed(row.anchor().tag(), made);
@@ -1250,6 +1345,7 @@ impl Buffer {
             if idx == old_cursor_row {
                 out.set_cursor(current_line.len() + old_cursor_col);
             }
+            images.visit_row(history_rows + idx, &mut out, current_line.len());
             push_reflow_cells(&mut current_line, &RowView::from(row));
             current_marks = current_marks.or(row.marks());
             open = row.is_wrapped();
@@ -1266,10 +1362,12 @@ impl Buffer {
             screen,
             total,
             cursor_at,
+            placed,
             ..
         } = out;
         // Rows made but dropped past the history limit.
         let dropped = total - history.len() - screen.len();
+        self.evicted += dropped;
         self.history = history;
         let mut rows: Vec<Row> = screen.into();
         while rows.len() < new_rows {
@@ -1280,6 +1378,7 @@ impl Buffer {
         let split_point = total.saturating_sub(new_rows);
         self.grid.set_rows(rows, new_dims);
         self.place_anchors_after_reflow(&runs.made_at, dropped);
+        images.restore(self, &placed, dropped);
 
         if let Some((abs_row, col)) = cursor_at {
             let grid_row = abs_row.saturating_sub(split_point);
@@ -1391,8 +1490,12 @@ impl Buffer {
     /// margin is the top of the screen, so a tool that keeps a status line
     /// below its output (apt, progress bars) still fills the scrollback.
     /// Lines leaving a region that starts lower are discarded.
+    ///
+    /// Every scroll up goes through here, so this is also where the images
+    /// of the screen follow their rows (see `images.rs`).
     fn save_scrolled_rows(&mut self, n: usize) {
         let region = self.grid.effective_scroll_region();
+        self.shift_images_for_scroll_up(region, n);
         if region.top == 0 {
             let height = usize::from(region.bottom - region.top) + 1;
             self.save_top_rows(n.min(height));
@@ -1404,6 +1507,34 @@ impl Buffer {
     pub fn scroll_grid_up(&mut self, n: u16) {
         self.save_scrolled_rows(n as usize);
         self.grid.scroll_up(n);
+    }
+
+    /// Scroll the scroll region down `n` rows (SD, reverse index), with
+    /// the images on it.
+    pub fn scroll_grid_down(&mut self, n: u16) {
+        let region = self.grid.effective_scroll_region();
+        self.shift_images_down(region.top, region.bottom, n);
+        self.grid.scroll_down(n);
+    }
+
+    /// Insert `n` blank lines at the cursor (IL), with the images below it.
+    pub fn insert_lines(&mut self, n: u16) {
+        let region = self.grid.effective_scroll_region();
+        let row = self.grid.cursor().position.row;
+        if row >= region.top && row <= region.bottom {
+            self.shift_images_down(row, region.bottom, n);
+        }
+        self.grid.insert_lines(n);
+    }
+
+    /// Delete `n` lines at the cursor (DL), with the images on them.
+    pub fn delete_lines(&mut self, n: u16) {
+        let region = self.grid.effective_scroll_region();
+        let row = self.grid.cursor().position.row;
+        if row >= region.top && row <= region.bottom {
+            self.shift_images_up(row, region.bottom, n);
+        }
+        self.grid.delete_lines(n);
     }
 
     /// Newline - scroll to history if at bottom.
@@ -1435,6 +1566,34 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_is_dropped_once_its_last_line_leaves_scrollback() {
+        use crate::grid::{ImageId, TerminalImage};
+        let mut buf = Buffer::with_scrollback(Dimensions::new(10, 3), 2);
+        buf.images_mut().add(TerminalImage {
+            id: ImageId(0),
+            width: 8,
+            height: 32,
+            data: vec![0; 8 * 32 * 4],
+            start_col: 0,
+            line: 0,
+            cell_width: 1,
+            cell_height: 2,
+        });
+        buf.grid_mut().cursor_mut().position.row = 2;
+        // Lines 0 and 1 leave the screen, into scrollback that holds two.
+        for _ in 0..2 {
+            buf.newline();
+        }
+        assert_eq!(buf.images().len(), 1);
+        // Line 2 pushes line 0 out of scrollback; the image still has line 1.
+        buf.newline();
+        assert_eq!(buf.images().len(), 1);
+        // Line 3 pushes out line 1 too.
+        buf.newline();
+        assert!(buf.images().is_empty());
+    }
 
     #[test]
     fn new_buffer_empty_history() {

@@ -148,6 +148,8 @@ operating-system privileges of an SSH account.
 
 The host retains parsers, partial escape sequences, both VT screens, process state, native transports and pending native frames. Attachments receive validated semantic snapshots: VT display/history/modes and images, pane/tab identities, status, committed native trees, scroll state and inline anchors. A partial native frame never replaces its previous committed frame.
 
+VT snapshot version 2 stores images separately for the main and alternate screens. Each screen carries its evicted-line count, preserving absolute image positions and inline anchors through scrollback and reflow. Image count and byte limits apply across both screens. Host and viewer must support the same VT snapshot version; an incompatible snapshot is refused before replacing the displayed state.
+
 The viewer hydrates read-only replicas through the same GPU renderer as the local terminal. It owns selection and history scroll position. Selection survives replacement only while its text matches. Native inline surfaces remain noninteractive under their existing protocol contract. Full-scene native pointer targets are generation checked. Keyboard and text input follow the current focused target in the exact foreground session, so application redraws cannot discard a burst of typing. Host clipboard reads are denied and writes discarded. Explicit viewer copy/paste is local to the viewer.
 
 Publication sequences advance when visible owner state changes. Matching snapshot cursors receive `Unchanged`, avoiding repeated hydration of idle screens. This is bounded whole-state replacement, not a delta stream or process checkpoint format.

@@ -31,8 +31,10 @@ pub struct TerminalImage {
     pub data: Vec<u8>,
     /// Position where the image starts (column)
     pub start_col: u16,
-    /// Position where the image starts (row)
-    pub start_row: u16,
+    /// The text line the image's top row sits on, numbered as
+    /// `evicted + absolute index` (ADR 0020): it scrolls with the text,
+    /// into scrollback, and follows reflow.
+    pub line: usize,
     /// Width in cells
     pub cell_width: u16,
     /// Height in cells
@@ -43,14 +45,13 @@ pub struct TerminalImage {
 ///
 /// Bounded by [`MAX_IMAGE_STORE_BYTES`] and [`MAX_IMAGE_STORE_COUNT`]; the
 /// oldest images are evicted first.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ImageStore {
     images: HashMap<ImageId, TerminalImage>,
     /// Insertion order (front = oldest) for eviction
     order: VecDeque<ImageId>,
     /// Sum of `data.len()` over all stored images
     total_bytes: usize,
-    next_id: u32,
 }
 
 impl ImageStore {
@@ -60,7 +61,6 @@ impl ImageStore {
             images: HashMap::new(),
             order: VecDeque::new(),
             total_bytes: 0,
-            next_id: 0,
         }
     }
 
@@ -95,13 +95,6 @@ impl ImageStore {
         self.total_bytes
     }
 
-    /// Allocate a new image ID.
-    pub fn allocate_id(&mut self) -> ImageId {
-        let id = ImageId(self.next_id);
-        self.next_id += 1;
-        id
-    }
-
     /// Get an image by ID.
     pub fn get(&self, id: ImageId) -> Option<&TerminalImage> {
         self.images.get(&id)
@@ -113,6 +106,30 @@ impl ImageStore {
         self.total_bytes -= removed.data.len();
         self.order.retain(|&existing| existing != id);
         Some(removed)
+    }
+
+    /// Let `update` change each image in place; the images it returns
+    /// `false` for are removed.
+    pub fn retain_mut(&mut self, mut update: impl FnMut(&mut TerminalImage) -> bool) {
+        let mut freed = 0;
+        self.images.retain(|_, image| {
+            let keep = update(image);
+            if !keep {
+                freed += image.data.len();
+            }
+            keep
+        });
+        self.total_bytes -= freed;
+        let images = &self.images;
+        self.order.retain(|id| images.contains_key(id));
+    }
+
+    /// Remove and return every image, oldest first.
+    pub fn take_all(&mut self) -> Vec<TerminalImage> {
+        let order = std::mem::take(&mut self.order);
+        let mut images = std::mem::take(&mut self.images);
+        self.total_bytes = 0;
+        order.iter().filter_map(|id| images.remove(id)).collect()
     }
 
     /// Clear all images.
@@ -630,7 +647,7 @@ mod tests {
             height: 1,
             data: vec![0; bytes],
             start_col: 0,
-            start_row: 0,
+            line: 0,
             cell_width: 1,
             cell_height: 1,
         }

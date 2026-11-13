@@ -372,7 +372,7 @@ impl Renderer {
         !terminal.images().is_empty()
     }
 
-    /// Render terminal images (Sixel, etc.).
+    /// Render terminal images at a pane origin with optional outer clipping.
     pub(super) fn render_images(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -390,9 +390,26 @@ impl Renderer {
             self.create_image_pipeline();
         }
 
-        // Upload any new image, then render each one with its own texture
+        let buffer = terminal.buffer();
+        let dims = terminal.dimensions();
+        // The line shown on the top row, as the view is scrolled back.
+        let top_line = buffer
+            .screen_top_line()
+            .saturating_sub(buffer.scroll_offset());
         let owner = terminal.uid();
+
+        // Upload any new image, then render each one with its own texture
         for image in terminal.images().images() {
+            let Some(quad) = clip_image(
+                image.line as isize - top_line as isize,
+                image.start_col,
+                image.cell_width,
+                image.cell_height,
+                dims.cols,
+                dims.rows,
+            ) else {
+                continue;
+            };
             if !self.upload_image(owner, image) {
                 continue;
             }
@@ -400,35 +417,35 @@ impl Renderer {
                 continue;
             };
 
-            // Build vertices for this single image
-            let x0 = image.start_col as f32 * self.cell_width + origin.0;
-            let y0 = image.start_row as f32 * self.cell_height + origin.1;
-            let x1 = x0 + image.cell_width as f32 * self.cell_width;
-            let y1 = y0 + image.cell_height as f32 * self.cell_height;
+            let x0 = origin.0 + quad.col0 * self.cell_width;
+            let y0 = origin.1 + quad.row0 * self.cell_height;
+            let x1 = origin.0 + quad.col1 * self.cell_width;
+            let y1 = origin.1 + quad.row1 * self.cell_height;
+            let (u0, v0, u1, v1) = (quad.u0, quad.v0, quad.u1, quad.v1);
 
             let color = [1.0f32, 1.0, 1.0, 1.0];
             let vertices = vec![
                 Vertex {
                     position: [x0, y0],
-                    tex_coord: [0.0, 0.0],
+                    tex_coord: [u0, v0],
                     color,
                     is_color: 0,
                 },
                 Vertex {
                     position: [x1, y0],
-                    tex_coord: [1.0, 0.0],
+                    tex_coord: [u1, v0],
                     color,
                     is_color: 0,
                 },
                 Vertex {
                     position: [x1, y1],
-                    tex_coord: [1.0, 1.0],
+                    tex_coord: [u1, v1],
                     color,
                     is_color: 0,
                 },
                 Vertex {
                     position: [x0, y1],
-                    tex_coord: [0.0, 1.0],
+                    tex_coord: [u0, v1],
                     color,
                     is_color: 0,
                 },
@@ -486,9 +503,90 @@ impl Renderer {
     }
 }
 
+/// Where an image is drawn, in cells from the terminal's top-left corner,
+/// and which part of its texture shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ClippedImage {
+    col0: f32,
+    row0: f32,
+    col1: f32,
+    row1: f32,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+}
+
+/// Clip an image of `cell_width` x `cell_height` cells, whose top-left cell
+/// is at `visual_row` (negative above the view) and `start_col`, to a view
+/// of `cols` x `rows` cells. `None` when none of it shows.
+fn clip_image(
+    visual_row: isize,
+    start_col: u16,
+    cell_width: u16,
+    cell_height: u16,
+    cols: u16,
+    rows: u16,
+) -> Option<ClippedImage> {
+    let (width, height) = (f32::from(cell_width), f32::from(cell_height));
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let col0 = f32::from(start_col);
+    let row0 = visual_row as f32;
+    let col1 = (col0 + width).min(f32::from(cols));
+    let row1 = (row0 + height).min(f32::from(rows));
+    let (shown_col0, shown_row0) = (col0.max(0.0), row0.max(0.0));
+    if col1 <= shown_col0 || row1 <= shown_row0 {
+        return None;
+    }
+    Some(ClippedImage {
+        col0: shown_col0,
+        row0: shown_row0,
+        col1,
+        row1,
+        u0: (shown_col0 - col0) / width,
+        v0: (shown_row0 - row0) / height,
+        u1: (col1 - col0) / width,
+        v1: (row1 - row0) / height,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_in_view_is_drawn_whole() {
+        let quad = clip_image(2, 3, 4, 2, 80, 24).unwrap();
+        assert_eq!(
+            (quad.col0, quad.row0, quad.col1, quad.row1),
+            (3.0, 2.0, 7.0, 4.0)
+        );
+        assert_eq!((quad.u0, quad.v0, quad.u1, quad.v1), (0.0, 0.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn an_image_scrolled_partly_off_the_top_shows_its_lower_part() {
+        // Four rows tall, one row above the view: the top quarter is cut.
+        let quad = clip_image(-1, 0, 2, 4, 80, 24).unwrap();
+        assert_eq!((quad.row0, quad.row1), (0.0, 3.0));
+        assert_eq!((quad.v0, quad.v1), (0.25, 1.0));
+    }
+
+    #[test]
+    fn an_image_past_the_bottom_and_right_edges_is_clipped() {
+        let quad = clip_image(22, 78, 4, 4, 80, 24).unwrap();
+        assert_eq!((quad.col1, quad.row1), (80.0, 24.0));
+        assert_eq!((quad.u1, quad.v1), (0.5, 0.5));
+    }
+
+    #[test]
+    fn an_image_wholly_out_of_view_is_not_drawn() {
+        assert_eq!(clip_image(-4, 0, 2, 4, 80, 24), None);
+        assert_eq!(clip_image(24, 0, 2, 4, 80, 24), None);
+        assert_eq!(clip_image(0, 80, 2, 4, 80, 24), None);
+    }
 
     #[test]
     fn rgba_byte_len_rejects_overflow() {
@@ -651,7 +749,7 @@ mod tests {
                 height: 1,
                 data: color.to_vec(),
                 start_col: 0,
-                start_row: 0,
+                line: 0,
                 cell_width: 8,
                 cell_height: 3,
             });
@@ -673,6 +771,43 @@ mod tests {
         let image = pixels(&mut renderer, &panes, &path);
         assert_eq!(rgb(&image, x, y), [255, 0, 0]);
         assert_eq!(rgb(&image, 128 + x, y), [0, 0, 255]);
+        let mut screens = Terminal::new(Dimensions::new(16, 8));
+        let mut red = a.images().images().next().unwrap().clone();
+        red.id = screens.allocate_image_id();
+        screens.images_mut().add(red);
+        screens.enter_alternate_screen_clear();
+        let mut blue = b.images().images().next().unwrap().clone();
+        blue.id = screens.allocate_image_id();
+        screens.images_mut().add(blue);
+        let mut screens = TerminalSnapshot::capture(&screens)
+            .unwrap()
+            .to_view()
+            .unwrap();
+        fn single(terminal: &Terminal) -> [PaneDraw<'_>; 1] {
+            [PaneDraw {
+                terminal,
+                info: PaneInfo::new(0.0, 0.0, 128.0, 96.0, true),
+                sessions: vec![],
+            }]
+        }
+        assert_eq!(
+            rgb(&pixels(&mut renderer, &single(&screens), &path), x, y),
+            [0, 0, 255]
+        );
+        screens.leave_alternate_screen();
+        assert_eq!(
+            rgb(&pixels(&mut renderer, &single(&screens), &path), x, y),
+            [255, 0, 0]
+        );
+        let mut partial = TerminalSnapshot::capture(&screens).unwrap();
+        partial.main.evicted_lines = 1;
+        let partial = partial.to_view().unwrap();
+        let image = pixels(&mut renderer, &single(&partial), &path);
+        assert_eq!(rgb(&image, x, y), [255, 0, 0]);
+        assert_ne!(
+            rgb(&image, x, (4.0 + renderer.cell_height * 2.5) as usize),
+            [255, 0, 0]
+        );
         assert!(renderer
             .image_cache
             .contains(&ImageKey::new(a.uid(), ImageId(0))));
@@ -683,7 +818,7 @@ mod tests {
         // A complete attachment replacement keeps its pane/image identities,
         // but owns a fresh Terminal UID even when image dimensions stay equal.
         let mut replacement = TerminalSnapshot::capture(&a).unwrap();
-        replacement.images[0].data = vec![0, 255, 0, 255];
+        replacement.main.images[0].data = vec![0, 255, 0, 255];
         let updated = replacement.to_view().unwrap();
         assert_ne!(updated.uid(), a.uid());
         let updated_panes = [

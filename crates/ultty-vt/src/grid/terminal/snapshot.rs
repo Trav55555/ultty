@@ -12,7 +12,7 @@ use crate::grid::{
 };
 
 /// The wire version of the explicit terminal-view schema.
-pub const VIEW_VERSION: u16 = 1;
+pub const VIEW_VERSION: u16 = 2;
 /// Maximum rows retained by a single viewer snapshot, including both screens.
 pub const MAX_VIEW_ROWS: usize = 20_000;
 /// Maximum cells expanded when accepting a snapshot.
@@ -39,8 +39,6 @@ pub struct TerminalSnapshot {
     pub theme: ThemeColors,
     /// Application palette overrides, keyed by palette index.
     pub palette: Vec<(u8, [u8; 3])>,
-    /// Retained decoded images with placement and identity.
-    pub images: Vec<TerminalImage>,
     /// OSC 8 links, keyed by the IDs referenced by cells.
     pub hyperlinks: Vec<(u32, String)>,
     /// Shell-reported command boundaries and working directory.
@@ -52,6 +50,10 @@ pub struct TerminalSnapshot {
 /// One screen, with oldest history rows followed by the live grid.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BufferSnapshot {
+    /// Absolute line number of the first retained row, shared with images.
+    pub evicted_lines: usize,
+    /// This screen's decoded images, including partially evicted top edges.
+    pub images: Vec<TerminalImage>,
     /// Canonical viewport columns.
     pub cols: u16,
     /// Canonical viewport rows.
@@ -149,6 +151,48 @@ fn decode_color(value: [u8; 4]) -> Result<Color, String> {
     }
 }
 
+fn validate_images<'a>(
+    images: impl Iterator<Item = &'a TerminalImage>,
+    origin: usize,
+    rows: usize,
+    cols: u16,
+    identities: &mut std::collections::HashSet<crate::grid::ImageId>,
+    budget: &mut usize,
+) -> Result<(), String> {
+    let end = origin
+        .checked_add(rows)
+        .filter(|end| *end <= isize::MAX as usize)
+        .ok_or("snapshot line origin overflow")?;
+    for image in images {
+        let bytes = u64::from(image.width)
+            .checked_mul(u64::from(image.height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or("snapshot image size overflow")?;
+        let bottom = image
+            .line
+            .checked_add(usize::from(image.cell_height))
+            .ok_or("snapshot image line overflow")?;
+        if image.width == 0
+            || image.height == 0
+            || image.width > MAX_SIXEL_DIM
+            || image.height > MAX_SIXEL_DIM
+            || image.cell_width == 0
+            || image.cell_height == 0
+            || image.start_col >= cols
+            || image.line >= end
+            || bottom <= origin
+            || image.id.0 == u32::MAX
+            || !identities.insert(image.id)
+            || bytes != image.data.len() as u64
+            || bytes > *budget as u64
+        {
+            return Err("invalid snapshot image".into());
+        }
+        *budget -= bytes as usize;
+    }
+    Ok(())
+}
+
 impl TerminalSnapshot {
     /// Capture both screens under the caller's terminal lock, with fixed bounds.
     pub fn capture(terminal: &Terminal) -> Result<Self, String> {
@@ -168,11 +212,33 @@ impl TerminalSnapshot {
             );
         if rows > MAX_VIEW_ROWS
             || cells > MAX_VIEW_CELLS
-            || terminal.images.total_bytes() > MAX_VIEW_BYTES
+            || terminal
+                .main
+                .images()
+                .len()
+                .saturating_add(terminal.alternate.images().len())
+                > 1024
         {
             return Err("terminal exceeds viewer snapshot bounds".into());
         }
-        let mut budget = MAX_VIEW_BYTES.saturating_sub(terminal.images.total_bytes());
+        let mut budget = MAX_VIEW_BYTES;
+        let mut image_ids = std::collections::HashSet::new();
+        validate_images(
+            terminal.main.images().images(),
+            terminal.main.evicted_lines(),
+            terminal.main.total_lines(),
+            terminal.main.dimensions().cols,
+            &mut image_ids,
+            &mut budget,
+        )?;
+        validate_images(
+            terminal.alternate.images().images(),
+            terminal.alternate.evicted_lines(),
+            terminal.alternate.total_lines(),
+            terminal.alternate.dimensions().cols,
+            &mut image_ids,
+            &mut budget,
+        )?;
         let main = BufferSnapshot::capture(&terminal.main, &mut budget)?;
         let alternate = BufferSnapshot::capture(&terminal.alternate, &mut budget)?;
         Ok(Self {
@@ -186,7 +252,6 @@ impl TerminalSnapshot {
             palette: (0..=255)
                 .filter_map(|i| terminal.palette.override_for(i).map(|rgb| (i, rgb)))
                 .collect(),
-            images: terminal.images.images().cloned().collect(),
             hyperlinks: terminal
                 .hyperlinks
                 .iter()
@@ -224,7 +289,12 @@ impl TerminalSnapshot {
             || self.title.len() > 65536
             || self.hyperlinks.len() > super::MAX_HYPERLINKS
             || self.palette.len() > 256
-            || self.images.len() > 1024
+            || self
+                .main
+                .images
+                .len()
+                .saturating_add(self.alternate.images.len())
+                > 1024
         {
             return Err("terminal snapshot exceeds bounds".into());
         }
@@ -238,23 +308,22 @@ impl TerminalSnapshot {
         }
         let mut image_ids = std::collections::HashSet::new();
         let mut budget = MAX_VIEW_BYTES;
-        for image in &self.images {
-            let bytes = u64::from(image.width)
-                .checked_mul(u64::from(image.height))
-                .and_then(|n| n.checked_mul(4))
-                .ok_or("snapshot image size overflow")?;
-            if image.width == 0
-                || image.height == 0
-                || image.width > MAX_SIXEL_DIM
-                || image.height > MAX_SIXEL_DIM
-                || !image_ids.insert(image.id)
-                || bytes != image.data.len() as u64
-                || bytes > budget as u64
-            {
-                return Err("invalid snapshot image".into());
-            }
-            budget -= bytes as usize;
-        }
+        validate_images(
+            self.main.images.iter(),
+            self.main.evicted_lines,
+            self.main.rows.len(),
+            self.main.cols,
+            &mut image_ids,
+            &mut budget,
+        )?;
+        validate_images(
+            self.alternate.images.iter(),
+            self.alternate.evicted_lines,
+            self.alternate.rows.len(),
+            self.alternate.cols,
+            &mut image_ids,
+            &mut budget,
+        )?;
         let mut terminal = Terminal::new(Dimensions::new(1, 1));
         terminal.main = self.main.to_view(&mut budget)?;
         terminal.alternate = self.alternate.to_view(&mut budget)?;
@@ -265,9 +334,11 @@ impl TerminalSnapshot {
         for &(index, rgb) in &self.palette {
             terminal.palette.set(index, rgb);
         }
-        for image in &self.images {
-            terminal.images.add(image.clone());
-        }
+        terminal.next_image_id = image_ids
+            .iter()
+            .map(|id| id.0)
+            .max()
+            .map_or(0, |id| id.saturating_add(1));
         for (id, uri) in &self.hyperlinks {
             if *id == 0
                 || uri.len() > 65536
@@ -339,6 +410,8 @@ impl BufferSnapshot {
             })
             .collect();
         Ok(Self {
+            evicted_lines: buffer.evicted_lines(),
+            images: buffer.images().images().cloned().collect(),
             cols: dims.cols,
             screen_rows: dims.rows,
             rows,
@@ -414,6 +487,7 @@ impl BufferSnapshot {
         }
         let screen = restored.split_off(history);
         buffer.push_to_history(restored);
+        buffer.restore_view_line_origin(self.evicted_lines);
         for (index, row) in screen.iter().enumerate() {
             buffer
                 .grid_mut()
@@ -457,10 +531,15 @@ impl BufferSnapshot {
                     surface_id: saved.surface,
                     rows: saved.rows,
                 },
-                saved.line,
+                self.evicted_lines
+                    .checked_add(saved.line)
+                    .ok_or("snapshot anchor line overflow")?,
             ));
         }
         buffer.restore_view_anchors(&anchors);
+        for image in &self.images {
+            buffer.images_mut().add(image.clone());
+        }
         buffer.scroll_up(self.scroll_offset.min(history));
         buffer.check_integrity()?;
         Ok(buffer)
@@ -478,6 +557,221 @@ mod tests {
         parser.feed(bytes, |action| handler.handle(action));
     }
 
+    fn image(id: ImageId, line: usize, color: [u8; 4], height: u16) -> TerminalImage {
+        TerminalImage {
+            id,
+            width: 1,
+            height: 1,
+            data: color.to_vec(),
+            start_col: 0,
+            line,
+            cell_width: 1,
+            cell_height: height,
+        }
+    }
+
+    #[test]
+    fn test_screen_images_hydrate_with_evicted_origin_and_history_anchor() {
+        let mut terminal = Terminal::new(Dimensions::new(8, 3));
+        terminal.main.set_max_history(1);
+        let mut parser = AnsiParser::new();
+        feed(
+            &mut terminal,
+            &mut parser,
+            b"one\r\ntwo\r\nthree\r\nfour\r\nfive\x1b[1;1H",
+        );
+        let (tag, serial) = terminal
+            .main
+            .place_anchor(Anchor {
+                session_id: 7,
+                surface_id: 9,
+                rows: 1,
+            })
+            .unwrap();
+        feed(&mut terminal, &mut parser, b"\x1b[3;1H\n");
+        assert_eq!(terminal.main.anchor_line(tag), Some(0));
+        let origin = terminal.main.evicted_lines();
+        assert!(origin > 0);
+        let main_id = terminal.allocate_image_id();
+        terminal
+            .main
+            .images_mut()
+            .add(image(main_id, origin - 1, [255, 0, 0, 255], 3));
+        terminal.main.scroll_up(1);
+        terminal.enter_alternate_screen_clear();
+        let alternate_id = terminal.allocate_image_id();
+        assert_ne!(main_id, alternate_id);
+        terminal
+            .images_mut()
+            .add(image(alternate_id, 0, [0, 0, 255, 255], 1));
+        let snapshot = TerminalSnapshot::capture(&terminal).unwrap();
+        assert_eq!(snapshot.main.images.len(), 1);
+        assert_eq!(snapshot.alternate.images.len(), 1);
+        let mut view = snapshot.to_view().unwrap();
+        assert_ne!(view.uid(), terminal.uid());
+        assert!(view.is_alternate_screen());
+        assert_eq!(
+            view.images().get(alternate_id).unwrap().data,
+            [0, 0, 255, 255]
+        );
+        assert_eq!(view.main.evicted_lines(), origin);
+        assert_eq!(view.main.anchor_line(tag), Some(0));
+        assert_eq!(view.main.anchor_serial(tag), Some(serial));
+        assert_eq!(view.main.images().get(main_id).unwrap().line, origin - 1);
+        assert_eq!(view.main.scroll_offset(), terminal.main.scroll_offset());
+        view.leave_alternate_screen();
+        assert!(view.alternate.images().is_empty());
+        assert_eq!(view.images().get(main_id).unwrap().data, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn test_image_reflow_and_partial_history_survive_hydration() {
+        let mut terminal = Terminal::new(Dimensions::new(10, 8));
+        let mut parser = AnsiParser::new();
+        feed(&mut terminal, &mut parser, b"abcdefghij\r\n");
+        let id = terminal.allocate_image_id();
+        terminal.images_mut().add(image(id, 2, [255, 0, 0, 255], 1));
+        terminal.resize(Dimensions::new(5, 8));
+        assert_eq!(terminal.images().get(id).unwrap().line, 3);
+        let mut view = TerminalSnapshot::capture(&terminal)
+            .unwrap()
+            .to_view()
+            .unwrap();
+        assert_eq!(view.images().get(id).unwrap().line, 3);
+        view.resize(Dimensions::new(10, 8));
+        assert_eq!(view.images().get(id).unwrap().line, 2);
+
+        let mut terminal = Terminal::new(Dimensions::new(8, 3));
+        terminal.main.set_max_history(1);
+        feed(
+            &mut terminal,
+            &mut parser,
+            b"one\r\ntwo\r\nthree\r\nfour\r\nfive",
+        );
+        let origin = terminal.main.evicted_lines();
+        assert!(origin > 0);
+        let id = terminal.allocate_image_id();
+        terminal
+            .images_mut()
+            .add(image(id, origin - 1, [1, 2, 3, 255], 3));
+        terminal.resize(Dimensions::new(4, 3));
+        let current = terminal
+            .images()
+            .get(id)
+            .expect("partial image must survive reflow");
+        assert_eq!(current.line, origin - 1);
+        let view = TerminalSnapshot::capture(&terminal)
+            .unwrap()
+            .to_view()
+            .unwrap();
+        assert_eq!(view.images().get(id).unwrap().line, current.line);
+        assert_eq!(view.main.evicted_lines(), terminal.main.evicted_lines());
+    }
+
+    #[test]
+    fn test_shrinking_picture_only_rows_and_alternate_screen_preserves_placement() {
+        for alternate in [false, true] {
+            let mut terminal = Terminal::new(Dimensions::new(8, 6));
+            if alternate {
+                terminal.enter_alternate_screen_clear();
+            }
+            let id = terminal.allocate_image_id();
+            terminal.images_mut().add(image(id, 4, [1, 2, 3, 255], 1));
+            terminal.resize(Dimensions::new(8, 2));
+            let saved = terminal.images().get(id).unwrap();
+            assert_eq!(terminal.buffer().screen_row_of_line(saved.line), 1);
+            let view = TerminalSnapshot::capture(&terminal)
+                .unwrap()
+                .to_view()
+                .unwrap();
+            assert_eq!(
+                view.buffer()
+                    .screen_row_of_line(view.images().get(id).unwrap().line),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn test_reflow_eviction_drops_the_last_pixels_of_a_partial_image() {
+        let mut terminal = Terminal::new(Dimensions::new(8, 3));
+        terminal.main.set_max_history(1);
+        let mut parser = AnsiParser::new();
+        feed(
+            &mut terminal,
+            &mut parser,
+            b"aaaaaaaa\r\nbbbbbbbb\r\ncccccccc\r\ndddddddd\r\neeeeeeee",
+        );
+        let origin = terminal.main.evicted_lines();
+        assert!(origin > 0);
+        let id = terminal.allocate_image_id();
+        terminal
+            .images_mut()
+            .add(image(id, origin - 1, [1, 2, 3, 255], 3));
+        terminal.resize(Dimensions::new(2, 3));
+        assert!(terminal.main.evicted_lines() >= origin + 2);
+        assert!(
+            terminal.images().get(id).is_none(),
+            "fully clipped image must not resurrect"
+        );
+        assert!(TerminalSnapshot::capture(&terminal)
+            .unwrap()
+            .to_view()
+            .is_ok());
+    }
+
+    #[test]
+    fn test_schema_two_rejects_old_version_duplicate_screens_and_overflow_origins() {
+        let baseline = TerminalSnapshot::capture(&Terminal::new(Dimensions::new(8, 3))).unwrap();
+        let mut old = baseline.clone();
+        old.version = 1;
+        assert_eq!(
+            old.to_view().err().as_deref(),
+            Some("unsupported terminal snapshot version")
+        );
+        let mut duplicate = baseline.clone();
+        duplicate
+            .main
+            .images
+            .push(image(ImageId(1), 0, [1, 2, 3, 255], 1));
+        duplicate
+            .alternate
+            .images
+            .push(image(ImageId(1), 0, [1, 2, 3, 255], 1));
+        assert!(duplicate.to_view().is_err());
+        let mut overflow = baseline.clone();
+        overflow.main.evicted_lines = usize::MAX;
+        assert!(overflow.to_view().is_err());
+        let mut outside = baseline;
+        outside
+            .main
+            .images
+            .push(image(ImageId(1), 4, [1, 2, 3, 255], 1));
+        assert!(outside.to_view().is_err());
+    }
+
+    #[test]
+    fn test_main_and_alternate_images_share_snapshot_byte_budget() {
+        let mut terminal = Terminal::new(Dimensions::new(8, 3));
+        for alternate in [false, true] {
+            if alternate {
+                terminal.enter_alternate_screen_clear();
+            }
+            let id = terminal.allocate_image_id();
+            terminal.images_mut().add(TerminalImage {
+                id,
+                width: 1024,
+                height: 2304,
+                data: vec![255; 1024 * 2304 * 4],
+                start_col: 0,
+                line: 0,
+                cell_width: 8,
+                cell_height: 3,
+            });
+        }
+        assert!(TerminalSnapshot::capture(&terminal).is_err());
+    }
+
     #[test]
     fn test_view_snapshot_preserves_both_screens_styles_history_and_links() {
         let mut terminal = Terminal::new(Dimensions::new(12, 3));
@@ -488,13 +782,13 @@ mod tests {
             &mut parser,
             b"\x1b]4;1;rgb:12/34/56\x1b\\\x1b[?1049hALT\x1b[?2004h",
         );
-        terminal.images.add(TerminalImage {
+        terminal.images_mut().add(TerminalImage {
             id: ImageId(9),
             width: 1,
             height: 1,
             data: vec![1, 2, 3, 255],
             start_col: 2,
-            start_row: 1,
+            line: 1,
             cell_width: 1,
             cell_height: 1,
         });
@@ -514,7 +808,7 @@ mod tests {
         assert_eq!(view.palette().color(1), [0x12, 0x34, 0x56]);
         assert_eq!(view.hyperlinks, terminal.hyperlinks);
         assert_eq!(
-            view.images.images().next().unwrap().data,
+            view.images().images().next().unwrap().data,
             vec![1, 2, 3, 255]
         );
         assert!(view.take_responses().is_empty());
@@ -550,13 +844,13 @@ mod tests {
         snapshot.main.screen_rows = u16::MAX;
         assert!(snapshot.to_view().is_err());
         let mut snapshot = TerminalSnapshot::capture(&terminal).unwrap();
-        snapshot.images.push(TerminalImage {
+        snapshot.main.images.push(TerminalImage {
             id: ImageId(9),
             width: u32::MAX,
             height: u32::MAX,
             data: vec![],
             start_col: 0,
-            start_row: 0,
+            line: 0,
             cell_width: 0,
             cell_height: 0,
         });
@@ -585,12 +879,12 @@ mod tests {
             height: 1,
             data: vec![255; MAX_SIXEL_DIM as usize * 4],
             start_col: 0,
-            start_row: 0,
+            line: 0,
             cell_width: 10,
             cell_height: 1,
         };
         let mut valid = baseline.clone();
-        valid.images.push(image.clone());
+        valid.main.images.push(image.clone());
         assert!(
             valid.to_view().is_ok(),
             "the documented dimension cap is inclusive"
@@ -599,7 +893,7 @@ mod tests {
         let mut wide = image.clone();
         wide.width += 1;
         wide.data.extend_from_slice(&[255; 4]);
-        oversized.images.push(wide);
+        oversized.main.images.push(wide);
         assert!(
             oversized.to_view().is_err(),
             "valid RGBA lengths alone must not admit excessive dimensions"
@@ -609,10 +903,10 @@ mod tests {
         tall.height = MAX_SIXEL_DIM + 1;
         tall.data.extend_from_slice(&[255; 4]);
         let mut oversized = baseline.clone();
-        oversized.images.push(tall);
+        oversized.main.images.push(tall);
         assert!(oversized.to_view().is_err());
         let mut duplicate_images = baseline.clone();
-        duplicate_images.images = vec![image.clone(), image];
+        duplicate_images.main.images = vec![image.clone(), image];
         assert!(
             duplicate_images.to_view().is_err(),
             "image replacement must not silently discard snapshot data"
