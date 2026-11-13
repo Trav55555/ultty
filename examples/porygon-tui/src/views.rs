@@ -240,15 +240,25 @@ impl PorygonTui {
     }
 
     fn approval_modal_view(&self, req: &ApprovalRequest) -> Column {
-        let risk_pct = format!("{:.0}%", req.risk_score * 100.0);
-        let risk_color = if req.risk_score >= 0.7 {
+        let risk_pct = if req.risk_score < 0.0 {
+            "unknown".into()
+        } else {
+            format!("{:.0}%", req.risk_score * 100.0)
+        };
+        let risk_color = if req.risk_score < 0.0 {
+            Color::Rgb(136, 136, 136)
+        } else if req.risk_score >= 0.7 {
             Color::Rgb(255, 93, 110)
         } else if req.risk_score >= 0.3 {
             Color::Rgb(249, 226, 175)
         } else {
             Color::Rgb(166, 227, 161)
         };
-        let reversible_text = if req.reversible { "yes" } else { "no" };
+        let reversible_text = match req.reversible {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "unknown",
+        };
 
         let params_str = serde_json::to_string_pretty(&req.params)
             .unwrap_or_else(|_| format!("{:?}", req.params));
@@ -633,6 +643,9 @@ impl PorygonTui {
     }
 
     pub(crate) fn status_step_text(&self) -> String {
+        if self.stopping {
+            return "stop requested; awaiting daemon".into();
+        }
         if self.waiting_response && self.stream_token_count > 0 {
             format!("streaming: {} tokens", self.stream_token_count)
         } else {
@@ -642,7 +655,7 @@ impl PorygonTui {
 
     pub(crate) fn status_key_hint(&self) -> &'static str {
         if self.waiting_response {
-            " Enter:send Esc/Ctrl+C:abort PgUp/Dn:scroll "
+            " Draft preserved Esc/Ctrl+C:stop PgUp/Dn:scroll "
         } else {
             " Enter:send PgUp/Dn:scroll Ctrl+C:quit "
         }
@@ -655,9 +668,14 @@ impl PorygonTui {
     pub(crate) fn handle_event(&mut self, event: &Event) -> Option<Msg> {
         if self.show_approval_modal {
             return match event {
+                Event::Quit => Some(Msg::AbortStream),
                 Event::Key(ke) => match ke.key {
-                    Key::Char('y') | Key::Enter => Some(Msg::ApprovalDecision(true)),
-                    Key::Char('n') | Key::Escape => Some(Msg::ApprovalDecision(false)),
+                    Key::Escape => Some(Msg::DismissApproval),
+                    Key::Char('r') => Some(Msg::RefreshApproval),
+                    Key::Char('y') if !self.approval_in_flight => Some(Msg::ApprovalDecision(true)),
+                    Key::Char('n') if !self.approval_in_flight => {
+                        Some(Msg::ApprovalDecision(false))
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -781,7 +799,11 @@ impl PorygonTui {
                     Modal::new()
                         .title("Tool Approval Required")
                         .body_view(self.approval_modal_view(req))
-                        .buttons(vec!["Approve (y/Enter)", "Reject (n/Esc)"])
+                        .buttons(if self.approval_in_flight {
+                            vec!["Decision unconfirmed", "R:refresh Esc:close"]
+                        } else {
+                            vec!["Approve once (y)", "Deny (n)", "Esc:close"]
+                        })
                         .visible(true),
                 );
             }

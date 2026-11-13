@@ -150,7 +150,7 @@ fn stale_runtime_files(
 }
 
 /// Whether `pid` is this process or another live process that is Ultty.
-fn is_running_ultty(pid: libc::pid_t) -> bool {
+pub(crate) fn is_running_ultty(pid: libc::pid_t) -> bool {
     if u32::try_from(pid).is_ok_and(|pid| pid == std::process::id()) {
         return true;
     }

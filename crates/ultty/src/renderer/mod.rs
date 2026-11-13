@@ -978,6 +978,16 @@ impl Renderer {
         self.text_renderer.set_ligatures(enabled);
     }
 
+    /// Apply the font section of a reloaded config (families, size, line
+    /// height, features, emoji font). Returns whether the cell size changed.
+    pub fn apply_font_config(&mut self, config: &crate::config::FontConfig) -> bool {
+        let changed = self.text_renderer.apply_font_config(config);
+        let (cell_width, cell_height) = self.text_renderer.cell_dimensions();
+        self.cell_width = cell_width;
+        self.cell_height = cell_height;
+        changed
+    }
+
     /// Get the current font size.
     pub fn font_size(&self) -> f32 {
         self.text_renderer.font_size()
@@ -2052,6 +2062,42 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use wgpu::PresentMode;
+
+    #[test]
+    fn a_reloaded_font_config_resizes_the_cell_and_clears_the_atlas() {
+        use crate::config::FontConfig;
+        let Ok(mut renderer) = pollster::block_on(super::Renderer::new_headless(400, 200)) else {
+            eprintln!("no GPU adapter; skipped");
+            return;
+        };
+        let config = FontConfig::default();
+        let before = renderer.cell_dimensions();
+        assert!(
+            !renderer.apply_font_config(&config),
+            "same config, same cell"
+        );
+        assert_eq!(renderer.cell_dimensions(), before);
+
+        let bigger = FontConfig {
+            size: config.size * 2.0,
+            ..config.clone()
+        };
+        assert!(renderer.apply_font_config(&bigger));
+        let after = renderer.cell_dimensions();
+        assert!(
+            after.0 > before.0 && after.1 > before.1,
+            "{before:?} -> {after:?}"
+        );
+        assert_eq!(renderer.font_size(), bigger.size);
+
+        let taller = FontConfig {
+            line_height: 1.5,
+            ..bigger
+        };
+        assert!(renderer.apply_font_config(&taller));
+        assert_eq!(renderer.cell_dimensions().0, after.0);
+        assert!(renderer.cell_dimensions().1 > after.1);
+    }
 
     #[test]
     fn frames_paced_by_callbacks_present_in_mailbox() {

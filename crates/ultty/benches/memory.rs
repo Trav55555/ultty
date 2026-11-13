@@ -11,6 +11,12 @@
 //! cargo bench -p ultty --bench memory   (release profile, LTO: slow to build)
 //! cargo test -p ultty --bench memory    (same allocations, builds faster)
 //!
+//! The `agent_session_10h` case is the deterministic stand-in for the D5
+//! 10-hour wall-clock soak (`scripts/bench/soak.sh`): it feeds two tabs ten
+//! simulated hours of agent-shaped output at full speed (about 25 s under
+//! `cargo test`) and fails when live heap grows after the first hour.
+//! `ULTTY_SOAK_SIM_HOURS=N` changes the length; the budgets assume 10.
+//!
 //! Exits non-zero when any case is over budget. A case can also budget its
 //! peak heap, for work whose transient allocations would stay resident (the
 //! allocator rarely returns them). RSS is printed for context only: it
@@ -89,6 +95,9 @@ struct Measurement {
     live: usize,
     peak: usize,
     rss_delta: Option<isize>,
+    /// Why the case failed for a reason other than a byte budget (growth
+    /// over time, for the soak case).
+    failure: Option<String>,
 }
 
 /// Run `build`, keep its result alive, and report what it holds.
@@ -107,6 +116,7 @@ fn measure<T>(build: impl FnOnce() -> T) -> Measurement {
         live,
         peak,
         rss_delta,
+        failure: None,
     }
 }
 
@@ -268,6 +278,369 @@ fn scene_table(rows: u32, columns: u32, semantic: bool) -> SceneTree {
     tree
 }
 
+/// Splitmix64: a tiny deterministic generator, so the soak needs no crate.
+struct Rng(u64);
+
+impl Rng {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform in `[0, 1)`.
+    fn unit(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Uniform in `lo..=hi`.
+    fn range(&mut self, lo: usize, hi: usize) -> usize {
+        lo + (self.next_u64() % (hi - lo + 1) as u64) as usize
+    }
+
+    fn word(&mut self) -> &'static str {
+        AGENT_WORDS[self.range(0, AGENT_WORDS.len() - 1)]
+    }
+}
+
+/// The word list of `scripts/bench/agent-stream.py`.
+const AGENT_WORDS: &[&str] = &[
+    "the",
+    "terminal",
+    "renders",
+    "each",
+    "region",
+    "from",
+    "its",
+    "constraints",
+    "so",
+    "the",
+    "layout",
+    "stays",
+    "stable",
+    "while",
+    "text",
+    "streams",
+    "in",
+    "and",
+    "the",
+    "scroll",
+    "position",
+    "holds",
+    "tests",
+    "pass",
+    "build",
+    "fails",
+    "retry",
+    "with",
+    "the",
+    "fixed",
+    "path",
+    "parser",
+    "grid",
+    "buffer",
+    "reflow",
+    "scrollback",
+    "cursor",
+    "glyph",
+    "atlas",
+    "frame",
+    "event",
+    "socket",
+    "pane",
+    "tab",
+];
+
+/// Milliseconds between tokens (50 a second) and between status box redraws.
+const TOKEN_MS: u64 = 20;
+const BOX_MS: u64 = 80;
+const BOX_LINES: usize = 3;
+
+/// `scripts/bench/agent-stream.py`, driven by simulated time. One `tick`
+/// is one token period; the mapping from the Python:
+///
+/// - `styled_token`: the same 5% bold, 5% inline code, 2% OSC 8 link mix;
+/// - `Screen.write` / `redraw_box`: the same synchronized-output wrapper,
+///   `ESC [ J` to erase the box, IND x3 + CUU to reserve it, DECSC / DECRC
+///   around it; the box redraws once 80 ms have passed, as the Python
+///   checks `time.monotonic()` after each token;
+/// - a reply is 80 to 600 tokens after a heading, wrapped near the right
+///   edge (30% of wraps start a list item); it ends with a tool dump of 200
+///   to 3000 lines 30% of the time and a `/clear` of screen and scrollback
+///   3% of the time;
+/// - the box is as wide as the terminal is when it is drawn (the Python
+///   fixes `--cols`; a resized window changes it here), and its elapsed
+///   seconds are simulated seconds.
+///
+/// Same shape and rates, not the same bytes: the random draws differ. The
+/// generator is deterministic for a seed.
+struct AgentStream {
+    rng: Rng,
+    replies: u64,
+    tokens_left: usize,
+    column: usize,
+    box_tick: usize,
+    next_box_ms: u64,
+}
+
+impl AgentStream {
+    fn new(seed: u64) -> Self {
+        Self {
+            rng: Rng(seed),
+            replies: 0,
+            tokens_left: 0,
+            column: 0,
+            box_tick: 0,
+            next_box_ms: 0,
+        }
+    }
+
+    fn styled_token(&mut self) -> String {
+        let word = self.rng.word();
+        let r = self.rng.unit();
+        if r < 0.05 {
+            format!("\x1b[1m{word}\x1b[22m")
+        } else if r < 0.10 {
+            format!("\x1b[38;2;230;160;80m`{word}`\x1b[39m")
+        } else if r < 0.12 {
+            format!("\x1b]8;;https://example.com/{word}\x1b\\{word}\x1b]8;;\x1b\\")
+        } else {
+            word.to_string()
+        }
+    }
+
+    fn draw_box(&self, out: &mut Vec<u8>, now_ms: u64, cols: usize) {
+        const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
+        let inner = cols.saturating_sub(4);
+        let mut label = format!(
+            " {} Working... ({}s, esc to interrupt)",
+            SPINNER[self.box_tick % 4],
+            now_ms / 1000
+        );
+        label.truncate(inner);
+        let rule = "-".repeat(cols.saturating_sub(2));
+        let reserve = "\x1bD".repeat(BOX_LINES);
+        let text = format!(
+            "{reserve}\x1b[{BOX_LINES}A\x1b7\r\n\x1b[38;5;244m+{rule}+\x1b[39m\r\n\
+             \x1b[38;5;244m|\x1b[39m {label:<inner$} \x1b[38;5;244m|\x1b[39m\r\n\
+             \x1b[38;5;244m+{rule}+\x1b[39m\x1b8\x1b[?2026l"
+        );
+        out.extend_from_slice(text.as_bytes());
+    }
+
+    /// `Screen.write`: erase the box, write `text`, draw the box again.
+    fn write(&self, out: &mut Vec<u8>, text: &str, now_ms: u64, cols: usize) {
+        out.extend_from_slice(b"\x1b[?2026h\x1b[J");
+        out.extend_from_slice(text.as_bytes());
+        self.draw_box(out, now_ms, cols);
+    }
+
+    /// Append the bytes the agent writes in the token period at `now_ms`.
+    fn tick(&mut self, out: &mut Vec<u8>, now_ms: u64, cols: usize) {
+        if self.tokens_left == 0 {
+            self.replies += 1;
+            let heading = format!("\r\n\x1b[1;38;5;75m## Step {}\x1b[0m\r\n\r\n", self.replies);
+            self.write(out, &heading, now_ms, cols);
+            self.column = 0;
+            self.tokens_left = self.rng.range(80, 600);
+        }
+        let mut token = self.styled_token();
+        if self.column + 12 > cols {
+            let bullet = if self.rng.unit() < 0.3 { "- " } else { "" };
+            token = format!("\r\n{bullet}{token}");
+            self.column = 0;
+        } else {
+            token.insert(0, ' ');
+        }
+        self.column += 8;
+        self.write(out, &token, now_ms, cols);
+        if now_ms >= self.next_box_ms {
+            self.box_tick += 1;
+            out.extend_from_slice(b"\x1b[?2026h\x1b[J");
+            self.draw_box(out, now_ms, cols);
+            self.next_box_ms = now_ms + BOX_MS;
+        }
+        self.tokens_left -= 1;
+        if self.tokens_left > 0 {
+            return;
+        }
+        self.write(out, "\r\n", now_ms, cols);
+        let r = self.rng.unit();
+        if r < 0.3 {
+            let lines = self.rng.range(200, 3000);
+            let mut body = String::from("\x1b[2m```\x1b[22m\r\n");
+            for n in 0..lines {
+                body.push_str(&format!("\x1b[38;5;108m{n:5}\x1b[39m  "));
+                for k in 0..8 {
+                    if k > 0 {
+                        body.push(' ');
+                    }
+                    body.push_str(self.rng.word());
+                }
+                body.push_str("\r\n");
+            }
+            body.push_str("\x1b[2m```\x1b[22m\r\n");
+            self.write(out, &body, now_ms, cols);
+        } else if r < 0.33 {
+            self.write(out, "\x1b[H\x1b[2J\x1b[3J", now_ms, cols);
+        }
+    }
+}
+
+/// A tab's terminal with the parser that feeds it, kept across writes.
+struct Tab {
+    terminal: Terminal,
+    parser: AnsiParser,
+    stream: AgentStream,
+}
+
+impl Tab {
+    fn new(seed: u64, dims: Dimensions) -> Self {
+        Self {
+            terminal: Terminal::new(dims),
+            parser: AnsiParser::new(),
+            stream: AgentStream::new(seed),
+        }
+    }
+
+    fn step(&mut self, out: &mut Vec<u8>, now_ms: u64) {
+        out.clear();
+        let cols = usize::from(self.terminal.dimensions().cols);
+        self.stream.tick(out, now_ms, cols);
+        for chunk in out.chunks(64 * 1024) {
+            let mut handler = TerminalHandler::new(&mut self.terminal);
+            self.parser
+                .feed_with_ascii_spans(chunk, |output| match output {
+                    AnsiOutput::Action(action) => handler.handle(action),
+                    AnsiOutput::PrintAscii(span) => handler.handle_ascii_span(span),
+                });
+        }
+    }
+}
+
+/// The soak's window sizes (1600x1000, 1200x800, 1920x1150, 1000x700
+/// pixels, cycled every five minutes) as cell grids: pixels over an 8x16
+/// cell, rounded down.
+const SOAK_GRIDS: [(u16, u16); 4] = [(200, 62), (150, 50), (240, 71), (125, 43)];
+const RESIZE_EVERY_MS: u64 = 5 * 60 * 1000;
+const HOUR_MS: u64 = 60 * 60 * 1000;
+const SAMPLE_MS: u64 = 60 * 1000;
+
+/// Live heap of one simulated hour, sampled every simulated minute.
+struct HourStats {
+    /// Smallest and largest sample: the floor just after a `/clear` and the
+    /// ceiling with the scrollback full.
+    min: usize,
+    max: usize,
+}
+
+/// Simulated hours: 10 unless `ULTTY_SOAK_SIM_HOURS` says otherwise. Ten
+/// hours take about 25 s under `cargo test` and less under `cargo bench`.
+fn soak_hours() -> u64 {
+    std::env::var("ULTTY_SOAK_SIM_HOURS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10)
+}
+
+/// How far the last hour's ceiling or floor may sit above hour 1's (the
+/// warm-up) and still pass. Measured 2026-11-12 over ten hours the ceiling
+/// stayed within 10.57 to 11.06 MB (margin: 5% of it) and the floor, which
+/// depends on how much a `/clear` left, between 0.9 and 2.2 MB. A leak that
+/// grows with work (a few bytes per token, a page per resize) adds more
+/// than that over ten hours.
+const CEILING_MARGIN: usize = 500_000;
+const FLOOR_MARGIN: usize = 1_000_000;
+
+/// Why the hourly series (hour 1 onward) shows growth, if it does.
+///
+/// The end-of-hour figure alone is not a usable signal: a `/clear` drops
+/// the scrollback, so it swings by several MB with how long ago the last
+/// one was. Growth shows in the ceiling (scrollback full) and the floor
+/// (just after a clear), so both are held to hour 1's value plus a margin,
+/// and neither may rise every hour.
+fn soak_growth(hours: &[HourStats]) -> Option<String> {
+    let first = hours.first()?;
+    let last = hours.last()?;
+    for (name, margin, pick) in [
+        (
+            "ceiling",
+            CEILING_MARGIN,
+            (|h: &HourStats| h.max) as fn(&HourStats) -> usize,
+        ),
+        ("floor", FLOOR_MARGIN, |h: &HourStats| h.min),
+    ] {
+        let (a, b) = (pick(first), pick(last));
+        if b > a + margin {
+            return Some(format!(
+                "live heap {name} grew from {a} to {b} bytes (margin {margin})"
+            ));
+        }
+        if hours.len() >= 4 && hours.windows(2).all(|w| pick(&w[1]) > pick(&w[0])) {
+            return Some(format!("live heap {name} rose every hour"));
+        }
+    }
+    None
+}
+
+/// Two tabs fed `hours` simulated hours of agent output, resized every five
+/// minutes, live heap sampled every simulated minute and reported per hour.
+/// Hour 1 is warm-up: the scrollback is full by then.
+fn agent_session(hours: u64) -> Measurement {
+    let rss_before = rss_bytes();
+    let base = LIVE.load(Ordering::Relaxed);
+    PEAK.store(base, Ordering::Relaxed);
+    let (cols, rows) = SOAK_GRIDS[0];
+    let mut tabs = [
+        Tab::new(1, Dimensions::new(cols, rows)),
+        Tab::new(2, Dimensions::new(cols, rows)),
+    ];
+    let mut out = Vec::new();
+    let mut series = Vec::new();
+    let (mut min, mut max) = (usize::MAX, 0);
+    let mut resizes = 0;
+    let mut now_ms = 0;
+    println!("  hour   end of hour   floor (min)   ceiling (max)");
+    while now_ms < hours * HOUR_MS {
+        if now_ms > 0 && now_ms % RESIZE_EVERY_MS == 0 {
+            resizes += 1;
+            let (cols, rows) = SOAK_GRIDS[resizes % SOAK_GRIDS.len()];
+            for tab in &mut tabs {
+                tab.terminal.resize(Dimensions::new(cols, rows));
+            }
+        }
+        for tab in &mut tabs {
+            tab.step(&mut out, now_ms);
+        }
+        now_ms += TOKEN_MS;
+        if now_ms % SAMPLE_MS == 0 {
+            let live = LIVE.load(Ordering::Relaxed).saturating_sub(base);
+            (min, max) = (min.min(live), max.max(live));
+            if now_ms % HOUR_MS == 0 {
+                println!("  {:>4} {live:>13} {min:>13} {max:>15}", now_ms / HOUR_MS);
+                series.push(HourStats { min, max });
+                (min, max) = (usize::MAX, 0);
+            }
+        }
+    }
+    // The end of the run is a point on the `/clear` sawtooth, so the figure
+    // gated against the budget is the highest sample, not the last.
+    let live = series.iter().map(|h| h.max).max().unwrap_or(0);
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(base);
+    let rss_delta = rss_before
+        .zip(rss_bytes())
+        .map(|(before, after)| after as isize - before as isize);
+    drop(black_box(tabs));
+    Measurement {
+        live,
+        peak,
+        rss_delta,
+        failure: soak_growth(&series),
+    }
+}
+
 struct Case {
     name: &'static str,
     /// Live heap bytes allowed after the workload (measured + 5%).
@@ -384,6 +757,17 @@ const CASES: &[Case] = &[
         peak_budget: None,
         run: || measure(|| scene_table(1000, 4, true)),
     },
+    Case {
+        // Ten simulated hours of two agent tabs (`agent_session`). Live is
+        // the highest per-minute sample; the growth check inside is the
+        // real gate. Both measured 2026-11-12 + 5%: live 11_058_844, peak
+        // 11_322_890. They hold for the default 10 hours, not for
+        // `ULTTY_SOAK_SIM_HOURS` overrides.
+        name: "agent_session_10h",
+        budget: 11_611_800,
+        peak_budget: Some(11_889_200),
+        run: || agent_session(soak_hours()),
+    },
 ];
 
 fn main() -> ExitCode {
@@ -399,7 +783,12 @@ fn main() -> ExitCode {
     let mut over = 0;
     for case in CASES.iter().filter(|case| case.name.contains(&filter)) {
         let m = (case.run)();
-        let ok = m.live <= case.budget && case.peak_budget.is_none_or(|peak| m.peak <= peak);
+        let ok = m.live <= case.budget
+            && case.peak_budget.is_none_or(|peak| m.peak <= peak)
+            && m.failure.is_none();
+        if let Some(why) = &m.failure {
+            eprintln!("{}: {why}", case.name);
+        }
         if !ok {
             over += 1;
         }

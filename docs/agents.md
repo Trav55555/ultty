@@ -46,15 +46,20 @@ For Claude Code, from a shell inside Ultty:
 claude mcp add ultty -- ulttyctl mcp
 ```
 
-`ulttyctl` talks to the window selected by `ULTTY_PID`, which Ultty sets
-for its shells. If that window exits, the request fails instead of selecting
-another window. An invalid `ULTTY_PID` also fails. When `ULTTY_PID` is
-absent, the CLI discovers the most recently started window.
+`ulttyctl --pid <pid>` selects an instance explicitly. Otherwise it uses
+`ULTTY_PID`, which Ultty sets for its shells. Either selection fails if that
+instance exits or has no control socket; it never selects another instance.
+An invalid `ULTTY_PID` also fails unless `--pid` overrides it. When both
+selections are absent, the CLI discovers the most recently started instance.
 
 MCP authenticates discovery once, selects the window's random owner epoch and
 authentication token, and pins both for every call. It requires control schema 2. Restart MCP explicitly after replacing that
 window. Pane IDs are stable within that owner's lifetime; they are not
 global identities across terminal restarts.
+
+Global flags precede the command, including MCP: `ulttyctl --pid <pid> mcp`.
+When `--pid` selects an owner, `split` uses that owner's focused pane unless
+`--pane` explicitly names one; it does not inherit another owner's `ULTTY_PANE`.
 
 ## The tools
 

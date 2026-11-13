@@ -10,7 +10,8 @@ use super::{ColorScheme, Rgba, Vertex};
 use crate::config::FontConfig;
 use crate::grid::{Cell, CellFlags, Color, CursorShape, RowView, Terminal, UnderlineStyle};
 use cosmic_text::{
-    Attrs, Buffer, CacheKey, CacheKeyFlags, Family, FontSystem, Metrics, Shaping, Style, Weight,
+    Attrs, Buffer, CacheKey, CacheKeyFlags, Family, Feature, FeatureTag, FontFeatures, FontSystem,
+    Metrics, Shaping, Style, Weight,
 };
 // Looked up for every drawn cell; SipHash was a third of a scrolling frame.
 use foldhash::{HashMap, HashMapExt};
@@ -110,9 +111,10 @@ type RunGlyphs = Vec<(u16, ShapedGlyph)>;
 /// ligatures: a single printable ASCII character with nothing that needs the
 /// per-cell path (wide characters, grapheme clusters, hidden text, symbols
 /// drawn procedurally).
-fn joins_ligature_run(cell: &crate::grid::Cell) -> bool {
+fn joins_ligature_run(cell: &crate::grid::Cell, fonts: &FontSelection) -> bool {
     let ch = cell.char();
     ch.is_ascii_graphic()
+        && fonts.mapped(ch).is_none()
         && !is_procedural_cell_symbol(ch)
         && !cell.has_flag(CellFlags::WIDE_CHAR)
         && !cell.has_flag(CellFlags::WIDE_CHAR_SPACER)
@@ -136,8 +138,11 @@ fn ligature_key(cell: &crate::grid::Cell) -> (bool, bool, crate::grid::Color, bo
 
 /// The end (exclusive) of the ligature run starting at `start`: consecutive
 /// cells that join runs, with the same face and foreground.
-fn ligature_run_end(row: &RowView<'_>, start: u16, cols: u16) -> u16 {
-    let Some(first) = row.cell(start).filter(joins_ligature_run) else {
+fn ligature_run_end(row: &RowView<'_>, start: u16, cols: u16, fonts: &FontSelection) -> u16 {
+    let Some(first) = row
+        .cell(start)
+        .filter(|cell| joins_ligature_run(cell, fonts))
+    else {
         return start;
     };
     let key = ligature_key(&first);
@@ -145,7 +150,7 @@ fn ligature_run_end(row: &RowView<'_>, start: u16, cols: u16) -> u16 {
     while end < cols {
         let joins = row
             .cell(end)
-            .is_some_and(|cell| joins_ligature_run(&cell) && ligature_key(&cell) == key);
+            .is_some_and(|cell| joins_ligature_run(&cell, fonts) && ligature_key(&cell) == key);
         if !joins {
             break;
         }
@@ -312,27 +317,132 @@ fn styled_attrs(family: &str, bold: bool, italic: bool, styles: FaceStyles) -> A
     attrs
 }
 
+/// The families and OpenType features text is shaped with: what
+/// `font.family`, `bold_family`, `italic_family`, `bold_italic_family` and
+/// `features` resolve to against the installed fonts.
+#[derive(Debug, Clone, PartialEq)]
+struct FontSelection {
+    /// Family per [`CellStyle::face`]: regular, bold, italic, bold italic.
+    /// A style whose family is not configured holds the regular family, so
+    /// its real face is used if it has one and the style is synthesized
+    /// otherwise.
+    families: [String; 4],
+    /// Real bold and italic faces of each entry of `families`.
+    face_styles: [FaceStyles; 4],
+    features: FontFeatures,
+    /// `font.codepoint_map`: ranges drawn from a given family, with that
+    /// family's real faces. Later entries win.
+    codepoints: Vec<MappedRange>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct MappedRange {
+    range: std::ops::RangeInclusive<char>,
+    family: String,
+    face_styles: FaceStyles,
+}
+
+impl FontSelection {
+    fn new(db: &cosmic_text::fontdb::Database, config: &FontConfig) -> Self {
+        let pick = |configured: &String| {
+            if configured.is_empty() {
+                config.family.clone()
+            } else {
+                configured.clone()
+            }
+        };
+        let families = [
+            config.family.clone(),
+            pick(&config.bold_family),
+            pick(&config.italic_family),
+            pick(&config.bold_italic_family),
+        ];
+        let face_styles = std::array::from_fn(|i| FaceStyles::of_family(db, &families[i]));
+        Self {
+            families,
+            face_styles,
+            features: font_features(&crate::config::parse_font_features(&config.features)),
+            codepoints: crate::config::parse_codepoint_map(&config.codepoint_map)
+                .into_iter()
+                .map(|(range, family)| MappedRange {
+                    range,
+                    face_styles: FaceStyles::of_family(db, &family),
+                    family,
+                })
+                .collect(),
+        }
+    }
+
+    /// The mapped range `ch` falls in, if `font.codepoint_map` has one.
+    fn mapped(&self, ch: char) -> Option<&MappedRange> {
+        self.codepoints
+            .iter()
+            .rev()
+            .find(|mapped| mapped.range.contains(&ch))
+    }
+
+    /// Attributes for `ch`'s style, from its mapped family if it has one.
+    fn attrs_for(&self, ch: char, bold: bool, italic: bool) -> Attrs<'_> {
+        match self.mapped(ch) {
+            Some(mapped) => styled_attrs(&mapped.family, bold, italic, mapped.face_styles)
+                .font_features(self.features.clone()),
+            None => self.attrs(bold, italic),
+        }
+    }
+
+    /// The regular family, which sets the cell size.
+    fn family(&self) -> &str {
+        &self.families[0]
+    }
+
+    /// Attributes for text in the given style: the style's family, asking
+    /// for bold and italic only where that family has the faces, and the
+    /// configured features.
+    fn attrs(&self, bold: bool, italic: bool) -> Attrs<'_> {
+        let face = CellStyle { bold, italic }.face();
+        styled_attrs(&self.families[face], bold, italic, self.face_styles[face])
+            .font_features(self.features.clone())
+    }
+}
+
+/// `features` as cosmic-text's list. A later entry for a tag replaces an
+/// earlier one, so `["liga", "-liga"]` turns it off.
+fn font_features(features: &[crate::config::FontFeature]) -> FontFeatures {
+    let mut list = FontFeatures::new();
+    for feature in features {
+        let tag = FeatureTag::new(&feature.tag);
+        list.features.retain(|f| f.tag != tag);
+        list.features.push(Feature {
+            tag,
+            value: feature.value,
+        });
+    }
+    list
+}
+
 /// Attributes to shape the grapheme cluster `text` with, and the style the
 /// glyphs are drawn in. An emoji-presentation cluster is shaped with
 /// `emoji_family` when one is installed, unstyled: color emoji fonts have no
 /// bold or italic faces, and a skewed or recolored emoji is no improvement.
+/// A cluster starting with a character in `font.codepoint_map` is shaped
+/// with the mapped family instead, which wins over the emoji family.
 /// Anything else, or with no emoji family, uses the configured family.
 fn cluster_attrs<'a>(
     text: &str,
     style: CellStyle,
-    family: &'a str,
-    face_styles: FaceStyles,
+    fonts: &'a FontSelection,
     emoji_family: Option<&'a str>,
 ) -> (Attrs<'a>, CellStyle) {
+    let first = text.chars().next().unwrap_or(' ');
+    if fonts.mapped(first).is_some() {
+        return (fonts.attrs_for(first, style.bold, style.italic), style);
+    }
     match emoji_family.filter(|_| emoji_presentation(text)) {
         Some(emoji) => (
             Attrs::new().family(Family::Name(emoji)),
             CellStyle::default(),
         ),
-        None => (
-            styled_attrs(family, style.bold, style.italic, face_styles),
-            style,
-        ),
+        None => (fonts.attrs(style.bold, style.italic), style),
     }
 }
 
@@ -362,13 +472,14 @@ pub struct TextRenderer {
     metrics: Metrics,
     decoration: DecorationMetrics,
     device: Arc<wgpu::Device>,
-    font_family: String,
-    /// Real bold and italic faces available in `font_family`.
-    face_styles: FaceStyles,
+    fonts: FontSelection,
     /// Installed color emoji family that emoji-presentation cells are
     /// shaped with, if any (see [`emoji_presentation`]).
     emoji_family: Option<String>,
     ligatures: bool,
+    /// Bumped whenever the fonts, size or features change, so cached row
+    /// vertices built before are never reused.
+    font_generation: u64,
     shaping_cache: HashMap<ShapingCacheKey, ShapedGlyph>,
     /// Shaped runs for ligatures; see [`ligature_run_end`].
     run_cache: TextShapeCache<(u16, ShapedGlyph)>,
@@ -448,9 +559,9 @@ impl TextRenderer {
         let metrics = font_metrics(font_config);
 
         // Measure cell dimensions using a sample character
-        let font_family = font_config.family.clone();
+        let fonts = FontSelection::new(font_system.db(), font_config);
         let (cell_width, cell_height, baseline) =
-            Self::measure_cell_with_font(&mut font_system, metrics, &font_family);
+            Self::measure_cell_with_font(&mut font_system, metrics, fonts.family());
 
         // Create glyph atlas
         let atlas = GlyphAtlas::new(device.clone(), Arc::clone(&queue));
@@ -465,7 +576,6 @@ impl TextRenderer {
 
         let styled_text_buffer = Buffer::new(&mut font_system, metrics);
 
-        let face_styles = FaceStyles::of_family(font_system.db(), &font_family);
         let emoji_family = installed_emoji_family(font_system.db(), &font_config.emoji);
         let mut renderer = Self {
             font_system,
@@ -480,10 +590,10 @@ impl TextRenderer {
                 thickness: 1.0,
             },
             device,
-            face_styles,
+            fonts,
             emoji_family,
-            font_family,
             ligatures: font_config.ligatures,
+            font_generation: 0,
             shaping_cache: HashMap::with_capacity(256),
             run_cache: Default::default(),
             run_text: String::new(),
@@ -598,13 +708,7 @@ impl TextRenderer {
         style: CellStyle,
         shaping: Shaping,
     ) -> Vec<ShapedGlyph> {
-        let (attrs, style) = cluster_attrs(
-            text,
-            style,
-            &self.font_family,
-            self.face_styles,
-            self.emoji_family.as_deref(),
-        );
+        let (attrs, style) = cluster_attrs(text, style, &self.fonts, self.emoji_family.as_deref());
         buffer.set_text(text, &attrs, shaping, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
@@ -652,14 +756,7 @@ impl TextRenderer {
     /// of the cell its cluster starts at, and an x offset relative to that
     /// cell. `buffer` must not wrap.
     fn shape_run(&mut self, buffer: &mut Buffer, text: &str, style: CellStyle) -> RunGlyphs {
-        shape_run_glyphs(
-            &mut self.font_system,
-            buffer,
-            &self.font_family,
-            self.face_styles,
-            text,
-            style,
-        )
+        shape_run_glyphs(&mut self.font_system, buffer, &self.fonts, text, style)
     }
 
     /// Put the glyphs of the run in `self.run_text` into `self.run_glyphs`,
@@ -844,6 +941,38 @@ impl TextRenderer {
         self.ligatures
     }
 
+    /// Switch to the families, size, line height, features and emoji font
+    /// of `config` without a restart. Everything derived from the old fonts
+    /// is dropped: the cell size and decoration metrics are measured again,
+    /// and the glyph atlas, the shaping caches and the cached rows are
+    /// emptied. Returns whether the cell size changed, in which case every
+    /// grid needs resizing.
+    pub fn apply_font_config(&mut self, config: &FontConfig) -> bool {
+        let old_cell = (self.cell_width, self.cell_height);
+        self.metrics = font_metrics(config);
+        self.fonts = FontSelection::new(self.font_system.db(), config);
+        self.emoji_family = installed_emoji_family(self.font_system.db(), &config.emoji);
+        self.ligatures = config.ligatures;
+        self.font_generation += 1;
+
+        let (width, height, baseline) =
+            Self::measure_cell_with_font(&mut self.font_system, self.metrics, self.fonts.family());
+        self.cell_width = width;
+        self.cell_height = height;
+        self.drop_font_caches();
+        self.decoration = self.measure_decoration_metrics(baseline);
+        (self.cell_width, self.cell_height) != old_cell
+    }
+
+    /// Empty everything keyed by the fonts in use.
+    fn drop_font_caches(&mut self) {
+        self.atlas.clear();
+        self.shaping_cache.clear();
+        self.run_cache.clear();
+        self.cluster_cache.clear();
+        self.grid_caches.iter_mut().for_each(GridTextCache::clear);
+    }
+
     /// Get the current font size.
     pub fn font_size(&self) -> f32 {
         self.metrics.font_size
@@ -861,16 +990,13 @@ impl TextRenderer {
 
         // Recalculate cell dimensions
         let (width, height, baseline) =
-            Self::measure_cell_with_font(&mut self.font_system, self.metrics, &self.font_family);
+            Self::measure_cell_with_font(&mut self.font_system, self.metrics, self.fonts.family());
         self.cell_width = width;
         self.cell_height = height;
 
         // Clear caches since metrics changed
-        self.atlas.clear();
-        self.shaping_cache.clear();
-        self.run_cache.clear();
-        self.cluster_cache.clear();
-        self.grid_caches.iter_mut().for_each(GridTextCache::clear);
+        self.font_generation += 1;
+        self.drop_font_caches();
         self.decoration = self.measure_decoration_metrics(baseline);
     }
 
@@ -889,7 +1015,7 @@ impl TextRenderer {
         buffer.set_size(Some(10000.0), Some(self.cell_height * 2.0));
 
         let shaping = self.get_shaping();
-        buffer.set_text(text, &font_attrs(&self.font_family), shaping, None);
+        buffer.set_text(text, &self.fonts.attrs(false, false), shaping, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
         // Build a char-index lookup from byte offsets so spaces (which produce
@@ -1018,7 +1144,7 @@ impl TextRenderer {
             .set_size(Some(10000.0), Some(self.cell_height * 2.0));
 
         let shaping = self.get_shaping();
-        let attrs = styled_attrs(&self.font_family, bold, italic, self.face_styles);
+        let attrs = self.fonts.attrs(bold, italic);
 
         self.styled_text_buffer
             .set_text(text, &attrs, shaping, None);
@@ -1196,6 +1322,7 @@ impl TextRenderer {
                 origin: (x_offset, y_offset),
                 atlas_epoch: self.atlas.epoch(),
                 ligatures: self.ligatures,
+                font_generation: self.font_generation,
             },
             dims.rows,
         );
@@ -1339,7 +1466,7 @@ impl TextRenderer {
             // the font can join them (`=>`, `!=`). Each glyph is drawn
             // at, and in the color of, the cell its cluster starts at.
             if self.ligatures {
-                let mut end = ligature_run_end(row, col_idx, cols);
+                let mut end = ligature_run_end(row, col_idx, cols, &self.fonts);
                 // The block cursor's cell is drawn on its own, in the
                 // inverted color, so a ligature never straddles it.
                 if let Some(cursor_col) = cursor_col {
@@ -1532,7 +1659,7 @@ impl TextRenderer {
         // Set buffer size to allow layout
         buffer.set_size(Some(max_width), Some(self.cell_height * 2.0));
         let shaping = self.get_shaping();
-        buffer.set_text(text, &font_attrs(&self.font_family), shaping, None);
+        buffer.set_text(text, &self.fonts.attrs(false, false), shaping, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
         let max_x = x + max_width;
@@ -1596,7 +1723,7 @@ impl TextRenderer {
         let shaping = self.get_shaping();
         buffer.set_text(
             &ch.to_string(),
-            &font_attrs(&self.font_family),
+            &self.fonts.attrs(false, false),
             shaping,
             None,
         );
@@ -1691,12 +1818,11 @@ fn byte_offset_to_char_index(offsets: &[usize], byte_offset: usize) -> usize {
 fn shape_run_glyphs(
     font_system: &mut FontSystem,
     buffer: &mut Buffer,
-    font_family: &str,
-    face_styles: FaceStyles,
+    fonts: &FontSelection,
     text: &str,
     style: CellStyle,
 ) -> RunGlyphs {
-    let attrs = styled_attrs(font_family, style.bold, style.italic, face_styles);
+    let attrs = fonts.attrs(style.bold, style.italic);
     buffer.set_text(text, &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(font_system, false);
     let Some(run) = buffer.layout_runs().next() else {
@@ -1961,16 +2087,13 @@ mod tests {
 
     #[test]
     fn cluster_attrs_shapes_emoji_with_the_emoji_family_unstyled() {
-        let styles = FaceStyles {
-            bold: true,
-            italic: true,
-        };
         let bold = CellStyle {
             bold: true,
             italic: false,
         };
         let emoji = Some("Noto Color Emoji");
-        let shape = |text, emoji_family| cluster_attrs(text, bold, "Mono", styles, emoji_family);
+        let mono = selection("Mono");
+        let shape = |text, emoji_family| cluster_attrs(text, bold, &mono, emoji_family);
 
         let (attrs, style) = shape("\u{1F600}", emoji);
         assert_eq!(attrs.family, Family::Name("Noto Color Emoji"));
@@ -2337,12 +2460,12 @@ mod tests {
     fn ligature_runs_stop_at_spaces_wide_chars_and_face_changes() {
         let row = row_of("a=>b c");
         assert_eq!(
-            ligature_run_end(&RowView::from(&row), 0, row.width()),
+            ligature_run_end(&RowView::from(&row), 0, row.width(), &selection("Mono")),
             4,
             "stops at the space"
         );
         assert_eq!(
-            ligature_run_end(&RowView::from(&row), 4, row.width()),
+            ligature_run_end(&RowView::from(&row), 4, row.width(), &selection("Mono")),
             4,
             "a space starts no run"
         );
@@ -2350,7 +2473,7 @@ mod tests {
         let mut row = row_of("x!=y");
         row[2].set_flag(CellFlags::BOLD);
         assert_eq!(
-            ligature_run_end(&RowView::from(&row), 0, row.width()),
+            ligature_run_end(&RowView::from(&row), 0, row.width(), &selection("Mono")),
             2,
             "bold changes the face"
         );
@@ -2358,7 +2481,7 @@ mod tests {
         let mut row = row_of("->中");
         row[2].set_flag(CellFlags::WIDE_CHAR);
         assert_eq!(
-            ligature_run_end(&RowView::from(&row), 0, row.width()),
+            ligature_run_end(&RowView::from(&row), 0, row.width(), &selection("Mono")),
             2,
             "non-ASCII ends the run"
         );
@@ -2367,10 +2490,16 @@ mod tests {
         // cells the program colored differently. Background does not.
         let mut row = row_of("==>");
         row[1].set_fg(crate::grid::Color::Named(2));
-        assert_eq!(ligature_run_end(&RowView::from(&row), 0, row.width()), 1);
+        assert_eq!(
+            ligature_run_end(&RowView::from(&row), 0, row.width(), &selection("Mono")),
+            1
+        );
         let mut row = row_of("==>");
         row[1].set_bg(crate::grid::Color::Named(2));
-        assert_eq!(ligature_run_end(&RowView::from(&row), 0, row.width()), 3);
+        assert_eq!(
+            ligature_run_end(&RowView::from(&row), 0, row.width(), &selection("Mono")),
+            3
+        );
     }
 
     #[test]
@@ -2378,6 +2507,19 @@ mod tests {
         assert!(could_ligate("a=>b"));
         assert!(could_ligate("!="));
         assert!(!could_ligate("hello123"));
+    }
+
+    /// Selection of `family` for every style, with no fonts installed to
+    /// narrow what can be requested.
+    fn selection(family: &str) -> FontSelection {
+        selection_of(&FontConfig {
+            family: family.to_string(),
+            ..FontConfig::default()
+        })
+    }
+
+    fn selection_of(config: &FontConfig) -> FontSelection {
+        FontSelection::new(&cosmic_text::fontdb::Database::new(), config)
     }
 
     const ALL_STYLES: FaceStyles = FaceStyles {
@@ -2443,8 +2585,7 @@ mod tests {
         let glyphs = shape_run_glyphs(
             &mut font_system,
             &mut buffer,
-            "DejaVu Sans",
-            ALL_STYLES,
+            &selection("DejaVu Sans"),
             "git:(main)",
             bold,
         );
@@ -2471,8 +2612,7 @@ mod tests {
         let glyphs = shape_run_glyphs(
             &mut font_system,
             &mut buffer,
-            "DejaVu Sans Mono",
-            ALL_STYLES,
+            &selection("DejaVu Sans Mono"),
             text,
             CellStyle::default(),
         );
@@ -2515,8 +2655,7 @@ mod tests {
             let run: Vec<_> = shape_run_glyphs(
                 &mut font_system,
                 &mut buffer,
-                &family,
-                ALL_STYLES,
+                &selection(&family),
                 text,
                 CellStyle::default(),
             )
@@ -2529,8 +2668,7 @@ mod tests {
                     shape_run_glyphs(
                         &mut font_system,
                         &mut buffer,
-                        &family,
-                        ALL_STYLES,
+                        &selection(&family),
                         &ch.to_string(),
                         CellStyle::default(),
                     )[0]
@@ -2567,5 +2705,209 @@ mod tests {
             "Expected at least 5 glyphs for 'Hello', got {}",
             glyph_count
         );
+    }
+
+    fn config_with(f: impl FnOnce(&mut FontConfig)) -> FontConfig {
+        let mut config = FontConfig {
+            family: "Mono".to_string(),
+            ..FontConfig::default()
+        };
+        f(&mut config);
+        config
+    }
+
+    #[test]
+    fn each_style_uses_its_own_family_when_one_is_set() {
+        let fonts = selection_of(&config_with(|c| {
+            c.bold_family = "Mono Heavy".to_string();
+            c.italic_family = "Mono Slant".to_string();
+            c.bold_italic_family = "Mono Heavy Slant".to_string();
+        }));
+        let family = |bold, italic| fonts.attrs(bold, italic).family;
+        assert_eq!(family(false, false), Family::Name("Mono"));
+        assert_eq!(family(true, false), Family::Name("Mono Heavy"));
+        assert_eq!(family(false, true), Family::Name("Mono Slant"));
+        assert_eq!(family(true, true), Family::Name("Mono Heavy Slant"));
+        // The style is still requested of the family; it picks its nearest.
+        assert_eq!(fonts.attrs(true, true).weight, Weight::BOLD);
+        assert_eq!(fonts.attrs(true, true).style, Style::Italic);
+    }
+
+    #[test]
+    fn unset_style_families_fall_back_to_the_regular_one() {
+        let fonts = selection_of(&config_with(|c| c.bold_family = "Mono Heavy".to_string()));
+        assert_eq!(fonts.attrs(true, false).family, Family::Name("Mono Heavy"));
+        for (bold, italic) in [(false, true), (true, true)] {
+            assert_eq!(
+                fonts.attrs(bold, italic).family,
+                Family::Name("Mono"),
+                "bold_italic_family does not borrow bold_family"
+            );
+        }
+    }
+
+    #[test]
+    fn selections_differing_in_family_or_features_are_not_equal() {
+        // Caches are dropped when the selection changes, so a change in
+        // anything that alters shaped glyphs must show up in `==`.
+        let base = selection("Mono");
+        assert_eq!(base, selection("Mono"));
+        assert_ne!(base, selection("Other"));
+        assert_ne!(
+            base,
+            selection_of(&config_with(|c| c.italic_family = "Slant".to_string()))
+        );
+        let with = |features: &[&str]| {
+            selection_of(&config_with(|c| {
+                c.features = features.iter().map(|f| f.to_string()).collect();
+            }))
+        };
+        assert_ne!(base, with(&["-liga"]));
+        assert_ne!(with(&["ss01"]), with(&["ss01=2"]));
+    }
+
+    #[test]
+    fn features_reach_the_shaper_with_the_last_entry_winning() {
+        let fonts = selection_of(&config_with(|c| {
+            c.features = ["calt", "-liga", "ss01", "liga", "bad", "zero=1", "-zero"]
+                .map(String::from)
+                .into();
+        }));
+        let list: Vec<_> = fonts
+            .attrs(false, false)
+            .font_features
+            .features
+            .iter()
+            .map(|f| (f.tag, f.value))
+            .collect();
+        let tag = |t: &[u8; 4]| FeatureTag::new(t);
+        assert_eq!(
+            list,
+            [
+                (tag(b"calt"), 1),
+                (tag(b"ss01"), 1),
+                (tag(b"liga"), 1),
+                (tag(b"zero"), 0),
+            ]
+        );
+        // Every style's attributes carry them.
+        assert_eq!(
+            fonts.attrs(true, true).font_features,
+            fonts.attrs(false, false).font_features
+        );
+    }
+
+    /// Glyph ids of `text` in `family` shaped with `features`, or `None` when
+    /// the family is not installed.
+    fn shaped_glyph_ids(family: &str, features: &[&str], text: &str) -> Option<Vec<u16>> {
+        let mut font_system = FontSystem::new();
+        let installed = font_system
+            .db()
+            .faces()
+            .any(|face| face.families.iter().any(|(name, _)| name == family));
+        if !installed {
+            eprintln!("{family} not installed; skipped");
+            return None;
+        }
+        let fonts = selection_of(&config_with(|c| {
+            c.family = family.to_string();
+            c.features = features.iter().map(|f| f.to_string()).collect();
+        }));
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(14.0, 18.0));
+        buffer.set_wrap(cosmic_text::Wrap::None);
+        buffer.set_size(Some(1000.0), Some(40.0));
+        let attrs = fonts.attrs(false, false);
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut font_system, false);
+        let run = buffer.layout_runs().next()?;
+        Some(run.glyphs.iter().map(|g| g.glyph_id).collect())
+    }
+
+    #[test]
+    fn a_feature_list_changes_what_the_font_shapes() {
+        // DejaVu Sans joins "fi" with `liga`; `-liga` keeps two glyphs.
+        let Some(default) = shaped_glyph_ids("DejaVu Sans", &[], "fi") else {
+            return;
+        };
+        let off = shaped_glyph_ids("DejaVu Sans", &["-liga"], "fi").unwrap();
+        assert_eq!(default.len(), 1, "fi is one ligature glyph by default");
+        assert_eq!(off.len(), 2, "-liga shapes f and i apart");
+        // An unrelated feature leaves it alone, and a later `liga` restores it.
+        assert_eq!(
+            shaped_glyph_ids("DejaVu Sans", &["zero"], "fi").unwrap(),
+            default
+        );
+        assert_eq!(
+            shaped_glyph_ids("DejaVu Sans", &["-liga", "liga"], "fi").unwrap(),
+            default
+        );
+    }
+
+    fn mapped_config() -> FontConfig {
+        config_with(|c| {
+            c.codepoint_map = vec![
+                crate::config::CodepointMapEntry {
+                    range: "U+E000-U+F8FF".to_string(),
+                    family: "Symbols".to_string(),
+                },
+                crate::config::CodepointMapEntry {
+                    range: "U+E0A0".to_string(),
+                    family: "Powerline Extra".to_string(),
+                },
+                crate::config::CodepointMapEntry {
+                    range: "U+3D".to_string(),
+                    family: "Serif".to_string(),
+                },
+            ];
+        })
+    }
+
+    #[test]
+    fn mapped_codepoints_use_their_family_and_the_last_entry_wins() {
+        let fonts = selection_of(&mapped_config());
+        let family = |text: &str| {
+            cluster_attrs(text, CellStyle::default(), &fonts, None)
+                .0
+                .family
+        };
+        assert_eq!(family("\u{E001}"), Family::Name("Symbols"));
+        assert_eq!(family("\u{E0A0}"), Family::Name("Powerline Extra"));
+        assert_eq!(family("a"), Family::Name("Mono"));
+        assert_eq!(family("\u{F8FF}"), Family::Name("Symbols"));
+        assert_eq!(family("\u{F900}"), Family::Name("Mono"));
+        // The mapping beats the emoji family.
+        let (attrs, _) = cluster_attrs(
+            "\u{E001}",
+            CellStyle::default(),
+            &fonts,
+            Some("Noto Color Emoji"),
+        );
+        assert_eq!(attrs.family, Family::Name("Symbols"));
+    }
+
+    #[test]
+    fn mapped_codepoints_keep_the_cells_style_and_features() {
+        let mut config = mapped_config();
+        config.features = vec!["-liga".to_string()];
+        let fonts = selection_of(&config);
+        let bold = CellStyle {
+            bold: true,
+            italic: false,
+        };
+        let (attrs, style) = cluster_attrs("\u{E001}", bold, &fonts, None);
+        assert_eq!(attrs.weight, Weight::BOLD);
+        assert_eq!(style, bold);
+        assert_eq!(attrs.font_features.features.len(), 1);
+    }
+
+    #[test]
+    fn mapped_ascii_does_not_join_ligature_runs() {
+        let fonts = selection_of(&mapped_config());
+        let row = row_of("a=>b");
+        let end =
+            |fonts: &FontSelection| ligature_run_end(&RowView::from(&row), 0, row.width(), fonts);
+        assert_eq!(end(&selection("Mono")), 4);
+        // `=` is mapped to another family: the run stops before it.
+        assert_eq!(end(&fonts), 1);
     }
 }

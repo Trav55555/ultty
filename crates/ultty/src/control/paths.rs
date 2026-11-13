@@ -14,6 +14,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
+use crate::platform::runtime_files::is_running_ultty;
 use crate::platform::socket::{current_uid, private_socket_dir};
 
 const SOCKET_PREFIX: &str = "ultty-ctl-";
@@ -41,6 +42,11 @@ impl ControlEndpoint {
             token: dir.join(format!("ultty-auth-{pid}.token")),
         }
     }
+
+    /// The pid of the Ultty this endpoint belongs to, from its socket name.
+    pub fn pid(&self) -> Option<u32> {
+        pid_from_socket_name(self.socket.file_name()?.to_str()?)
+    }
 }
 
 /// The most recently started instance in `dir` that is still listening.
@@ -67,19 +73,67 @@ pub fn find_running_instance(dir: &Path) -> Option<ControlEndpoint> {
         .find(|endpoint| UnixStream::connect(&endpoint.socket).is_ok())
 }
 
-/// The selected instance, or the newest running one when none was selected.
+/// Which instance a command asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceRequest {
+    /// No preference: the newest running instance.
+    Newest,
+    /// The Ultty selected by `ULTTY_PID`, never another process.
+    Own(u32),
+    /// Exactly this pid (`ulttyctl --pid`), never another.
+    Exact(u32),
+}
+
+/// The instance [`find_instance`] picked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundInstance {
+    /// Where to connect.
+    pub endpoint: ControlEndpoint,
+    /// Reserved for discovery compatibility; explicit selection never falls
+    /// back, so successful discovery always returns `None`.
+    pub replaces_gone: Option<u32>,
+}
+
+/// Why no instance was picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceError {
+    /// The requested Ultty runs but is not listening (still starting, or
+    /// stuck). Another instance is never used in its place.
+    NotListening(u32),
+    /// `--pid` or `ULTTY_PID` named a process that is not a running Ultty.
+    NotRunning(u32),
+    /// No instance is listening at all.
+    NoneRunning,
+}
+
+/// The instance a command should talk to; see [`InstanceRequest`].
 ///
 /// Ultty puts its pid in `ULTTY_PID` for every shell it starts, so
-/// `ulttyctl` run inside a window controls that window, not whichever
-/// window was opened last. A selected instance that stopped listening is
-/// unavailable: it must never redirect an old pane target to another window.
-pub fn find_instance(dir: &Path, own_pid: Option<u32>) -> Option<ControlEndpoint> {
-    match own_pid {
-        Some(pid) => {
-            let endpoint = ControlEndpoint::for_pid(dir, pid);
-            UnixStream::connect(&endpoint.socket).ok().map(|_| endpoint)
-        }
-        None => find_running_instance(dir),
+/// `ulttyctl` run inside a window controls that window. A script that
+/// starts its own Ultty and exports `ULTTY_PID` must never reach some other
+/// window, including after the selected process exits.
+pub fn find_instance(dir: &Path, request: InstanceRequest) -> Result<FoundInstance, InstanceError> {
+    // A pid reused by some other program counts as gone.
+    let is_running_ultty = |pid| libc::pid_t::try_from(pid).is_ok_and(is_running_ultty);
+    let listening = |pid| {
+        let endpoint = ControlEndpoint::for_pid(dir, pid);
+        UnixStream::connect(&endpoint.socket)
+            .is_ok()
+            .then_some(endpoint)
+    };
+    let found = |endpoint| FoundInstance {
+        endpoint,
+        replaces_gone: None,
+    };
+    match request {
+        InstanceRequest::Exact(pid) | InstanceRequest::Own(pid) => match listening(pid) {
+            Some(endpoint) => Ok(found(endpoint)),
+            None if is_running_ultty(pid) => Err(InstanceError::NotListening(pid)),
+            None => Err(InstanceError::NotRunning(pid)),
+        },
+        InstanceRequest::Newest => find_running_instance(dir)
+            .map(found)
+            .ok_or(InstanceError::NoneRunning),
     }
 }
 
@@ -106,6 +160,7 @@ mod tests {
             endpoint.token,
             Path::new("/run/user/1000/ultty-auth-42.token")
         );
+        assert_eq!(endpoint.pid(), Some(42));
         assert_eq!(pid_from_socket_name("ultty-ctl-42.sock"), Some(42));
         assert_eq!(pid_from_socket_name("ultty-ctl.sock"), None);
         assert_eq!(pid_from_socket_name("ultty-ctl-42.token"), None);
@@ -126,21 +181,138 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_selected_window_never_falls_back_to_another_instance() {
-        let dir = tempfile::tempdir().unwrap();
-        let own = ControlEndpoint::for_pid(dir.path(), 100);
-        let own_listener = UnixListener::bind(&own.socket).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let newer = ControlEndpoint::for_pid(dir.path(), 200);
-        let _newer_listener = UnixListener::bind(&newer.socket).unwrap();
+    /// The pid of a process that has exited and been reaped.
+    fn reaped_child_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        child.wait().unwrap();
+        child.id()
+    }
 
-        assert_eq!(find_instance(dir.path(), Some(100)), Some(own.clone()));
-        assert_eq!(find_instance(dir.path(), None), Some(newer.clone()));
-        assert_eq!(find_instance(dir.path(), Some(300)), None);
+    /// Listen as the instance with pid `pid` in `dir`.
+    fn listen(dir: &Path, pid: u32) -> (ControlEndpoint, UnixListener) {
+        let endpoint = ControlEndpoint::for_pid(dir, pid);
+        let listener = UnixListener::bind(&endpoint.socket).unwrap();
+        (endpoint, listener)
+    }
+
+    fn found(endpoint: ControlEndpoint) -> Result<FoundInstance, InstanceError> {
+        Ok(FoundInstance {
+            endpoint,
+            replaces_gone: None,
+        })
+    }
+
+    // The tests below use their own pid as the live Ultty, since
+    // `is_running_ultty` counts the calling process as one.
+
+    #[test]
+    fn a_live_own_instance_is_used_while_it_listens() {
+        let dir = tempfile::tempdir().unwrap();
+        let own_pid = std::process::id();
+        let (own, _own_listener) = listen(dir.path(), own_pid);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (_newer, _newer_listener) = listen(dir.path(), 200);
+
+        assert_eq!(
+            find_instance(dir.path(), InstanceRequest::Own(own_pid)),
+            found(own)
+        );
+    }
+
+    #[test]
+    fn a_live_own_instance_without_a_socket_is_an_error_not_another_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_other, _other_listener) = listen(dir.path(), 200);
+
+        let request = InstanceRequest::Own(std::process::id());
+        assert_eq!(
+            find_instance(dir.path(), request),
+            Err(InstanceError::NotListening(std::process::id()))
+        );
+    }
+
+    #[test]
+    fn a_live_own_instance_that_stops_listening_is_not_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_other, _other_listener) = listen(dir.path(), 200);
+        let (own, own_listener) = listen(dir.path(), std::process::id());
+        let request = InstanceRequest::Own(std::process::id());
+        assert_eq!(find_instance(dir.path(), request), found(own));
+
         drop(own_listener);
-        eventually(None, || find_instance(dir.path(), Some(100)));
-        assert_eq!(find_instance(dir.path(), None), Some(newer));
+        eventually(Err(InstanceError::NotListening(std::process::id())), || {
+            find_instance(dir.path(), request)
+        });
+    }
+
+    #[test]
+    fn a_gone_own_instance_never_falls_back_to_the_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_newest, _listener) = listen(dir.path(), 200);
+        let gone = reaped_child_pid();
+
+        assert_eq!(
+            find_instance(dir.path(), InstanceRequest::Own(gone)),
+            Err(InstanceError::NotRunning(gone))
+        );
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            find_instance(empty.path(), InstanceRequest::Own(gone)),
+            Err(InstanceError::NotRunning(gone))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_own_pid_reused_by_another_program_counts_as_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_newest, _listener) = listen(dir.path(), 200);
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+
+        let result = find_instance(dir.path(), InstanceRequest::Own(child.id()));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(result, Err(InstanceError::NotRunning(child.id())));
+    }
+
+    #[test]
+    fn without_a_preference_the_newest_instance_is_used() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            find_instance(dir.path(), InstanceRequest::Newest),
+            Err(InstanceError::NoneRunning)
+        );
+        let (_older, _older_listener) = listen(dir.path(), 100);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (newer, _newer_listener) = listen(dir.path(), 200);
+
+        assert_eq!(
+            find_instance(dir.path(), InstanceRequest::Newest),
+            found(newer)
+        );
+    }
+
+    #[test]
+    fn an_exact_pid_never_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_other, _other_listener) = listen(dir.path(), 200);
+
+        let live = InstanceRequest::Exact(std::process::id());
+        assert_eq!(
+            find_instance(dir.path(), live),
+            Err(InstanceError::NotListening(std::process::id()))
+        );
+        let gone = reaped_child_pid();
+        assert_eq!(
+            find_instance(dir.path(), InstanceRequest::Exact(gone)),
+            Err(InstanceError::NotRunning(gone))
+        );
+
+        let (own, _own_listener) = listen(dir.path(), std::process::id());
+        assert_eq!(find_instance(dir.path(), live), found(own));
     }
 
     #[test]

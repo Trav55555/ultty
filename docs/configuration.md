@@ -162,6 +162,43 @@ uses those to move between panes (`focus_pane_up`, `focus_pane_down`), so the
 defaults here are Ctrl+Shift+PageUp and PageDown, beside Shift+PageUp and
 PageDown for scrolling by a page. Set any of the three to `""` to turn it off.
 
+## Searching scrollback
+
+```toml
+[search]
+regex = false
+smart_case = true
+
+[keybindings]
+find = "ctrl+shift+f"
+```
+
+`find` enters copy mode with a query prompt. You can also press `/` (search
+forward) or `?` (search backward) in copy mode. Type the query and press Enter;
+`n` and `N` move to the next and previous match, and the first jump goes to the
+match nearest the cursor in the search direction. Esc leaves the prompt.
+
+- Matching reads a soft-wrapped line as one line, so a match can run across
+  the wrap. A hard line break (a newline from the program) still ends it.
+  Trailing blanks at the end of a line are not part of it.
+- `smart_case = true` ignores case unless the query has an uppercase letter.
+  With `false`, matching is always case sensitive.
+- `regex = true` reads the query as a regular expression in the Rust `regex`
+  crate's syntax. Ctrl+R in the prompt toggles it for that search; the prompt
+  shows `[regex]` while it is on. A pattern that does not compile shows its
+  error in the status line; a pattern that
+  can match nothing (`a*`) skips the empty matches.
+- All matches are highlighted, the current one brighter, and the status line
+  shows `[3/17]` or `[no matches]`.
+- The scan runs in slices of about 2 ms per frame, so the terminal keeps up
+  with its program while a large scrollback is searched; the status line shows
+  `searching 40%`. Measured in a release build on 120-column lines: 10k lines
+  in 8 ms, 100k in 140 ms, 1M in 0.6 to 1.4 s, split over many frames. Matches are a snapshot: output that arrives after the scan
+  passes a row is not searched, and matches in lines the scrollback limit
+  evicts later are dropped.
+- A logical line over 1 MiB is searched in pieces, so a match cannot cross
+  those cuts.
+
 ## Line height
 
 ```toml
@@ -172,7 +209,83 @@ line_height = 1.0
 The cell height as a multiple of the font size, rounded up to whole pixels.
 Values outside 0.5 to 3.0 are clamped. At 1.0, block and box-drawing
 characters in adjacent rows touch; larger values add space between lines.
-Font settings are read at start; restart Ultty after changing them.
+Font settings apply when the config is reloaded; see
+[Changing fonts without a restart](#changing-fonts-without-a-restart).
+
+## Bold and italic families
+
+```toml
+[font]
+family = "Fira Code"
+bold_family = "Fira Code SemiBold"
+italic_family = "Victor Mono"
+bold_italic_family = "Victor Mono Bold"
+```
+
+`bold_family`, `italic_family` and `bold_italic_family` name the font for
+bold, italic and bold italic text. Each is empty by default. An empty entry
+uses `family`: its own bold or italic face if it has one, and otherwise the
+regular face with a brighter color for bold and a slant for italic.
+`bold_italic_family` does not fall back to `bold_family` or `italic_family`.
+A style family is asked for the bold weight and italic slant too, so a family
+with several weights gives its bold one. Cells are sized from `family`, so a
+style family with a different advance width breaks the grid; use families
+meant to go together.
+
+## OpenType features
+
+```toml
+[font]
+features = ["calt", "-liga", "ss01", "zero", "cv02=2"]
+```
+
+`features` is a list of OpenType features to apply when shaping. `"calt"` or
+`"+calt"` turns a feature on, `"-liga"` turns it off, and `"cv02=2"` picks the
+second alternate of a feature that has several. Entries apply in order and a
+later entry for the same feature replaces an earlier one. An entry that is not
+four characters of tag, with an optional sign or value, is ignored with a
+warning in the log. The list applies to regular, bold and italic text alike.
+
+`ligatures` is a separate switch over whether neighbouring cells are shaped
+together at all. It defaults to `true`. With `ligatures = false` no cells are
+shaped together, so `calt` and `liga` cannot join them whatever `features`
+says; the other features, such as `zero` or `ss01`, still apply to each cell.
+With `ligatures = true`, a font's default features apply first and `features`
+adjusts them. Which feature forms a given ligature depends on the font: many
+programming fonts, Fira Code among them, build theirs with `calt`, so
+`["-calt"]` is what turns those off, while `["-liga"]` turns off standard
+ligatures such as `fi`.
+
+## Changing fonts without a restart
+
+`family`, `bold_family`, `italic_family`, `bold_italic_family`, `features`,
+`ligatures`, `size`, `line_height` and `emoji` all apply when the config is
+reloaded (Ctrl+Shift+R, or when the config file changes). Ultty measures the
+cell again, empties its glyph cache and resizes every pane to the new cell
+size. A `size` you did not change in the file keeps any zoom you set with the
+font size keys; changing it resets the zoom to the new value.
+
+## Codepoint map
+
+```toml
+[[font.codepoint_map]]
+range = "U+E0A0-U+E0A3"
+family = "Symbols Nerd Font Mono"
+
+[[font.codepoint_map]]
+range = "U+4E00-U+9FFF"
+family = "Noto Sans CJK JP"
+```
+
+Each `[[font.codepoint_map]]` table draws a range of characters from a family
+of its own, whichever fonts would otherwise supply them. `range` is `U+XXXX`
+or `U+XXXX-U+YYYY` in hex, inclusive. Where ranges overlap, the later table
+wins. A mapped family is asked for bold and italic as usual, and gets
+`features`. A mapping wins over the emoji font, and a mapped ASCII character
+is shaped alone, so it does not join a ligature. An entry with a range that
+does not parse or an empty family is ignored with a warning in the log. Block
+and box-drawing characters and the Powerline triangles are drawn by Ultty
+itself and stay that way when mapped.
 
 ## Emoji and accents
 
@@ -195,8 +308,7 @@ change an emoji. An emoji still takes two cells.
 installed, Ultty uses the first installed of Noto Color Emoji, Apple Color
 Emoji, Segoe UI Emoji, Twemoji, Twitter Color Emoji, JoyPixels and OpenMoji
 Color. With none of them installed, emoji come from whatever installed font
-has them, often in black and white. Like the other font settings, `emoji` is
-read at start.
+has them, often in black and white.
 
 An emoji sequence (a ZWJ family, a flag, a skin tone) is drawn as one glyph
 in whatever design the emoji font gives it. Noto Color Emoji 2.051, for example, draws the family

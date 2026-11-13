@@ -25,6 +25,9 @@
 #            because the Wayland probe needs virtual-keyboard and screencopy,
 #            which weston lacks. The headless output has no vblank: it
 #            composites on demand, at most once per --wayland-refresh period.
+#            sway picks a render node itself; to choose one, set
+#            WLR_RENDER_DRM_DEVICE=/dev/dri/renderD128 (wlroots reads it).
+#            versions.json "gpu" and "render_node" record the choice.
 #
 # Options:
 #   --terminals LIST   default ultty,ghostty,gnome-terminal,alacritty
@@ -205,6 +208,11 @@ EOF
     sway_args=(-c "$OUT/cfg/sway.conf")
     if lsmod 2>/dev/null | grep -q '^nvidia'; then sway_args+=(--unsupported-gpu); fi
     unset DISPLAY
+    # sway logs "[types/wlr_linux_dmabuf_v1.c] Failed to get backend DRM FD"
+    # many times (35 on the 2026-11-12 workstation run): the headless backend
+    # has no DRM fd of its own, so wlroots cannot advertise per-device dmabuf
+    # feedback. The probe reads wl_shm, which is unaffected. Whether
+    # WLR_RENDER_DRM_DEVICE removes the message is NOT yet verified.
     WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER="${WLR_RENDERER:-gles2}" \
       sway "${sway_args[@]}" >"$OUT/logs/sway.log" 2>&1 &
     SESSION_PIDS+=("$!")
@@ -243,6 +251,26 @@ FONT_FILE=$(fc-match "$FONT" file | sed 's/^:file=//')
 FONT_SHA=$(sha256sum "$FONT_FILE" | cut -d' ' -f1)
 ver() { "$@" 2>/dev/null | head -1 | tr -d '"' || echo unknown; }
 pkgver() { dpkg-query -W -f='${Version}' "$1" 2>/dev/null || echo none; }
+# The render node sway uses: WLR_RENDER_DRM_DEVICE, else the first render node
+# (wlroots' own choice when unset on a single-GPU box; set the variable on
+# multi-GPU machines to be sure).
+render_node() {
+  if [[ -n "${WLR_RENDER_DRM_DEVICE:-}" ]]; then echo "$WLR_RENDER_DRM_DEVICE"
+  else find /dev/dri -name "renderD*" 2>/dev/null | sort | head -1; fi
+}
+gpu_name() {
+  local out node pci
+  out=$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | head -1 | tr -d '"')
+  if [[ -n "$out" ]]; then echo "$out"; return; fi
+  node=$(render_node)
+  if [[ -n "$node" && -e "/sys/class/drm/${node##*/}/device" ]] && command -v lspci >/dev/null; then
+    pci=$(basename "$(readlink -f "/sys/class/drm/${node##*/}/device")")
+    out=$(lspci -s "$pci" 2>/dev/null | sed 's/^[^ ]* [^:]*: //' | tr -d '"')
+    if [[ -n "$out" ]]; then echo "$out"; return; fi
+  fi
+  out=$(vulkaninfo --summary 2>/dev/null | sed -n 's/^[[:space:]]*deviceName[[:space:]]*=[[:space:]]*//p' | head -1 | tr -d '"')
+  echo "${out:-unknown}"
+}
 GHOSTTY_BIN=$(command -v ghostty || echo /snap/bin/ghostty)
 cat >"$OUT/versions.json" <<EOF
 {
@@ -260,7 +288,8 @@ cat >"$OUT/versions.json" <<EOF
   "alacritty": "$(ver alacritty --version)",
   "alacritty_pkg": "$(pkgver alacritty)",
   "sway": "$(ver sway --version)",
-  "gpu": "$(ver nvidia-smi --query-gpu=name,driver_version --format=csv,noheader)",
+  "gpu": "$(gpu_name)",
+  "render_node": "$(render_node)",
   "kernel": "$(uname -r)"
 }
 EOF
@@ -337,6 +366,8 @@ chmod +x "$OUT/bin/inner.sh"
 now_ns() { date +%s%N; }
 
 # ---------------------------------------------------------------- launching
+ghostty_is_snap() { [[ "$(readlink -f "$GHOSTTY_BIN")" == /snap/* || "$GHOSTTY_BIN" == /snap/* ]]; }
+
 # launch TERM TITLE CMD... ; sets TERM_PID (the process that owns the window).
 launch() {
   local term="$1" title="$2"; shift 2
@@ -352,9 +383,24 @@ launch() {
       # Private bus: Ghostty resets GDK_DEBUG, dropping no-portals, and GTK
       # then waits on the session bus's desktop portal and never maps a
       # window. On an empty bus the portal lookup fails at once.
-      UBENCH_TOKEN="$title" dbus-run-session -- \
-        "$GHOSTTY_BIN" --config-default-files=false --config-file="$OUT/cfg/ghostty/config" \
-        -e "$OUT/run/$title.sh" >"$OUT/logs/$title.ghostty.log" 2>&1 &
+      #
+      # A snap build cannot run on a private bus: snap run asks the user's
+      # systemd (over the session bus) for a scope to track the app, the
+      # private bus has no systemd, and it exits with "cannot run snap
+      # applications". Snaps therefore use the real session bus, with the
+      # portal wait avoided by GTK_USE_PORTAL=0 and no single-instance D-Bus
+      # name (so the user's own Ghostty is not reused). Only gnome-terminal
+      # still needs the private bus, for its throwaway dconf.
+      if ghostty_is_snap; then
+        UBENCH_TOKEN="$title" GTK_USE_PORTAL=0 GDK_DEBUG=no-portals \
+          "$GHOSTTY_BIN" --gtk-single-instance=false --config-default-files=false \
+          --config-file="$OUT/cfg/ghostty/config" \
+          -e "$OUT/run/$title.sh" >"$OUT/logs/$title.ghostty.log" 2>&1 &
+      else
+        UBENCH_TOKEN="$title" dbus-run-session -- \
+          "$GHOSTTY_BIN" --config-default-files=false --config-file="$OUT/cfg/ghostty/config" \
+          -e "$OUT/run/$title.sh" >"$OUT/logs/$title.ghostty.log" 2>&1 &
+      fi
       TERM_PID=$!
       ;;
     alacritty)
@@ -460,7 +506,7 @@ wait_done() {
 resize_window() {
   local term="$1" win="$2" w="$3" h="$4"
   if [[ "$term" == ultty ]]; then
-    "$BIN/ulttyctl" resize "$w" "$h" >/dev/null
+    "$BIN/ulttyctl" --pid "$TERM_PID" resize "$w" "$h" >/dev/null
   elif [[ "$SESSION" == wayland ]]; then
     swaymsg "[con_id=$win] resize set $w px $h px" >/dev/null
   else
@@ -587,7 +633,7 @@ run_k2p() {
 new_tab() {
   local term="$1" title="$2"
   case "$term" in
-    ultty) "$BIN/ulttyctl" new-tab sleep 600 >/dev/null ;;
+    ultty) "$BIN/ulttyctl" --pid "$TERM_PID" new-tab sleep 600 >/dev/null ;;
     gnome-terminal)
       DBUS_SESSION_BUS_ADDRESS=$(tr '\0' '\n' <"/proc/$(owner_pid "$term" "$title")/environ" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p') \
         gnome-terminal --tab -- sleep 600 ;;

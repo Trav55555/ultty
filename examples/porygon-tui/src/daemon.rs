@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use ulttui::prelude::*;
 use ulttui::toast::Toast;
 use ulttui::widgets::{parse_unified_diff, DiffKind};
@@ -10,271 +10,32 @@ use crate::types::*;
 use crate::views::{format_clock, format_file_tree, format_timestamp, SplashScreen};
 use crate::{Msg, PorygonTui};
 
-#[derive(Deserialize)]
-struct StreamResponse {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    content: Option<String>,
-    response: Option<String>,
-    message: Option<String>,
-}
-
-#[derive(Serialize)]
-struct AskRequest {
-    prompt: String,
-}
-
-#[derive(Deserialize)]
-struct AskResponse {
-    response: Option<String>,
-    content: Option<String>,
-    message: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct StatusResponse {
-    cost_usd: Option<f64>,
-    budget_usd: Option<f64>,
-    pressure: Option<String>,
-    model: Option<String>,
-    context_quality: Option<String>,
-    step: Option<String>,
-    agent_name: Option<String>,
-    cpu_usage: Option<f64>,
-    ram_usage: Option<f64>,
-}
-
-pub async fn send_to_daemon(
-    client: &reqwest::Client,
-    url: &str,
-    message: &str,
-) -> Result<String, String> {
-    let response = client
-        .post(url)
-        .json(&AskRequest {
-            prompt: message.to_string(),
-        })
-        .timeout(Duration::from_secs(120))
-        .send()
-        .await
-        .map_err(|err| err.to_string())?;
-
-    if !response.status().is_success() {
-        return Err(format!("daemon returned {}", response.status()));
-    }
-
-    let body: AskResponse = response.json().await.map_err(|err| err.to_string())?;
-    Ok(body
-        .response
-        .or(body.content)
-        .or(body.message)
-        .unwrap_or_else(|| "(empty response)".to_string()))
-}
-
-pub fn stream_from_daemon(
-    ws_url: String,
-    http_url: String,
-    client: reqwest::Client,
-    message: String,
-) -> impl futures_util::Stream<Item = Msg> + Send + 'static {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-    futures_util::stream::unfold(rx, move |mut rx| {
-        let started = started.clone();
-        let tx = tx.clone();
-        let ws_url = ws_url.clone();
-        let http_url = http_url.clone();
-        let client = client.clone();
-        let message = message.clone();
-        async move {
-            if !started.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                tokio::spawn(async move {
-                    if let Err(err) =
-                        run_stream(tx.clone(), &ws_url, &http_url, &client, &message).await
-                    {
-                        let _ = tx.send(Msg::StreamError(err));
-                    }
-                });
-            }
-
-            rx.recv().await.map(|msg| (msg, rx))
-        }
-    })
-}
-
-pub async fn run_stream(
-    tx: tokio::sync::mpsc::UnboundedSender<Msg>,
-    ws_url: &str,
-    http_url: &str,
-    client: &reqwest::Client,
-    message: &str,
-) -> Result<(), String> {
-    match try_websocket_stream(ws_url, message, &tx).await {
-        Ok(()) => Ok(()),
-        Err(_) => match send_to_daemon(client, http_url, message).await {
-            Ok(response) => {
-                let _ = tx.send(Msg::DaemonResponse(response));
-                Ok(())
-            }
-            Err(err) => {
-                let _ = tx.send(Msg::DaemonError(err));
-                Ok(())
-            }
-        },
-    }
-}
-
-pub async fn abort_daemon_stream(client: &reqwest::Client, url: &str) -> Result<(), String> {
-    let response = client
-        .post(url)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-        .map_err(|err| err.to_string())?;
-
-    if response.status().is_success()
-        || response.status() == reqwest::StatusCode::NOT_FOUND
-        || response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED
-    {
-        Ok(())
-    } else {
-        Err(format!("abort endpoint returned {}", response.status()))
-    }
-}
-
-pub async fn try_websocket_stream(
-    ws_url: &str,
-    message: &str,
-    tx: &tokio::sync::mpsc::UnboundedSender<Msg>,
-) -> Result<(), String> {
-    use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message as WsMessage;
-
-    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
-        .await
-        .map_err(|err| err.to_string())?;
-
-    let payload = serde_json::json!({ "prompt": message });
-    ws.send(WsMessage::Text(payload.to_string()))
-        .await
-        .map_err(|err| err.to_string())?;
-
-    let mut received_payload = false;
-
-    while let Some(next_msg) = ws.next().await {
-        match next_msg {
-            Ok(WsMessage::Close(_)) => {
-                let _ = tx.send(Msg::StreamComplete);
-                return Ok(());
-            }
-            Ok(frame) => {
-                let text = match frame.into_text() {
-                    Ok(text) => text,
-                    Err(_) => continue,
-                };
-
-                if let Ok(parsed) = serde_json::from_str::<StreamResponse>(&text) {
-                    match parsed.kind.as_deref() {
-                        Some("token") => {
-                            let content = parsed
-                                .content
-                                .or(parsed.response)
-                                .or(parsed.message)
-                                .unwrap_or_default();
-                            if !content.is_empty() {
-                                received_payload = true;
-                                if tx.send(Msg::StreamToken(content)).is_err() {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                        Some("done") => {
-                            let _ = tx.send(Msg::StreamComplete);
-                            return Ok(());
-                        }
-                        Some("error") => {
-                            let err = parsed.message.unwrap_or_else(|| "stream error".to_string());
-                            let _ = tx.send(Msg::StreamError(err));
-                            return Ok(());
-                        }
-                        _ => {
-                            let content = parsed
-                                .content
-                                .or(parsed.response)
-                                .or(parsed.message)
-                                .unwrap_or_default();
-                            if !content.is_empty() {
-                                received_payload = true;
-                                if tx.send(Msg::StreamToken(content)).is_err() {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    received_payload = true;
-                    if tx.send(Msg::StreamToken(text.to_string())).is_err() {
-                        return Ok(());
-                    }
-                }
-            }
-            Err(err) => {
-                if received_payload {
-                    let _ = tx.send(Msg::StreamError(err.to_string()));
-                    return Ok(());
-                }
-                return Err(err.to_string());
-            }
-        }
-    }
-
-    if received_payload {
-        let _ = tx.send(Msg::StreamComplete);
-        Ok(())
-    } else {
-        Err("websocket stream ended without response".to_string())
-    }
-}
-
-pub async fn check_connection(client: &reqwest::Client, daemon_url: &str) -> bool {
-    client
-        .get(daemon_url)
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await
-        .is_ok()
-}
-
 pub async fn fetch_status(
     client: &reqwest::Client,
     daemon_url: &str,
 ) -> anyhow::Result<AgentStatus> {
-    let url = format!("{daemon_url}/api/status");
-    let body: StatusResponse = client
+    let url = format!("{}/status/tui", daemon_url.trim_end_matches('/'));
+    let body: serde_json::Value = client
         .get(url)
         .timeout(Duration::from_secs(2))
         .send()
         .await?
+        .error_for_status()?
         .json()
         .await?;
-
-    let mut status = AgentStatus::default();
-    status.cost_usd = body.cost_usd.unwrap_or(status.cost_usd);
-    status.budget_usd = body.budget_usd.unwrap_or(status.budget_usd);
-    status.pressure = body.pressure.unwrap_or(status.pressure);
-    status.model = body.model.unwrap_or(status.model);
-    status.context_quality = body.context_quality.unwrap_or(status.context_quality);
-    status.step = body.step.unwrap_or(status.step);
-    status.agent_name = body.agent_name.unwrap_or(status.agent_name);
-
-    // Get system stats. Daemon-reported values are untrusted input: clamp
-    // them into 0..=1 so the sidebar bars never underflow.
+    anyhow::ensure!(body.get("model").is_some(), "Invalid daemon TUI status");
     let (cpu, ram) = get_system_stats();
-    status.cpu_usage = unit_fraction(body.cpu_usage.unwrap_or(cpu));
-    status.ram_usage = unit_fraction(body.ram_usage.unwrap_or(ram));
-
-    Ok(status)
+    Ok(AgentStatus {
+        model: body["model"]["name"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string(),
+        context_quality: "unknown".into(),
+        pressure: "unknown".into(),
+        cpu_usage: unit_fraction(cpu),
+        ram_usage: unit_fraction(ram),
+        ..AgentStatus::default()
+    })
 }
 
 /// Clamp a usage value into `0.0..=1.0`, treating NaN as zero.
@@ -430,40 +191,6 @@ fn wmo_description(code: i32) -> (String, String) {
         95..=99 => ("⛈".into(), "Thunderstorm".into()),
         _ => ("🌡".into(), "Unknown".into()),
     }
-}
-
-pub async fn fetch_pending_approval(
-    client: &reqwest::Client,
-    url: &str,
-) -> anyhow::Result<Option<ApprovalRequest>> {
-    let response = client
-        .get(url)
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await?;
-
-    if response.status() == reqwest::StatusCode::NO_CONTENT
-        || response.status() == reqwest::StatusCode::NOT_FOUND
-    {
-        return Ok(None);
-    }
-
-    let request: ApprovalRequest = response.json().await?;
-    Ok(Some(request))
-}
-
-pub async fn submit_approval(
-    client: &reqwest::Client,
-    url: &str,
-    approved: bool,
-) -> anyhow::Result<()> {
-    client
-        .post(url)
-        .json(&serde_json::json!({ "approved": approved }))
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await?;
-    Ok(())
 }
 
 pub async fn fetch_sessions(
@@ -1273,7 +1000,7 @@ impl PorygonTui {
         )
     }
 
-    fn begin_stream_metrics(&mut self) {
+    pub(crate) fn begin_stream_metrics(&mut self) {
         let now = Instant::now();
         self.stream_started_at = Some(now);
         self.first_token_at = None;
@@ -1294,7 +1021,7 @@ impl PorygonTui {
         self.last_token_at = Some(now);
     }
 
-    fn finish_stream_metrics(&mut self) -> Option<StreamPerfSummary> {
+    pub(crate) fn finish_stream_metrics(&mut self) -> Option<StreamPerfSummary> {
         let started = self.stream_started_at.take()?;
         let finished = Instant::now();
         let total_ms = finished.duration_since(started).as_millis() as u64;
@@ -1353,73 +1080,30 @@ impl PorygonTui {
                 }
             }
             Msg::SendMessage => {
-                if self.input.current_value().is_empty() || self.waiting_response {
+                let text = self.input.current_value().to_string();
+                if text.trim().is_empty() {
                     return Cmd::none();
                 }
-
-                let user_text = self.input.submit_value();
-                self.suggestions.clear();
-                self.messages.push(ChatMessage {
-                    role: "user".into(),
-                    content: user_text.clone(),
-                    timestamp: format_timestamp(),
-                });
-                self.update_scroll_dimensions();
-                self.chat_scroll.scroll_to_bottom();
-
-                // Check if this is a slash command
-                if user_text.starts_with('/') {
-                    if let Some(action) = self.command_registry.parse(&user_text) {
+                if text.starts_with('/') {
+                    if let Some(action) = self.command_registry.parse(&text) {
+                        self.input.submit_value();
+                        self.suggestions.clear();
                         return self.handle_command_action(action);
                     }
+                    return Cmd::ShowToast(Toast::warning("Unknown command; draft preserved."));
                 }
-
-                if !self.connected {
-                    self.messages.push(ChatMessage {
-                        role: "system".into(),
-                        content:
-                            "No daemon connected. Messages will be sent once a daemon is available."
-                                .into(),
-                        timestamp: format_timestamp(),
-                    });
-                    self.auto_scroll_chat();
-                    return Cmd::none();
-                }
-
-                self.waiting_response = true;
-                self.error = None;
-                self.status.step = "streaming daemon response".into();
-                self.streaming_content = String::new();
-                self.stream_token_count = 0;
-                self.begin_stream_metrics();
-
-                self.messages.push(ChatMessage {
-                    role: "assistant".into(),
-                    content: String::new(),
-                    timestamp: format_timestamp(),
-                });
-
-                let ws_url = self
-                    .daemon_url
-                    .replace("http://", "ws://")
-                    .replace("https://", "wss://");
-                let ws_url = format!("{ws_url}/agent/stream");
-                let http_url = format!("{}/api/ask", self.daemon_url);
-                let client = self.client.clone();
-
-                Cmd::subscribe(
-                    "agent-stream",
-                    stream_from_daemon(ws_url, http_url, client, user_text),
-                )
+                self.start_native_turn()
             }
             Msg::PollConnection => {
-                let url = self.daemon_url.clone();
-                let client = self.client.clone();
-                Cmd::spawn(
-                    async move { Msg::ConnectionChecked(check_connection(&client, &url).await) },
-                )
+                let Some(connection) = self.connection.clone() else {
+                    return Cmd::none();
+                };
+                Cmd::spawn(async move { Msg::ConnectionChecked(connection.check().await) })
             }
             Msg::PollStatus => {
+                if !self.connected {
+                    return Cmd::none();
+                }
                 let url = self.daemon_url.clone();
                 let client = self.client.clone();
                 Cmd::spawn(async move {
@@ -1437,70 +1121,52 @@ impl PorygonTui {
                 })
             }
             Msg::PollApprovals => {
-                let url = format!("{}/api/approvals/pending", self.daemon_url);
-                let client = self.client.clone();
+                if !self.connected || self.waiting_response || self.pending_approval.is_some() {
+                    return Cmd::none();
+                }
+                let Some(connection) = self.connection.clone() else {
+                    return Cmd::none();
+                };
                 Cmd::spawn(async move {
-                    match fetch_pending_approval(&client, &url).await {
-                        Ok(Some(request)) => Msg::ApprovalReceived(request),
-                        Ok(None) => Msg::NoApprovalsPending,
-                        Err(_) => Msg::NoApprovalsPending,
+                    match crate::approval_client::fetch_pending(
+                        &connection.client,
+                        &connection.base_url,
+                        20,
+                    )
+                    .await
+                    {
+                        Ok(list) => match list.items.into_iter().next() {
+                            Some(item) => Msg::ApprovalReceived(
+                                ApprovalRequest {
+                                    id: item.id,
+                                    tool_name: item
+                                        .context
+                                        .tool_name
+                                        .clone()
+                                        .unwrap_or(item.source),
+                                    params: serde_json::to_value(&item.context).unwrap_or_default(),
+                                    risk_score: -1.0,
+                                    reasoning: item.objective,
+                                    blast_radius: "unknown".into(),
+                                    reversible: None,
+                                },
+                                false,
+                            ),
+                            None => Msg::NoApprovalsPending,
+                        },
+                        Err(error) => Msg::ApprovalLoadFailed(error.to_string()),
                     }
                 })
-            }
-            Msg::DaemonResponse(response) => {
-                let _ = self.finish_stream_metrics();
-                self.waiting_response = false;
-                self.status.step = "idle".into();
-                if let Some(last) = self.messages.last_mut() {
-                    if last.role == "assistant" && last.content.is_empty() {
-                        last.content = response;
-                    } else {
-                        self.messages.push(ChatMessage {
-                            role: "assistant".into(),
-                            content: response,
-                            timestamp: format_timestamp(),
-                        });
-                    }
-                } else {
-                    self.messages.push(ChatMessage {
-                        role: "assistant".into(),
-                        content: response,
-                        timestamp: format_timestamp(),
-                    });
-                }
-                self.streaming_content.clear();
-                self.stream_token_count = 0;
-                self.auto_scroll_chat();
-                Cmd::none()
-            }
-            Msg::DaemonError(err) => {
-                let _ = self.finish_stream_metrics();
-                self.waiting_response = false;
-                self.status.step = "idle".into();
-                self.error = Some(err.clone());
-                if self
-                    .messages
-                    .last()
-                    .is_some_and(|msg| msg.role == "assistant" && msg.content.is_empty())
-                {
-                    self.messages.pop();
-                }
-                self.messages.push(ChatMessage {
-                    role: "system".into(),
-                    content: format!("Error: {err}"),
-                    timestamp: format_timestamp(),
-                });
-                self.streaming_content.clear();
-                self.stream_token_count = 0;
-                self.auto_scroll_chat();
-                Cmd::ShowToast(Toast::error(format!("Request failed: {err}")))
             }
             Msg::StreamToken(token) => {
                 self.note_stream_token_metric();
                 self.streaming_content.push_str(&token);
                 self.stream_token_count += 1;
 
-                if let Some(last) = self.messages.last_mut() {
+                if let Some(last) = self
+                    .current_response
+                    .and_then(|index| self.messages.get_mut(index))
+                {
                     if last.role == "assistant" {
                         last.content.clone_from(&self.streaming_content);
                     }
@@ -1509,97 +1175,39 @@ impl PorygonTui {
                 self.auto_scroll_chat();
                 Cmd::none()
             }
-            Msg::StreamComplete => {
-                let _ = self.finish_stream_metrics();
-                self.waiting_response = false;
-                self.status.step = "idle".into();
-                self.streaming_content.clear();
-                self.stream_token_count = 0;
-                self.auto_scroll_chat();
-                Cmd::unsubscribe("agent-stream")
-            }
-            Msg::StreamError(err) => {
-                let _ = self.finish_stream_metrics();
-                self.waiting_response = false;
-                self.status.step = "idle".into();
-                self.error = Some(err.clone());
-                self.messages.push(ChatMessage {
-                    role: "system".into(),
-                    content: format!("Error: {err}"),
-                    timestamp: format_timestamp(),
-                });
-                self.streaming_content.clear();
-                self.stream_token_count = 0;
-                self.auto_scroll_chat();
-                Cmd::batch(vec![
-                    Cmd::unsubscribe("agent-stream"),
-                    Cmd::ShowToast(Toast::error(format!("Stream failed: {err}"))),
-                ])
-            }
-            Msg::AbortStream => {
-                let visual_stop_start = Instant::now();
-                let _ = self.finish_stream_metrics();
-                self.waiting_response = false;
-                self.status.step = "idle (aborted)".into();
-                self.streaming_content.clear();
-                self.stream_token_count = 0;
-                let visual_stop_ms = visual_stop_start.elapsed().as_millis() as u64;
-                Self::push_metric(&mut self.cancel_visual_stop_history_ms, visual_stop_ms);
-                let client = self.client.clone();
-                let abort_url = format!("{}/agent/abort", self.daemon_url);
-                Cmd::batch(vec![
-                    Cmd::unsubscribe("agent-stream"),
-                    Cmd::spawn(async move {
-                        Msg::StreamAbortAck(abort_daemon_stream(&client, &abort_url).await)
-                    }),
-                    Cmd::ShowToast(Toast::warning("Stream aborted")),
-                ])
-            }
-            Msg::StreamAbortAck(Ok(())) => Cmd::none(),
-            Msg::StreamAbortAck(Err(err)) => {
-                self.error = Some(err.clone());
-                Cmd::ShowToast(Toast::warning(format!("Abort request warning: {err}")))
-            }
-            Msg::ConnectionChecked(ok) => {
-                let was_connected = self.connected;
-                self.connected = ok;
-                if !ok {
-                    self.error = Some("Cannot reach daemon".into());
+            Msg::NativeEvent(id, epoch, event) => {
+                if epoch != self.run_epoch {
+                    return Cmd::none();
                 }
-                if ok && !was_connected {
-                    self.messages.push(ChatMessage {
-                        role: "system".into(),
-                        content: format!("Daemon connected at `{}`.", self.daemon_url),
-                        timestamp: format_timestamp(),
-                    });
-                    self.auto_scroll_chat();
-                    Cmd::ShowToast(Toast::success("Daemon connected"))
-                } else if !ok && was_connected {
-                    self.messages.push(ChatMessage {
-                        role: "system".into(),
-                        content: "Daemon disconnected.".into(),
-                        timestamp: format_timestamp(),
-                    });
-                    self.auto_scroll_chat();
-                    Cmd::ShowToast(Toast::warning("Daemon disconnected"))
-                } else if !ok && !was_connected && !self.started_connection_msg {
-                    self.started_connection_msg = true;
-                    self.messages.push(ChatMessage {
-                        role: "system".into(),
-                        content: format!(
-                            "Running in **standalone mode** (no daemon at `{}`).\n\n\
-                            To connect a daemon:\n\n\
-                            ```\n\
-                            porygon serve\n\
-                            PORYGON_URL=http://host:port porygon tui\n\
-                            ```\n\n\
-                            The sidebar will update when a daemon connects.",
-                            self.daemon_url
-                        ),
-                        timestamp: format_timestamp(),
-                    });
-                    self.auto_scroll_chat();
+                self.native_event(id, event)
+            }
+            Msg::InspectRun => self.inspect_run(false),
+            Msg::RunObserved(id, epoch, result) => {
+                if self.waiting_response || epoch != self.run_epoch {
                     Cmd::none()
+                } else {
+                    self.observe_run(id, result)
+                }
+            }
+            Msg::StopObserved(id, epoch, result) => {
+                if epoch != self.run_epoch {
+                    return Cmd::none();
+                }
+                self.observe_run(id, result)
+            }
+            Msg::AbortStream => self.stop_native_run(),
+            Msg::ConnectionChecked(result) => {
+                let was_connected = self.connected;
+                self.connected = result.is_ok();
+                if let Err(error) = result {
+                    self.error = Some(error);
+                }
+                if self.connected && !was_connected {
+                    if self.current_run.is_some() {
+                        return Cmd::message(Msg::InspectRun);
+                    }
+                    self.status.step = "connected".into();
+                    Cmd::ShowToast(Toast::success("Authenticated daemon connection"))
                 } else {
                     Cmd::none()
                 }
@@ -1613,7 +1221,7 @@ impl PorygonTui {
                 self.status.agent_name = status.agent_name;
                 self.status.cpu_usage = status.cpu_usage;
                 self.status.ram_usage = status.ram_usage;
-                if !self.waiting_response {
+                if !self.waiting_response && self.current_run.is_none() {
                     self.status.step = status.step;
                 }
                 Cmd::none()
@@ -1633,7 +1241,7 @@ impl PorygonTui {
             // a third-party geolocation service.
             Msg::PollWeather if !self.weather_enabled => Cmd::none(),
             Msg::PollWeather => {
-                let client = self.client.clone();
+                let client = reqwest::Client::new();
                 Cmd::spawn(async move {
                     match fetch_weather(&client).await {
                         Ok(data) => Msg::WeatherFetched(data),
@@ -1646,38 +1254,97 @@ impl PorygonTui {
                 Cmd::none()
             }
             Msg::WeatherFailed => Cmd::none(),
-            Msg::ApprovalReceived(request) => {
-                self.tool_calls.push(ToolCall {
-                    name: request.tool_name.clone(),
-                    args: serde_json::to_string_pretty(&request.params).unwrap_or_default(),
-                    status: ToolStatus::Pending,
-                    result: None,
-                });
+            Msg::ApprovalReceived(request, is_stream) => {
+                if !is_stream && self.waiting_response {
+                    return Cmd::none();
+                }
+                if self.pending_approval.is_some() {
+                    if is_stream {
+                        self.queued_stream_approvals.push_back(request);
+                    }
+                    return Cmd::none();
+                }
+                self.approval_is_stream = is_stream;
                 self.pending_approval = Some(request);
                 self.show_approval_modal = true;
                 Cmd::none()
             }
-            Msg::ApprovalDecision(approved) => {
-                self.show_approval_modal = false;
-                if let Some(last) = self.tool_calls.last_mut() {
-                    last.status = if approved {
-                        ToolStatus::Approved
-                    } else {
-                        ToolStatus::Rejected
-                    };
+            Msg::ApprovalDecision(approved) => self.decide_approval(approved),
+            Msg::ApprovalSubmitted(id, result) => {
+                if self.pending_approval.as_ref().is_none_or(|r| r.id != id) {
+                    return Cmd::none();
                 }
-                if let Some(request) = self.pending_approval.take() {
-                    let url = format!("{}/api/approvals/{}/decide", self.daemon_url, request.id);
-                    let client = self.client.clone();
-                    Cmd::spawn(async move {
-                        let _ = submit_approval(&client, &url, approved).await;
-                        Msg::ApprovalSubmitted
-                    })
-                } else {
-                    Cmd::none()
+                match result {
+                    Ok(()) => {
+                        self.approval_in_flight = false;
+                        self.pending_approval = None;
+                        self.show_approval_modal = false;
+                        self.approval_is_stream = false;
+                        Cmd::ShowToast(Toast::success(
+                            "Daemon confirmed the decision; execution may still be pending.",
+                        ))
+                    }
+                    Err(error) => {
+                        self.approval_in_flight = true;
+                        self.error = Some(error.clone());
+                        Cmd::ShowToast(Toast::error(format!(
+                            "Decision unconfirmed. R refreshes; Escape closes. {error}"
+                        )))
+                    }
                 }
             }
-            Msg::ApprovalSubmitted => Cmd::none(),
+            Msg::DismissApproval => {
+                self.show_approval_modal = false;
+                Cmd::none()
+            }
+            Msg::RefreshApproval => {
+                let (Some(request), Some(connection)) =
+                    (self.pending_approval.as_ref(), self.connection.clone())
+                else {
+                    return Cmd::none();
+                };
+                if self.approval_is_stream {
+                    return Cmd::message(Msg::InspectRun);
+                }
+                let id = request.id.clone();
+                Cmd::spawn(async move {
+                    let result = crate::approval_client::fetch_pending(
+                        &connection.client,
+                        &connection.base_url,
+                        200,
+                    )
+                    .await
+                    .map(|queue| {
+                        queue.items.iter().any(|item| item.id == id)
+                            || queue.count > queue.items.len() as u64
+                    })
+                    .map_err(|e| e.to_string());
+                    Msg::ApprovalReconciled(id, result)
+                })
+            }
+            Msg::ApprovalReconciled(id, result) => {
+                if self.pending_approval.as_ref().is_none_or(|r| r.id != id) {
+                    return Cmd::none();
+                }
+                match result {
+                    Ok(false) => {
+                        self.pending_approval = None;
+                        self.show_approval_modal = false;
+                        self.approval_in_flight = false;
+                        Cmd::ShowToast(Toast::warning(
+                            "No longer pending. Inspect the run for its outcome.",
+                        ))
+                    }
+                    Ok(true) => Cmd::ShowToast(Toast::warning(
+                        "Still pending; an unconfirmed decision cannot be retried safely.",
+                    )),
+                    Err(error) => Cmd::ShowToast(Toast::error(error)),
+                }
+            }
+            Msg::ApprovalLoadFailed(error) => {
+                self.error = Some(error);
+                Cmd::none()
+            }
             Msg::NoApprovalsPending => Cmd::none(),
             Msg::SessionsFetched(sessions) => {
                 let mut table = String::from("**Saved Sessions:**\n\n");
@@ -1706,6 +1373,12 @@ impl PorygonTui {
                 Cmd::none()
             }
             Msg::SessionResumed(messages) => {
+                if self.run_unresolved || self.pending_approval.is_some() {
+                    return Cmd::ShowToast(Toast::warning(
+                        "Resolve the current run before loading another session.",
+                    ));
+                }
+                self.current_response = None;
                 self.messages = messages;
                 self.messages.insert(
                     0,
@@ -2428,6 +2101,7 @@ impl PorygonTui {
                 Cmd::batch(cmds)
             }
             CommandAction::ClearChat => {
+                self.current_response = None;
                 self.messages.truncate(1);
                 self.auto_scroll_chat();
                 Cmd::ShowToast(Toast::success("Chat cleared"))
@@ -2452,6 +2126,11 @@ impl PorygonTui {
                 })
             }
             CommandAction::ResumeSession { id } => {
+                if self.run_unresolved || self.pending_approval.is_some() {
+                    return Cmd::ShowToast(Toast::warning(
+                        "Resolve the current run before loading another session.",
+                    ));
+                }
                 if !self.connected {
                     self.messages.push(ChatMessage {
                         role: "system".into(),
@@ -2768,11 +2447,39 @@ impl PorygonTui {
             CommandAction::BenchmarkDiffWidget => {
                 Cmd::message(Msg::DiffBenchReady(self.benchmark_diff_widget()))
             }
-            CommandAction::ReconnectRuntime => {
-                let mut cmds = vec![Cmd::message(Msg::PollConnection)];
-                cmds.push(self.handle_command_action(CommandAction::FetchMcpStatus));
-                cmds.push(self.handle_command_action(CommandAction::FetchModels));
-                Cmd::batch(cmds)
+            CommandAction::ReconnectRuntime => Cmd::batch(vec![
+                Cmd::message(Msg::PollConnection),
+                Cmd::message(Msg::InspectRun),
+            ]),
+            CommandAction::ShowApprovals => {
+                if self.pending_approval.is_some() {
+                    self.show_approval_modal = true;
+                    Cmd::none()
+                } else {
+                    Cmd::message(Msg::PollApprovals)
+                }
+            }
+            CommandAction::AttachRun { id } => {
+                if self.pending_approval.is_some() || self.approval_in_flight {
+                    return Cmd::ShowToast(Toast::warning(
+                        "Resolve or refresh the pending approval before selecting another run.",
+                    ));
+                }
+                if self.waiting_response {
+                    return Cmd::ShowToast(Toast::warning(
+                        "Stop the active stream before selecting another run.",
+                    ));
+                }
+                self.current_run = Some(id);
+                self.run_epoch = self.run_epoch.wrapping_add(1);
+                self.current_response = None;
+                self.run_can_continue = false;
+                self.conversation_id = None;
+                self.run_unresolved = true;
+                self.approval_is_stream = false;
+                self.pending_approval = None;
+                self.show_approval_modal = false;
+                self.inspect_run(false)
             }
             CommandAction::FetchTools => {
                 if !self.connected {
@@ -3145,122 +2852,12 @@ impl PorygonTui {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
-    use std::time::Duration;
-
-    use futures_util::{SinkExt, StreamExt};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-    use tokio_tungstenite::accept_async;
-    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    use super::PorygonTui;
+    use crate::types::ChatMessage;
+    use crate::Msg;
     use ulttui::cmd::Cmd;
     use ulttui::event::Event;
     use ulttui::prelude::Application;
-
-    use crate::types::ChatMessage;
-    use crate::Msg;
-
-    use super::{abort_daemon_stream, stream_from_daemon, PorygonTui};
-
-    struct FakeWsDaemon {
-        url: String,
-        handle: tokio::task::JoinHandle<()>,
-    }
-
-    struct FakeHttpDaemon {
-        url: String,
-        abort_seen: Arc<AtomicBool>,
-        handle: tokio::task::JoinHandle<()>,
-    }
-
-    async fn spawn_fake_ws_daemon(slow: bool) -> FakeWsDaemon {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind fake websocket daemon");
-        let addr = listener.local_addr().expect("fake websocket local addr");
-        let handle = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("accept websocket client");
-            let mut ws = accept_async(stream)
-                .await
-                .expect("accept websocket handshake");
-            let _ = ws.next().await.expect("prompt frame should arrive");
-
-            ws.send(WsMessage::Text(
-                serde_json::json!({"type": "token", "content": "hello"}).to_string(),
-            ))
-            .await
-            .expect("send first token");
-
-            if slow {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                return;
-            }
-
-            ws.send(WsMessage::Text(
-                serde_json::json!({"type": "token", "content": " world"}).to_string(),
-            ))
-            .await
-            .expect("send second token");
-            ws.send(WsMessage::Text(
-                serde_json::json!({"type": "done"}).to_string(),
-            ))
-            .await
-            .expect("send done");
-        });
-
-        FakeWsDaemon {
-            url: format!("ws://{addr}/agent/stream"),
-            handle,
-        }
-    }
-
-    async fn spawn_fake_http_daemon() -> FakeHttpDaemon {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind fake http daemon");
-        let addr = listener.local_addr().expect("fake http local addr");
-        let abort_seen = Arc::new(AtomicBool::new(false));
-        let abort_seen_for_task = abort_seen.clone();
-        let handle = tokio::spawn(async move {
-            loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
-                    break;
-                };
-                let abort_seen = abort_seen_for_task.clone();
-                tokio::spawn(async move {
-                    let mut buf = [0u8; 4096];
-                    let n = stream.read(&mut buf).await.expect("read fake http request");
-                    let request = String::from_utf8_lossy(&buf[..n]);
-                    let body = if request.starts_with("POST /api/ask") {
-                        r#"{"response":"fallback response"}"#
-                    } else {
-                        if request.starts_with("POST /agent/abort") {
-                            abort_seen.store(true, Ordering::SeqCst);
-                        }
-                        "{}"
-                    };
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    stream
-                        .write_all(response.as_bytes())
-                        .await
-                        .expect("write fake http response");
-                });
-            }
-        });
-
-        FakeHttpDaemon {
-            url: format!("http://{addr}"),
-            abort_seen,
-            handle,
-        }
-    }
 
     fn extract_ms(line: &str) -> Option<u64> {
         let idx = line.find(": ")?;
@@ -3313,6 +2910,7 @@ mod tests {
             content: String::new(),
             timestamp: "now".to_string(),
         });
+        app.current_response = Some(app.messages.len() - 1);
 
         let cmd = app.update(Msg::StreamToken("hello".to_string()));
 
@@ -3326,54 +2924,6 @@ mod tests {
     }
 
     #[test]
-    fn stream_complete_unsubscribes_and_preserves_partial_response() {
-        let mut app = PorygonTui::new();
-        app.waiting_response = true;
-        app.streaming_content = "partial".to_string();
-        app.stream_token_count = 1;
-        app.messages.push(ChatMessage {
-            role: "assistant".to_string(),
-            content: "partial".to_string(),
-            timestamp: "now".to_string(),
-        });
-
-        let cmd = app.update(Msg::StreamComplete);
-
-        assert!(!app.waiting_response);
-        assert_eq!(app.status.step, "idle");
-        assert!(app.streaming_content.is_empty());
-        assert_eq!(app.stream_token_count, 0);
-        assert_eq!(
-            app.messages.last().map(|message| message.content.as_str()),
-            Some("partial")
-        );
-        match cmd {
-            Cmd::Unsubscribe { id } => assert_eq!(id, "agent-stream"),
-            _ => panic!("expected stream unsubscribe command"),
-        }
-    }
-
-    #[test]
-    fn daemon_response_fallback_fills_empty_stream_placeholder() {
-        let mut app = PorygonTui::new();
-        app.waiting_response = true;
-        app.messages.push(ChatMessage {
-            role: "assistant".to_string(),
-            content: String::new(),
-            timestamp: "now".to_string(),
-        });
-
-        let cmd = app.update(Msg::DaemonResponse("fallback answer".to_string()));
-
-        assert!(matches!(cmd, Cmd::None));
-        assert!(!app.waiting_response);
-        assert_eq!(
-            app.messages.last().map(|message| message.content.as_str()),
-            Some("fallback answer")
-        );
-    }
-
-    #[test]
     fn ctrl_c_quit_event_aborts_active_stream() {
         let mut app = PorygonTui::new();
         app.waiting_response = true;
@@ -3382,38 +2932,6 @@ mod tests {
             app.handle_event(&Event::Quit),
             Some(Msg::AbortStream)
         ));
-    }
-
-    #[test]
-    fn abort_stream_unsubscribes_and_preserves_partial_transcript() {
-        let mut app = PorygonTui::new();
-        app.waiting_response = true;
-        app.streaming_content = "partial answer".to_string();
-        app.stream_token_count = 2;
-        app.messages.push(ChatMessage {
-            role: "assistant".to_string(),
-            content: "partial answer".to_string(),
-            timestamp: "now".to_string(),
-        });
-
-        let cmd = app.update(Msg::AbortStream);
-
-        assert!(!app.waiting_response);
-        assert_eq!(app.status.step, "idle (aborted)");
-        assert!(app.streaming_content.is_empty());
-        assert_eq!(app.stream_token_count, 0);
-        assert_eq!(
-            app.messages.last().map(|message| message.content.as_str()),
-            Some("partial answer")
-        );
-        match cmd {
-            Cmd::Batch(cmds) => {
-                assert!(cmds
-                    .into_iter()
-                    .any(|cmd| matches!(cmd, Cmd::Unsubscribe { id } if id == "agent-stream")));
-            }
-            _ => panic!("expected abort to return a batch command"),
-        }
     }
 
     #[test]
@@ -3442,7 +2960,7 @@ mod tests {
 
         assert_eq!(
             app.status_key_hint(),
-            " Enter:send Esc/Ctrl+C:abort PgUp/Dn:scroll "
+            " Draft preserved Esc/Ctrl+C:stop PgUp/Dn:scroll "
         );
     }
 
@@ -3460,107 +2978,5 @@ mod tests {
         app.terminal_width = 100;
 
         assert!(app.should_show_sidebar());
-    }
-
-    #[test]
-    fn porygon_stream_smoke_fake_daemon_tokens_complete_and_update_loop() {
-        let rt = tokio::runtime::Runtime::new().expect("test runtime");
-        rt.block_on(async {
-            let fake_ws = spawn_fake_ws_daemon(false).await;
-            let fake_http = spawn_fake_http_daemon().await;
-            let client = reqwest::Client::new();
-            let mut stream = Box::pin(stream_from_daemon(
-                fake_ws.url.clone(),
-                format!("{}/api/ask", fake_http.url),
-                client,
-                "stream please".to_string(),
-            ));
-            let mut app = PorygonTui::new();
-            app.waiting_response = true;
-            app.messages.push(ChatMessage {
-                role: "assistant".to_string(),
-                content: String::new(),
-                timestamp: "now".to_string(),
-            });
-
-            while let Some(msg) = tokio::time::timeout(Duration::from_secs(2), stream.next())
-                .await
-                .expect("stream message timeout")
-            {
-                let done = matches!(msg, Msg::StreamComplete);
-                let cmd = app.update(msg);
-                if done {
-                    assert!(matches!(cmd, Cmd::Unsubscribe { id } if id == "agent-stream"));
-                    break;
-                }
-            }
-
-            assert!(!app.waiting_response);
-            assert_eq!(app.stream_token_count, 0);
-            assert_eq!(
-                app.messages.last().map(|message| message.content.as_str()),
-                Some("hello world")
-            );
-
-            fake_ws.handle.await.expect("fake websocket task");
-            fake_http.handle.abort();
-        });
-    }
-
-    #[test]
-    fn porygon_stream_smoke_fake_daemon_slow_stream_abort() {
-        let rt = tokio::runtime::Runtime::new().expect("test runtime");
-        rt.block_on(async {
-            let fake_ws = spawn_fake_ws_daemon(true).await;
-            let fake_http = spawn_fake_http_daemon().await;
-            let client = reqwest::Client::new();
-            let mut stream = Box::pin(stream_from_daemon(
-                fake_ws.url.clone(),
-                format!("{}/api/ask", fake_http.url),
-                client.clone(),
-                "slow stream please".to_string(),
-            ));
-            let mut app = PorygonTui::new();
-            app.daemon_url = fake_http.url.clone();
-            app.client = client.clone();
-            app.waiting_response = true;
-            app.messages.push(ChatMessage {
-                role: "assistant".to_string(),
-                content: String::new(),
-                timestamp: "now".to_string(),
-            });
-
-            let first_msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
-                .await
-                .expect("first stream token timeout")
-                .expect("stream should yield first token");
-            assert!(matches!(first_msg, Msg::StreamToken(_)));
-            let _ = app.update(first_msg);
-
-            let cmd = app.update(Msg::AbortStream);
-            match cmd {
-                Cmd::Batch(cmds) => {
-                    assert!(cmds
-                        .into_iter()
-                        .any(|cmd| matches!(cmd, Cmd::Unsubscribe { id } if id == "agent-stream")));
-                }
-                _ => panic!("expected abort to return a batch command"),
-            }
-
-            abort_daemon_stream(&client, &format!("{}/agent/abort", fake_http.url))
-                .await
-                .expect("fake abort endpoint should accept abort");
-
-            assert!(!app.waiting_response);
-            assert_eq!(app.status.step, "idle (aborted)");
-            assert_eq!(
-                app.messages.last().map(|message| message.content.as_str()),
-                Some("hello")
-            );
-            assert!(fake_http.abort_seen.load(Ordering::SeqCst));
-
-            fake_ws.handle.abort();
-            fake_http.handle.abort();
-        });
     }
 }

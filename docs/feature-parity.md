@@ -25,11 +25,11 @@ Ranked by how much a typical user would notice:
    Ultty used to spawn them in the directory it was started in. They now use
    the pane's last local OSC 7 directory, else its foreground process's
    directory on Linux (`behavior.inherit_working_directory`, on by default).
-2. **Font configuration is thin.** Ultty offers a family name, a size, a line
-   height, an on/off switch for ligatures and an emoji font. It has no
-   separate bold or italic families, no OpenType feature list, no
-   variable-font axes, no codepoint-to-font map and no cell offsets. All font
-   settings need a restart.
+2. **Font configuration is thin.** *Mostly fixed.* Ultty now has separate
+   bold, italic and bold italic families (`font.bold_family` and the like), an
+   OpenType feature list (`font.features`), a codepoint-to-font map
+   (`[[font.codepoint_map]]`) and font changes on config reload. It still has
+   no variable-font axes and no cell offsets.
 3. **No Kitty graphics protocol.** Ghostty supports it (1.4 added
    animation). Programs that only speak Kitty's protocol, such as many
    image viewers and some Neovim plugins, show no images. Ultty supports
@@ -39,10 +39,12 @@ Ranked by how much a typical user would notice:
    `--working-directory`, `--config` or per-key override.
    Alacritty has `-e`, `--working-directory` and `-o key=value`. Ghostty has
    `-e` and `--key=value` for every config key.
-5. **Scrollback search is plain substring only.** Search is case-insensitive
-   substring matching, row by row, inside copy mode. Matches cannot span a
-   wrapped line and there is no regex. Alacritty searches by regex, and
-   Ghostty 1.3 added a dedicated search UI.
+5. **Scrollback search is plain substring only.** *Fixed.* Search joins
+   soft-wrapped rows, uses smart case, has an optional regex mode
+   (`[search] regex`, or Ctrl+R in the prompt), highlights every match, counts
+   them, and scans in 2 ms slices. It is still limited to copy mode: there is no
+   Ghostty-style search bar, and matching is per scrollback snapshot (see
+   `docs/configuration.md`).
 6. **No jump-to-prompt.** *Fixed.* Ctrl+Shift+PageUp and PageDown scroll to
    the previous and next prompt, and Ctrl+Shift+O selects the last command's
    output when it fits on screen. Longer output cannot be selected, because
@@ -150,16 +152,16 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Feature | Ultty | Ghostty 1.4 | Alacritty 0.16 | Ultty evidence |
 |---|---|---|---|---|
 | Font fallback | yes; system fonts via cosmic-text | yes; size-adjusted | yes; system font library | `renderer/text.rs`; `docs/configuration.md` "Emoji and accents" |
-| Ligatures | partial: on/off only, ASCII punctuation runs | yes; `font-feature` | no | `config.rs` `FontConfig::ligatures` |
+| Ligatures | yes: `font.ligatures` switch plus `font.features`; ASCII punctuation runs | yes; `font-feature` | no | `config.rs` `FontConfig::ligatures`, `features` |
 | Variable fonts | no | yes; `font-variation` axes | no | no axis config in `FontConfig` |
 | Emoji and colour fonts | yes; VS15/VS16 handling, configurable emoji font | yes; Noto emoji embedded | yes | `renderer/emoji.rs`; `font.emoji` |
 | Box drawing, blocks, Powerline drawn natively | yes | yes; also auto-sized Nerd Font symbols | yes; `font.builtin_box_drawing` | `renderer/block_chars.rs`, `renderer/powerline.rs` |
 | Anti-aliasing | partial: grayscale only; subpixel masks treated as mono | grayscale; `alpha-blending` modes | follows the platform font library (unverified) | `renderer/atlas.rs` `SwashContent::SubpixelMask` |
-| Font features config | no | yes; `font-feature` | no | `FontConfig` has no feature list |
-| Per-style fonts (bold, italic) | no | yes; `font-family-bold` etc. | yes; `font.bold`, `italic`, `bold_italic` | `FontConfig` has one `family` |
-| Codepoint-to-font map | no | yes; `font-codepoint-map` | no | none in `config.rs` |
+| Font features config | yes; `font.features` | yes; `font-feature` | no | `config.rs` `parse_font_features`; `docs/configuration.md` "OpenType features" |
+| Per-style fonts (bold, italic) | yes; `font.bold_family`, `italic_family`, `bold_italic_family` | yes; `font-family-bold` etc. | yes; `font.bold`, `italic`, `bold_italic` | `renderer/text.rs` `FontSelection` |
+| Codepoint-to-font map | yes; `[[font.codepoint_map]]` | yes; `font-codepoint-map` | no | `config.rs` `parse_codepoint_map`; `renderer/text.rs` `FontSelection::mapped` |
 | Cell or glyph offsets | partial: `line_height` only | yes; `adjust-*` options | yes; `font.offset`, `glyph_offset` | `FontConfig::line_height` |
-| Live font changes | partial: size via keys; family needs restart | yes | yes | `docs/configuration.md` "Font settings are read at start" |
+| Live font changes | yes: size via keys; family, size, features and line height on config reload | yes | yes | `renderer/text.rs` `apply_font_config`; `docs/configuration.md` "Changing fonts without a restart" |
 
 ### Input
 
@@ -178,7 +180,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Multiple windows | partial: one window per process; "New window" spawns a new process | yes | yes; `CreateNewWindow`, `msg create-window` | `app/input.rs` `MenuItem::NewWindow` |
 | Native vs self-drawn UI | self-drawn; no decorations, own tab bar | native GTK4/libadwaita and AppKit | native decorations, no chrome | `app/mod.rs` `with_decorations(false)`; `renderer/tabbar.rs` |
 | Quick terminal | no | yes; macOS and Wayland | no | none |
-| Search in scrollback | partial: case-insensitive substring per row, in copy mode; no regex | yes since 1.3 | yes; regex | `app/mod.rs` `perform_search` |
+| Search in scrollback | partial: in copy mode; smart case, optional regex, matches across wrapped lines, all matches highlighted with a count; no search bar | yes since 1.3 | yes; regex | `vim/search.rs`; `app/mod.rs` `perform_search` |
 | URL detection | yes; regex, Ctrl+click | yes; `link-url`, previews | yes; configurable regex hints | `url.rs` |
 | Vi or copy mode | yes; motions, search, char/line/block selection | no | yes | `vim/mod.rs` (tests in module) |
 | Selection: word, line, block | yes; double-click word, triple-click line, Alt for block | yes; plus select command output | yes; plus `semantic_escape_chars` | `app/input.rs` selection; `grid/terminal.rs` `SelectionMode`; `tests/selection.rs` |
@@ -192,7 +194,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Feature | Ultty | Ghostty 1.4 | Alacritty 0.16 | Ultty evidence |
 |---|---|---|---|---|
 | Format | TOML | key = value | TOML, with imports | `config.rs` |
-| Live reload | partial: file watched; font settings need restart | on request (keybind or menu) | yes; `live_config_reload` | `config_watcher.rs`; `tests/config_reload.rs` |
+| Live reload | partial: file watched; `behavior.accessibility` needs restart | on request (keybind or menu) | yes; `live_config_reload` | `config_watcher.rs`; `tests/config_reload.rs` |
 | Bundled themes | 6 | hundreds (356 added in 1.4); light/dark pairs | none bundled (separate repo) | `config.rs` `ColorConfig::default` |
 | Per-platform options | no | yes; `macos-*`, `gtk-*` | yes | none in `config.rs` |
 | CLI overrides | partial: `-e` only (added after this audit); no config overrides | yes; `--key=value` | yes; `-o`, `-e`, `--working-directory` | `main.rs` `invocation` |

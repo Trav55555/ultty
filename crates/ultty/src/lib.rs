@@ -66,7 +66,6 @@ pub mod terminal_manager;
 pub mod testing;
 #[cfg(feature = "gui")]
 pub mod url;
-#[cfg(feature = "gui")]
 pub mod vim;
 
 #[cfg(feature = "gui")]

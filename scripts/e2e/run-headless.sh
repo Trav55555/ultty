@@ -14,9 +14,15 @@ command -v Xvfb >/dev/null || { echo "Xvfb is required" >&2; exit 2; }
 
 cargo build -q --release -p ultty --bins
 work=$(mktemp -d)
+# A private runtime dir holds this Ultty's control socket and no other's,
+# so neither this script nor the command can reach a window on the
+# desktop. Socket paths are short (108 bytes), so it lives under /tmp.
+runtime=$(mktemp -d /tmp/ultty-headless.XXXXXX)
+chmod 700 "$runtime"
 cleanup() {
     kill "${ultty_pid-}" "${xvfb_pid-}" 2>/dev/null || true
-    rm -rf "$work"
+    wait 2>/dev/null || true
+    rm -rf "$work" "$runtime"
 }
 trap cleanup EXIT
 
@@ -28,10 +34,16 @@ for _ in $(seq 50); do [ -s "$work/display" ] && break; sleep 0.1; done
 
 # Without this, a Wayland session in the environment wins over DISPLAY
 # and the window opens on the desktop instead of Xvfb.
+export XDG_RUNTIME_DIR="$runtime"
+unset ULTTY_SOCKET ULTTY_AUTH_TOKEN
 env -u WAYLAND_DISPLAY DISPLAY=":$(cat "$work/display")" target/release/ultty >"$work/ultty.log" 2>&1 &
 ultty_pid=$!
 export ULTTY_PID=$ultty_pid PATH="$PWD/target/release:$PATH"
-for _ in $(seq 80); do ulttyctl ping >/dev/null 2>&1 && break; sleep 0.25; done
-ulttyctl ping >/dev/null || { echo "Ultty did not start" >&2; cat "$work/ultty.log" >&2; exit 1; }
+for _ in $(seq 80); do
+    [ -S "$runtime/ultty-ctl-$ultty_pid.sock" ] && ulttyctl --pid "$ultty_pid" ping >/dev/null 2>&1 && break
+    kill -0 "$ultty_pid" 2>/dev/null || break
+    sleep 0.25
+done
+ulttyctl --pid "$ultty_pid" ping >/dev/null || { echo "Ultty did not start" >&2; cat "$work/ultty.log" >&2; exit 1; }
 
 "$@"

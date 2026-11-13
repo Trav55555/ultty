@@ -32,6 +32,7 @@ impl App {
                 .as_ref()
                 .map_or(0, |server| server.session_count()),
             control_wait: self.next_control_wait_deadline(),
+            search_pending: self.search_job.is_some(),
             anchor_release: self
                 .runtime
                 .protocol
@@ -300,6 +301,7 @@ impl App {
             }
         }
 
+        self.advance_search();
         self.publish_pane_changes();
         self.complete_pending_control_waits();
         self.complete_pending_override_pushes();
@@ -329,6 +331,7 @@ impl App {
 
     /// Draw a frame for `WindowEvent::RedrawRequested`, if one is due.
     pub(super) fn redraw(&mut self) {
+        self.reconcile_copy_mode_pane();
         let now = Instant::now();
         let due = self.frame_due(now);
         if !self.frame_pacing.should_draw(due.is_some()) {
@@ -480,6 +483,8 @@ struct WakeState {
     control_wait: Option<Instant>,
     /// When an inline surface anchor that no surface claimed is released.
     anchor_release: Option<Instant>,
+    /// A scrollback search has rows left to scan.
+    search_pending: bool,
     /// When a coalesced accessibility tree is due; `None` unless a screen
     /// reader is listening and the screen changed.
     accessibility: Option<Instant>,
@@ -513,6 +518,7 @@ impl WakeState {
             self.control_wait,
             self.anchor_release,
             self.accessibility,
+            self.search_pending.then_some(now),
         ]
         .into_iter()
         .flatten()
@@ -762,8 +768,19 @@ mod tests {
             native_sessions: 0,
             control_wait: None,
             anchor_release: None,
+            search_pending: false,
             accessibility: None,
         }
+    }
+
+    #[test]
+    fn a_search_in_progress_wakes_the_loop_at_once() {
+        let now = Instant::now();
+        let state = WakeState {
+            search_pending: true,
+            ..idle(now)
+        };
+        assert_eq!(state.next_wake(now), Some(now));
     }
 
     #[test]

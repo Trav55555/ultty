@@ -1482,6 +1482,9 @@ impl App {
         let viewport_cols = dims.cols as usize;
         drop(terminal);
 
+        self.search_job = None;
+        self.copy_mode_pane = self.runtime.manager.focused_terminal_id();
+        self.copy_mode.set_search_regex(self.config.search.regex);
         self.copy_mode
             .enter(total_rows, viewport_rows, viewport_cols);
         tracing::debug!("Entered copy mode");
@@ -1499,12 +1502,19 @@ impl App {
         let viewport_cols = dims.cols as usize;
         drop(terminal);
 
+        self.search_job = None;
+        self.copy_mode_pane = self.runtime.manager.focused_terminal_id();
+        self.copy_mode.set_search_regex(self.config.search.regex);
         self.copy_mode
             .enter_search(total_rows, viewport_rows, viewport_cols);
         tracing::debug!("Entered search mode");
     }
 
     fn handle_copy_mode_key(&mut self, event: &KeyEvent) {
+        self.reconcile_copy_mode_pane();
+        if !self.copy_mode.is_active() {
+            return;
+        }
         let protocol_key = self.winit_key_to_protocol(&event.logical_key);
         let protocol_mods = self.winit_mods_to_protocol();
 

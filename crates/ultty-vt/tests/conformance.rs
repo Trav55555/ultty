@@ -691,6 +691,56 @@ fn sixel_images_span_cells_of_the_reported_size() {
     assert_eq!(spans(None), (3, 3), "8x16 fallback");
 }
 
+/// A sixel of `bytes` data bytes: one 100-pixel red run redrawn over itself (`$`), so it decodes to a
+/// 6-pixel-high image however long the string is.
+fn long_sixel(bytes: usize) -> Vec<u8> {
+    let mut data = b"\x1bPq#0;2;100;0;0#0".to_vec();
+    while data.len() < bytes {
+        data.extend_from_slice(b"!100~$");
+    }
+    data.extend_from_slice(b"\x1b\\");
+    data
+}
+
+#[test]
+fn sixel_past_the_dcs_cap_is_swallowed_not_printed() {
+    // 64 KiB is the cap for ordinary DCS strings; 70 KB of sixel is within
+    // the sixel cap and decodes as an image.
+    let mut input = long_sixel(70_000);
+    input.extend_from_slice(b"after");
+    let term = run(20, 10, &input);
+    let (screen, _) = snapshot(&term);
+    assert_eq!(
+        screen[0].trim_start_matches(' '),
+        "after".to_string().as_str(),
+        "{screen:?}"
+    );
+    assert_eq!(term.images().images().count(), 1);
+}
+
+#[test]
+fn oversized_dcs_strings_are_swallowed_to_the_terminator() {
+    // A non-sixel DCS stays at 64 KiB: the rest is dropped, never printed.
+    let mut input = b"\x1bP1$r".to_vec();
+    input.extend(std::iter::repeat_n(b'~', 70_000));
+    input.extend_from_slice(b"\x1b\\after");
+    let (screen, _) = screen(20, 10, &input);
+    assert_eq!(screen[0], "after", "{screen:?}");
+
+    // A sixel past the sixel cap (8 MiB) is dropped whole, with no image.
+    let mut input = long_sixel(9 * 1024 * 1024);
+    input.extend_from_slice(b"after");
+    let term = run(20, 10, &input);
+    let (screen, _) = snapshot(&term);
+    assert_eq!(
+        screen[0],
+        "after",
+        "{:?}",
+        &screen[0][..screen[0].len().min(40)]
+    );
+    assert_eq!(term.images().images().count(), 0);
+}
+
 // ---------------------------------------------------------------------------
 // Colour queries and the palette (OSC 4, 10, 11, 12, 104)
 // ---------------------------------------------------------------------------

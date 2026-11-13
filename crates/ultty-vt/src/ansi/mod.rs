@@ -657,6 +657,8 @@ pub struct AnsiParser {
     /// Consume the rest of an oversized status without printing its tail.
     pub(super) osc_discard: bool,
     pub(super) dcs_buffer: Vec<u8>,
+    /// The DCS string passed its size limit: swallow the rest to ST.
+    pub(super) dcs_overflow: bool,
     pub(super) dcs_params: Vec<u16>,
     /// What the current APC string is; see [`ApcKind`].
     pub(super) apc_kind: ApcKind,
@@ -693,6 +695,7 @@ impl AnsiParser {
             osc_buffer: Vec::new(),
             osc_discard: false,
             dcs_buffer: Vec::new(),
+            dcs_overflow: false,
             dcs_params: Vec::new(),
             apc_kind: ApcKind::Unknown,
             apc_buffer: Vec::new(),
@@ -850,6 +853,7 @@ impl AnsiParser {
         self.osc_buffer.clear();
         self.osc_discard = false;
         self.dcs_buffer.clear();
+        self.dcs_overflow = false;
         self.dcs_params.clear();
         self.utf8_remaining = 0;
         // Note: g0/g1 charset state is intentionally NOT reset here
@@ -961,6 +965,7 @@ impl AnsiParser {
             b'P' => {
                 self.state = State::DcsString;
                 self.dcs_buffer.clear();
+                self.dcs_overflow = false;
                 self.dcs_params.clear();
             }
             // Save cursor (ESC 7)

@@ -23,7 +23,7 @@ use ultty::control::ControlServer;
 use ultty::protocol::ProtocolServer;
 use ultty::renderer::Renderer;
 use ultty::tabs::TabBarState;
-use ultty::terminal_manager::{TabId, TerminalManager};
+use ultty::terminal_manager::{TabId, TerminalId, TerminalManager};
 use ultty::url::UrlDetector;
 use ultty::vim::{CopyMode, Selection as VimSelection};
 use winit::application::ApplicationHandler;
@@ -35,6 +35,27 @@ use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
 /// The window's title until the focused pane sets one.
 const WINDOW_TITLE: &str = "Ultty";
+
+/// Longest a copy-mode search holds the terminal lock per frame.
+const SEARCH_SLICE: Duration = Duration::from_millis(2);
+
+/// A copy-mode scan and its completed matches belong to one pane lifetime.
+fn reconcile_copy_mode_pane(
+    owner: &mut Option<TerminalId>,
+    job: &mut Option<ultty::vim::search::SearchJob>,
+    mode: &mut CopyMode,
+    focused: Option<TerminalId>,
+) -> bool {
+    if owner.is_none() || *owner == focused {
+        return false;
+    }
+    *owner = None;
+    *job = None;
+    mode.set_search_matches(Vec::new());
+    mode.set_search_status(ultty::vim::SearchStatus::Idle);
+    mode.exit();
+    true
+}
 
 /// Default window dimensions.
 const DEFAULT_WIDTH: u32 = 800;
@@ -187,6 +208,10 @@ pub struct App {
     config: Config,
     /// Vim-style copy mode
     copy_mode: CopyMode,
+    /// The scrollback scan a copy-mode search is running, a slice per frame.
+    search_job: Option<ultty::vim::search::SearchJob>,
+    /// Pane whose grid the copy-mode cursor, scan and matches describe.
+    copy_mode_pane: Option<TerminalId>,
     /// URL detector
     url_detector: UrlDetector,
     /// Config file watcher for hot-reload
@@ -465,6 +490,8 @@ impl App {
             last_title_bar_toggle_click_time: Instant::now() - CLICK_THRESHOLD * 2,
             config,
             copy_mode: CopyMode::new(),
+            search_job: None,
+            copy_mode_pane: None,
             url_detector,
             config_watcher,
             bell_active_until: None,
@@ -1088,45 +1115,93 @@ impl App {
 
     /// Perform search in scrollback.
     fn perform_search(&mut self, query: &str) {
+        use ultty::vim::search::{Matcher, SearchJob, SearchOptions};
+        use ultty::vim::SearchStatus;
+
+        self.search_job = None;
         if query.is_empty() {
             return;
         }
-
-        let Some(terminal) = self.terminal() else {
-            return;
+        let options = SearchOptions {
+            regex: self.copy_mode.search_regex(),
+            ..self.config.search
         };
-        let buffer = terminal.buffer();
-        let mut matches = Vec::new();
-
-        let total_lines = buffer.total_lines();
-        for row in 0..total_lines {
-            if let Some(grid_row) = buffer.row_at(row) {
-                let text = grid_row.text_trimmed();
-                // Case-insensitive search; columns are char indices into the
-                // original row, not byte offsets into a lowercased copy.
-                let query_lower = query.to_lowercase();
-                for found in control_wait::find_ignore_case(&text, &query_lower) {
-                    matches.push((row, found.char_col));
+        match Matcher::new(query, options) {
+            Err(error) => {
+                self.copy_mode.begin_search();
+                self.copy_mode
+                    .set_search_status(SearchStatus::Invalid(error.to_string()));
+            }
+            Ok(matcher) => {
+                let job = self
+                    .terminal()
+                    .map(|terminal| SearchJob::new(matcher, terminal.buffer()));
+                if job.is_some() {
+                    self.search_job = job;
+                    self.copy_mode.begin_search();
                 }
             }
-        }
-
-        drop(terminal);
-
-        tracing::debug!("Search '{}': found {} matches", query, matches.len());
-        let has_matches = !matches.is_empty();
-        self.copy_mode.set_search_matches(matches);
-
-        // Jump to first match if any
-        if has_matches {
-            // Move cursor to first match
-            // The copy_mode's goto_next_match will handle positioning
         }
 
         // Also search native sessions if active
         if self.native_search_active {
             self.perform_native_search(query);
         }
+    }
+
+    /// Run the next slice of the copy-mode search, if one is under way, and
+    /// keep the matches clear of history the terminal has since evicted.
+    ///
+    /// The terminal lock is held for [`SEARCH_SLICE`] at most, so the
+    /// terminal keeps up with its PTY while a long scrollback is scanned.
+    fn advance_search(&mut self) {
+        use ultty::vim::SearchStatus;
+
+        self.reconcile_copy_mode_pane();
+        if !self.copy_mode.is_active() {
+            self.search_job = None;
+            self.copy_mode_pane = None;
+            return;
+        }
+        let Some(mut job) = self.search_job.take() else {
+            // No scan: only drop matches in rows evicted since.
+            if !self.copy_mode.search_matches().0.is_empty() {
+                let evicted = self.terminal().map(|t| t.buffer().evicted_lines());
+                if let Some(evicted) = evicted {
+                    let before = self.copy_mode.search_matches().0.len();
+                    self.copy_mode.rebase_search(evicted);
+                    self.needs_redraw |= self.copy_mode.search_matches().0.len() != before;
+                }
+            }
+            return;
+        };
+        let Some(terminal) = self.terminal() else {
+            return;
+        };
+        let buffer = terminal.buffer();
+        let done = job.step(buffer, SEARCH_SLICE);
+        let percent = job.percent_done(buffer);
+        drop(terminal);
+        if done {
+            let (matches, evicted) = job.into_matches();
+            tracing::debug!("Search finished: {} matches", matches.len());
+            self.copy_mode.finish_search(matches, evicted);
+        } else {
+            self.copy_mode
+                .set_search_status(SearchStatus::Searching(percent));
+            self.search_job = Some(job);
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Drop pane-local copy state before using a newly focused grid.
+    fn reconcile_copy_mode_pane(&mut self) {
+        self.needs_redraw |= reconcile_copy_mode_pane(
+            &mut self.copy_mode_pane,
+            &mut self.search_job,
+            &mut self.copy_mode,
+            self.runtime.manager.focused_terminal_id(),
+        );
     }
 
     /// Check if the visible tab has any native protocol sessions.
@@ -1759,6 +1834,78 @@ mod tests {
         resize_direction_at_window_edge, window_should_use_square_corners,
         MAINTENANCE_POLL_INTERVAL,
     };
+
+    #[test]
+    fn test_switching_panes_cancels_a_partial_search_before_another_buffer_is_read() {
+        use ultty::grid::{Buffer, Dimensions};
+        use ultty::terminal_manager::TerminalId;
+        use ultty::vim::search::{Matcher, SearchJob, SearchOptions};
+        use ultty::vim::CopyMode;
+
+        let buffer = Buffer::with_scrollback(Dimensions::new(80, 200), 400);
+        let mut scan = SearchJob::new(
+            Matcher::new("needle", SearchOptions::default()).unwrap(),
+            &buffer,
+        );
+        assert!(!scan.step(&buffer, Duration::ZERO));
+        let first = TerminalId::new(1);
+        let second = TerminalId::new(2);
+        let mut owner = Some(first);
+        let mut pending = Some(scan);
+        let mut mode = CopyMode::new();
+        mode.enter(200, 24, 80);
+        mode.begin_search();
+
+        assert!(!super::reconcile_copy_mode_pane(
+            &mut owner,
+            &mut pending,
+            &mut mode,
+            Some(first)
+        ));
+        assert!(pending.is_some());
+        assert!(super::reconcile_copy_mode_pane(
+            &mut owner,
+            &mut pending,
+            &mut mode,
+            Some(second)
+        ));
+        assert!(pending.is_none());
+        assert!(owner.is_none());
+        assert!(!mode.is_active());
+        assert!(mode.search_matches().0.is_empty());
+    }
+
+    #[test]
+    fn test_switching_or_closing_panes_discards_completed_search_matches() {
+        use ultty::terminal_manager::TerminalId;
+        use ultty::vim::search::SearchMatch;
+        use ultty::vim::CopyMode;
+
+        let first = TerminalId::new(1);
+        for focused in [Some(TerminalId::new(2)), None] {
+            let mut owner = Some(first);
+            let mut pending = None;
+            let mut mode = CopyMode::new();
+            mode.enter(200, 24, 80);
+            mode.finish_search(vec![SearchMatch::at(150, 7)], 0);
+            assert!(!super::reconcile_copy_mode_pane(
+                &mut owner,
+                &mut pending,
+                &mut mode,
+                Some(first)
+            ));
+            assert_eq!(mode.search_matches().0, [SearchMatch::at(150, 7)]);
+            assert!(super::reconcile_copy_mode_pane(
+                &mut owner,
+                &mut pending,
+                &mut mode,
+                focused
+            ));
+            assert!(mode.search_matches().0.is_empty());
+            assert!(!mode.is_active());
+            assert!(owner.is_none());
+        }
+    }
 
     #[test]
     fn a_window_started_with_a_command_leaves_the_saved_session_alone() {

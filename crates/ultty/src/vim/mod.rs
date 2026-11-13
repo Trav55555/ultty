@@ -8,12 +8,30 @@
 //!
 //! Supported operations:
 //! - Navigation: h/j/k/l, w/b/e, 0/$, gg/G, Ctrl-d/u/f/b, H/M/L
-//! - Search: /, ?, n, N
+//! - Search: /, ?, n, N (Ctrl-r while typing toggles regex; see [`search`])
 //! - Selection: v (char), V (line), Ctrl-v (block)
 //! - Yank: y (copies selection to clipboard)
 //! - Exit: Esc, q, Enter (with selection copies and exits)
 
 use ultty_protocol::{Key, Modifiers};
+
+pub mod search;
+
+use search::{drop_evicted, SearchMatch};
+
+/// Where a search stands, for the status line.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SearchStatus {
+    /// No search has run.
+    #[default]
+    Idle,
+    /// A scan is under way, this far through (percent).
+    Searching(u8),
+    /// The scan finished.
+    Done,
+    /// The query could not be compiled.
+    Invalid(String),
+}
 
 /// What copy mode is doing: moving the cursor, selecting, or reading a
 /// search query.
@@ -57,8 +75,13 @@ pub struct CopyMode {
     viewport_cols: usize,
     total_rows: usize,
     search_query: String,
-    search_matches: Vec<(usize, usize)>,
+    search_matches: Vec<SearchMatch>,
     current_match: usize,
+    /// Read the query as a regex (toggled with Ctrl-r while typing).
+    search_regex: bool,
+    search_status: SearchStatus,
+    /// The buffer's eviction count `search_matches` is relative to.
+    search_evicted: usize,
     /// A `g` was pressed and we are waiting for the second key of `gg`.
     pending_g: bool,
     /// Count prefix typed before a motion (`5j`), if any.
@@ -84,6 +107,9 @@ impl Default for CopyMode {
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match: 0,
+            search_regex: false,
+            search_status: SearchStatus::Idle,
+            search_evicted: 0,
             pending_g: false,
             count: None,
         }
@@ -112,10 +138,18 @@ impl CopyMode {
         self.selection_anchor = None;
         self.pending_g = false;
         self.count = None;
+        self.search_matches.clear();
+        self.current_match = 0;
+        self.search_status = SearchStatus::Idle;
     }
 
     pub fn enter_search(&mut self, total_rows: usize, viewport_rows: usize, viewport_cols: usize) {
         self.enter(total_rows, viewport_rows, viewport_cols);
+        // Searching backward from the bottom finds the newest match first.
+        self.cursor_row = (self.scroll_offset + viewport_rows)
+            .min(total_rows)
+            .saturating_sub(1);
+        self.cursor_col = viewport_cols.saturating_sub(1);
         self.mode = VimMode::Search;
         self.search_query.clear();
     }
@@ -452,7 +486,7 @@ impl CopyMode {
         }
     }
 
-    fn handle_search_key(&mut self, key: &Key, _modifiers: Modifiers) -> CopyModeResult {
+    fn handle_search_key(&mut self, key: &Key, modifiers: Modifiers) -> CopyModeResult {
         match key {
             Key::Escape => {
                 self.mode = VimMode::Normal;
@@ -469,6 +503,10 @@ impl CopyMode {
             }
             Key::Backspace => {
                 self.search_query.pop();
+                CopyModeResult::Handled
+            }
+            Key::Char('r') if modifiers.ctrl() => {
+                self.search_regex = !self.search_regex;
                 CopyModeResult::Handled
             }
             Key::Char(c) => {
@@ -551,49 +589,100 @@ impl CopyMode {
         }
     }
 
-    pub fn set_search_matches(&mut self, matches: Vec<(usize, usize)>) {
+    /// Replace the matches. Navigation starts from the first one.
+    pub fn set_search_matches(&mut self, matches: Vec<SearchMatch>) {
         self.search_matches = matches;
         self.current_match = 0;
     }
 
-    fn goto_next_match(&mut self) {
-        if self.search_matches.is_empty() {
+    /// Take the matches of a finished scan (relative to `evicted` lines
+    /// evicted so far) and select the nearest one in the search direction,
+    /// moving the cursor onto it.
+    pub fn finish_search(&mut self, matches: Vec<SearchMatch>, evicted: usize) {
+        self.search_evicted = evicted;
+        self.search_status = SearchStatus::Done;
+        self.set_search_matches(matches);
+        let cursor = (self.cursor_row, self.cursor_col);
+        let start = |m: &SearchMatch| (m.start_row, m.start_col);
+        let forward = self.search_forward;
+        let found = if forward {
+            self.search_matches.iter().position(|m| start(m) >= cursor)
+        } else {
+            self.search_matches.iter().rposition(|m| start(m) <= cursor)
+        };
+        let Some(index) = found.or(if forward {
+            Some(0)
+        } else {
+            self.search_matches.len().checked_sub(1)
+        }) else {
+            return;
+        };
+        self.select_match(index);
+    }
+
+    /// Start a new search: forget the old matches.
+    pub fn begin_search(&mut self) {
+        self.search_matches.clear();
+        self.current_match = 0;
+        self.search_status = SearchStatus::Searching(0);
+    }
+
+    pub fn set_search_status(&mut self, status: SearchStatus) {
+        self.search_status = status;
+    }
+
+    /// Forget matches in rows the buffer has evicted since they were found
+    /// (`evicted` is the buffer's current count).
+    pub fn rebase_search(&mut self, evicted: usize) {
+        let dropped = evicted.saturating_sub(self.search_evicted);
+        if dropped == 0 {
             return;
         }
-
-        let forward = self.search_forward;
-        if forward {
-            self.current_match = (self.current_match + 1) % self.search_matches.len();
-        } else if self.current_match == 0 {
-            self.current_match = self.search_matches.len() - 1;
-        } else {
-            self.current_match -= 1;
+        self.search_evicted = evicted;
+        let gone = drop_evicted(&mut self.search_matches, dropped);
+        self.current_match = self.current_match.saturating_sub(gone);
+        if self.current_match >= self.search_matches.len() {
+            self.current_match = 0;
         }
+    }
 
-        let (row, col) = self.search_matches[self.current_match];
-        self.cursor_row = row;
-        self.cursor_col = col;
+    /// Whether the query is read as a regex.
+    pub fn search_regex(&self) -> bool {
+        self.search_regex
+    }
+
+    /// Set whether queries are read as regexes (the config default).
+    pub fn set_search_regex(&mut self, regex: bool) {
+        self.search_regex = regex;
+    }
+
+    fn select_match(&mut self, index: usize) {
+        self.current_match = index;
+        let m = self.search_matches[index];
+        self.cursor_row = m.start_row;
+        self.cursor_col = m.start_col;
         self.ensure_cursor_visible();
     }
 
+    fn goto_next_match(&mut self) {
+        self.step_match(self.search_forward);
+    }
+
     fn goto_prev_match(&mut self) {
-        if self.search_matches.is_empty() {
+        self.step_match(!self.search_forward);
+    }
+
+    fn step_match(&mut self, forward: bool) {
+        let count = self.search_matches.len();
+        if count == 0 {
             return;
         }
-
-        let forward = self.search_forward;
-        if !forward {
-            self.current_match = (self.current_match + 1) % self.search_matches.len();
-        } else if self.current_match == 0 {
-            self.current_match = self.search_matches.len() - 1;
+        let index = if forward {
+            (self.current_match + 1) % count
         } else {
-            self.current_match -= 1;
-        }
-
-        let (row, col) = self.search_matches[self.current_match];
-        self.cursor_row = row;
-        self.cursor_col = col;
-        self.ensure_cursor_visible();
+            (self.current_match + count - 1) % count
+        };
+        self.select_match(index);
     }
 
     pub fn search_query(&self) -> &str {
@@ -601,8 +690,32 @@ impl CopyMode {
     }
 
     /// Get the search matches and current match index.
-    pub fn search_matches(&self) -> (&[(usize, usize)], usize) {
+    pub fn search_matches(&self) -> (&[SearchMatch], usize) {
         (&self.search_matches, self.current_match)
+    }
+
+    /// The text of the mode indicator, with the state of the search.
+    pub fn status_line(&self) -> String {
+        let regex = if self.search_regex { " [regex]" } else { "" };
+        if self.mode == VimMode::Search {
+            return format!("/ {}{regex}", self.search_query);
+        }
+        let mode = match self.mode {
+            VimMode::Visual => "-- VISUAL --",
+            VimMode::VisualLine => "-- VISUAL LINE --",
+            VimMode::VisualBlock => "-- VISUAL BLOCK --",
+            _ => "-- NORMAL --",
+        };
+        let progress = match &self.search_status {
+            SearchStatus::Idle => return mode.to_string(),
+            SearchStatus::Searching(percent) => format!("searching {percent}%"),
+            SearchStatus::Invalid(message) => message.clone(),
+            SearchStatus::Done if self.search_matches.is_empty() => "no matches".to_string(),
+            SearchStatus::Done => {
+                format!("{}/{}", self.current_match + 1, self.search_matches.len())
+            }
+        };
+        format!("{mode}  {}{regex}  [{progress}]", self.search_query)
     }
 }
 
@@ -732,6 +845,10 @@ mod tests {
     // total_rows=100, viewport_rows=24, viewport_cols=80
     // cursor starts at row 76 (= 100 - 24), col 0.
     // ---------------------------------------------------------------
+    fn pts(points: &[(usize, usize)]) -> Vec<SearchMatch> {
+        points.iter().map(|&(r, c)| SearchMatch::at(r, c)).collect()
+    }
+
     fn active_mode() -> CopyMode {
         let mut m = CopyMode::new();
         m.enter(100, 24, 80);
@@ -1603,7 +1720,7 @@ mod tests {
         m.handle_key(&Key::Char('x'), Modifiers::NONE);
         m.handle_key(&Key::Enter, Modifiers::NONE);
         // Provide matches
-        m.set_search_matches(vec![(10, 5), (20, 3), (30, 7)]);
+        m.set_search_matches(pts(&[(10, 5), (20, 3), (30, 7)]));
         // current_match starts at 0, n goes forward -> index 1
         m.handle_key(&Key::Char('n'), Modifiers::NONE);
         assert_eq!(m.cursor_position(), (20, 3));
@@ -1620,7 +1737,7 @@ mod tests {
         m.handle_key(&Key::Char('/'), Modifiers::NONE);
         m.handle_key(&Key::Char('x'), Modifiers::NONE);
         m.handle_key(&Key::Enter, Modifiers::NONE);
-        m.set_search_matches(vec![(10, 5), (20, 3), (30, 7)]);
+        m.set_search_matches(pts(&[(10, 5), (20, 3), (30, 7)]));
         // current_match=0, N goes backward -> wraps to 2
         m.handle_key(&Key::Char('N'), Modifiers::NONE);
         assert_eq!(m.cursor_position(), (30, 7));
@@ -1634,7 +1751,7 @@ mod tests {
         m.handle_key(&Key::Char('?'), Modifiers::NONE); // backward search
         m.handle_key(&Key::Char('x'), Modifiers::NONE);
         m.handle_key(&Key::Enter, Modifiers::NONE);
-        m.set_search_matches(vec![(10, 5), (20, 3), (30, 7)]);
+        m.set_search_matches(pts(&[(10, 5), (20, 3), (30, 7)]));
         // In backward search, n goes backward (decrements), N goes forward (increments)
         // current_match=0, n in backward search -> wraps to 2
         m.handle_key(&Key::Char('n'), Modifiers::NONE);
@@ -1647,7 +1764,7 @@ mod tests {
     #[test]
     fn set_search_matches_resets_current() {
         let mut m = active_mode();
-        m.set_search_matches(vec![(1, 1), (2, 2)]);
+        m.set_search_matches(pts(&[(1, 1), (2, 2)]));
         let (matches, idx) = m.search_matches();
         assert_eq!(matches.len(), 2);
         assert_eq!(idx, 0);
@@ -1659,7 +1776,7 @@ mod tests {
         m.handle_key(&Key::Char('/'), Modifiers::NONE);
         m.handle_key(&Key::Char('x'), Modifiers::NONE);
         m.handle_key(&Key::Enter, Modifiers::NONE);
-        m.set_search_matches(vec![(42, 10)]);
+        m.set_search_matches(pts(&[(42, 10)]));
         m.handle_key(&Key::Char('n'), Modifiers::NONE);
         // wraps: (0+1)%1 = 0
         assert_eq!(m.cursor_position(), (42, 10));
@@ -1849,7 +1966,7 @@ mod tests {
         let r = m.handle_key(&Key::Enter, Modifiers::NONE);
         assert!(matches!(r, CopyModeResult::Search(ref s) if s == "test"));
         // Simulate external match setting
-        m.set_search_matches(vec![(5, 0), (15, 10), (25, 20)]);
+        m.set_search_matches(pts(&[(5, 0), (15, 10), (25, 20)]));
         // Navigate forward
         m.handle_key(&Key::Char('n'), Modifiers::NONE);
         assert_eq!(m.cursor_position(), (15, 10));
@@ -1910,5 +2027,59 @@ mod tests {
         let (row, col) = m.selection_anchor.unwrap();
         assert_eq!(row, 49);
         assert_eq!(col, 39);
+    }
+
+    // ---------------------------------------------------------------
+    // Search results: selection, eviction, status
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn finishing_a_forward_search_selects_the_match_after_the_cursor() {
+        let mut m = active_mode();
+        assert_eq!(m.cursor_position().0, 76);
+        m.handle_key(&Key::Char('/'), Modifiers::NONE);
+        m.handle_key(&Key::Char('x'), Modifiers::NONE);
+        m.handle_key(&Key::Enter, Modifiers::NONE);
+        let found = pts(&[(10, 0), (80, 2), (90, 0)]);
+        m.finish_search(found, 0);
+        assert_eq!(m.cursor_position(), (80, 2));
+        assert_eq!(m.search_matches().1, 1);
+        assert_eq!(m.status_line(), "-- NORMAL --  x  [2/3]");
+    }
+
+    #[test]
+    fn rebasing_drops_evicted_matches_and_keeps_the_current_one() {
+        let mut m = active_mode();
+        m.finish_search(
+            vec![
+                SearchMatch::at(1, 0),
+                SearchMatch::at(10, 3),
+                SearchMatch::at(20, 4),
+            ],
+            0,
+        );
+        m.handle_key(&Key::Char('n'), Modifiers::NONE);
+        let before = m.search_matches().1;
+        m.rebase_search(5);
+        let (matches, current) = m.search_matches();
+        assert_eq!(matches, [SearchMatch::at(5, 3), SearchMatch::at(15, 4)]);
+        assert_eq!(current, before.saturating_sub(1));
+    }
+
+    #[test]
+    fn ctrl_r_in_the_prompt_toggles_regex() {
+        let mut m = active_mode();
+        m.handle_key(&Key::Char('/'), Modifiers::NONE);
+        m.handle_key(&Key::Char('r'), Modifiers::CTRL);
+        assert!(m.search_regex());
+        assert_eq!(m.search_query(), "");
+        assert_eq!(m.status_line(), "/  [regex]");
+    }
+
+    #[test]
+    fn an_invalid_query_shows_its_error() {
+        let mut m = active_mode();
+        m.set_search_status(SearchStatus::Invalid("unclosed group".into()));
+        assert_eq!(m.status_line(), "-- NORMAL --    [unclosed group]");
     }
 }
