@@ -1,4 +1,5 @@
 use ulttui::prelude::*;
+use ulttui::widgets::RichText;
 use unicode_width::UnicodeWidthChar;
 
 use crate::work::{attention, category, AttentionItem, Page};
@@ -193,10 +194,10 @@ pub(crate) fn view(app: &PorygonTui) -> Column {
         .height(Dimension::Percent(100.0))
         .padding(1.0);
     for line in header {
-        column = column.child(Text::new(line));
+        column = column.child(RichText::new().text(line));
     }
     for row in rows.into_iter().skip(start).take(available) {
-        column = column.child(Text::new(row));
+        column = column.child(RichText::new().text(row));
     }
     column
 }

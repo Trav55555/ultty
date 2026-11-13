@@ -207,20 +207,20 @@ impl PorygonTui {
             .width(Dimension::Percent(100.0))
             .height(Dimension::Percent(100.0))
             .padding(1.0)
-            .child(Text::new("Approval details | Esc back"))
-            .child(Text::new(if self.approval_in_flight {
+            .child(RichText::new().text("Approval details | Esc back"))
+            .child(RichText::new().text(if self.approval_in_flight {
                 "Decision unconfirmed | r refresh"
             } else {
                 "y approve once | n deny | r refresh"
             }))
-            .child(Text::new(format!(
+            .child(RichText::new().text(format!(
                 "Up/Down PgUp/PgDn | rows {}-{} of {}",
                 start + 1,
                 (start + available).min(rows.len()),
                 rows.len()
             )));
         for row in rows.into_iter().skip(start).take(available) {
-            page = page.child(Text::new(row));
+            page = page.child(RichText::new().text(row));
         }
         page
     }
@@ -742,6 +742,17 @@ mod tests {
         assert!(app.handle_event(&composer_key(Key::Enter, false)).is_none());
         app.handle_event(&composer_key(Key::End, false));
         assert!(app.approval_scroll > 20);
+        let native = ulttui::widgets::render_view_messages(
+            &app.approval_page_view(app.pending_approval.as_ref().unwrap()),
+        )
+        .unwrap();
+        assert!(!native.iter().any(|message| matches!(message,
+            ultty_protocol::AppMessage::SetContent { content: ultty_protocol::Content::Text(text), .. }
+            if text.text.trim() == "{" || text.text.trim() == "}")));
+        assert!(native.iter().any(|message| matches!(message,
+            ultty_protocol::AppMessage::SetContent { content: ultty_protocol::Content::RichText(text), .. }
+            if text.spans.iter().any(|span| span.text.trim() == "}"))));
+
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
         terminal
