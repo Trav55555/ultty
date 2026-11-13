@@ -19,6 +19,9 @@ use ultty_protocol::{AppMessage, PushedOverride};
 /// - Supports error injection via `inject_error()`
 /// - Tracks all events dispatched for assertion
 pub struct MockBackend {
+    /// Exact clipboard source texts whose writes succeeded.
+    pub clipboard_writes: Vec<String>,
+    clipboard_error: Option<std::io::ErrorKind>,
     /// Serialized OSC 7501 reports successfully written by the app loop.
     pub status_reports: Vec<Vec<u8>>,
     status_error: Option<std::io::ErrorKind>,
@@ -57,6 +60,19 @@ pub struct MockBackend {
 }
 
 impl MockBackend {
+    /// Fail the next clipboard write, without affecting rendering or input.
+    pub fn fail_next_clipboard_write(&mut self, kind: std::io::ErrorKind) {
+        self.clipboard_error = Some(kind);
+    }
+
+    pub(super) fn write_clipboard(&mut self, text: &str) -> crate::Result<()> {
+        if let Some(kind) = self.clipboard_error.take() {
+            return Err(std::io::Error::from(kind).into());
+        }
+        self.clipboard_writes.push(text.to_owned());
+        Ok(())
+    }
+
     /// Fail the next status write, without affecting input or rendering.
     pub fn fail_next_status_report(&mut self, kind: std::io::ErrorKind) {
         self.status_error = Some(kind);
@@ -72,6 +88,8 @@ impl MockBackend {
 
     pub fn new(events: Vec<Option<Event>>) -> Self {
         Self {
+            clipboard_writes: Vec::new(),
+            clipboard_error: None,
             status_reports: Vec::new(),
             status_error: None,
             events: events.into(),

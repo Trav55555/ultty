@@ -35,6 +35,11 @@ enum Input {
 }
 
 impl AnsiBackend {
+    pub(super) fn write_clipboard(&mut self, text: &str) -> crate::Result<()> {
+        let terminal = self.terminal.as_mut().ok_or(crate::Error::NotInitialized)?;
+        crate::clipboard::write_osc52(terminal.backend_mut(), text)
+    }
+
     /// Serialize reports with the ratatui writer on the app loop.
     pub(super) fn write_status(&mut self, wire: &[u8]) -> crate::Result<()> {
         let terminal = self.terminal.as_mut().ok_or(crate::Error::NotInitialized)?;

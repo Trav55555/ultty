@@ -38,6 +38,12 @@ pub(super) enum FrameError {
 }
 
 impl NativeBackend {
+    pub(in crate::backend) fn write_clipboard(&mut self, text: &str) -> crate::Result<()> {
+        self.send_message(&AppMessage::ClipboardSet {
+            text: text.to_owned(),
+        })
+    }
+
     /// Reports use the PTY even when native frames use a Unix socket.
     /// The app loop is the sole caller, so in-band bytes cannot splice frames.
     pub(in crate::backend) fn write_status(&mut self, wire: &[u8]) -> crate::Result<()> {
@@ -158,12 +164,37 @@ impl NativeBackend {
 mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
+    use std::time::Duration;
 
     use bytes::{BufMut, BytesMut};
     use ultty_protocol::{AppMessage, Decode, Encode, RegionId, TerminalMessage, FRAME_MAGIC};
 
     use super::{FrameError, NativeBackend, ReadOutcome};
     use crate::event::Event;
+
+    #[test]
+    fn test_clipboard_uses_existing_native_socket_with_exact_source() {
+        let text = "\t source  \n界e\u{301}\n\x1b]52;c;data\x07";
+        let (writer, mut reader) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut backend = NativeBackend::new();
+        backend.stream = Some(writer);
+        backend.write_clipboard(text).unwrap();
+        let expected = AppMessage::ClipboardSet { text: text.into() }.encode_to_bytes();
+        let mut actual = vec![0; expected.len()];
+        reader.read_exact(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        assert!(
+            matches!(AppMessage::decode(&mut actual.as_slice()).unwrap(), AppMessage::ClipboardSet { text: copied } if copied == text)
+        );
+        let mut disconnected = NativeBackend::new();
+        assert!(matches!(
+            disconnected.write_clipboard(text),
+            Err(crate::Error::NotConnected)
+        ));
+    }
 
     #[test]
     fn test_status_and_large_native_frame_serialize_on_real_pty() {
@@ -202,6 +233,13 @@ mod tests {
         let encoded_frame = ultty_protocol::in_band::encode_to_vec(&frame.encode_to_bytes());
         let mut expected = encoded_frame.clone();
         expected.extend_from_slice(&status);
+        let copied = "\t exact clipboard\n界  ";
+        let clipboard = AppMessage::ClipboardSet {
+            text: copied.into(),
+        };
+        expected.extend_from_slice(&ultty_protocol::in_band::encode_to_vec(
+            &clipboard.encode_to_bytes(),
+        ));
         expected.extend_from_slice(&encoded_frame);
         let length = expected.len();
         let reader = std::thread::spawn(move || {
@@ -213,6 +251,7 @@ mod tests {
         backend.in_band = Some(Box::new(tty));
         backend.send_message(&frame).unwrap();
         backend.write_status(&status).unwrap();
+        backend.write_clipboard(copied).unwrap();
         backend.send_message(&frame).unwrap();
         assert_eq!(reader.join().unwrap(), expected);
         drop(backend);

@@ -20,6 +20,14 @@ impl<A: Application> App<A> {
 
         while let Some((cmd, depth)) = stack.pop() {
             match cmd {
+                Cmd::CopyToClipboard { text, on_result } => {
+                    let result = self.backend.copy_to_clipboard(&text);
+                    if let Some(on_result) = on_result {
+                        stack.push((Cmd::Message(on_result(result)), depth + 1));
+                    } else if let Err(error) = result {
+                        tracing::warn!("clipboard request write failed: {error}");
+                    }
+                }
                 Cmd::ReportStatus { report, on_result } => {
                     let result = self.backend.report_status(&report);
                     if let Some(on_result) = on_result {
@@ -251,5 +259,37 @@ mod status_tests {
             panic!("mock")
         };
         assert!(backend.status_reports.is_empty());
+    }
+    #[test]
+    fn test_clipboard_effects_preserve_order_and_deliver_write_results() {
+        let mut backend = MockBackend::new(vec![]);
+        backend.fail_next_clipboard_write(std::io::ErrorKind::BrokenPipe);
+        let mut runner =
+            App::new_with_backend(StatusApp { results: vec![] }, Backend::Mock(backend));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runner.process_cmd(
+            Cmd::batch(vec![
+                Cmd::copy_to_clipboard_with_result("failure".into(), |result| result.is_ok()),
+                Cmd::copy_to_clipboard_with_result("	 source\n界  ".into(), |result| {
+                    result.is_ok()
+                }),
+                Cmd::copy_to_clipboard("final".into()),
+                Cmd::copy_to_clipboard_with_result(
+                    "x".repeat(crate::clipboard::MAX_CLIPBOARD_BYTES + 1),
+                    |result| result.is_ok(),
+                ),
+            ]),
+            &runtime,
+        );
+        assert_eq!(runner.app.results, [false, true, false]);
+        let Backend::Mock(backend) = &runner.backend else {
+            panic!("mock")
+        };
+        assert_eq!(backend.clipboard_writes, ["	 source\n界  ", "final"]);
+        assert!(backend.status_reports.is_empty());
+        assert!(backend.dispatched_events.is_empty());
+        assert!(backend.rendered_messages.is_empty());
     }
 }
