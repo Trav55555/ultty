@@ -2,6 +2,8 @@
 
 Reviewed 2026-11-12 at `c718910`. Runtime source is unchanged from `b75af7a`; the intervening commit contains research only. This is a source review and proposed implementation plan. No runtime defect was reproduced, benchmark run, protocol changed, or networking configured during this review.
 
+The user subsequently authorized the full roadmap in stages. See the [implementation record](rex-implementation-progress.md) for changes and validation on the isolated feature branch. The review below describes the pre-implementation source.
+
 ## Recommendation
 
 Extend the existing architecture in three steps: make local automation and native pane behavior reliable, extract a session runtime that can operate without a window, then add attachment and optional SSH transport. Complete semantic input delivery in Ulttui alongside the first step. Tailscale does not require a dependency in the terminal for the initial workflow.

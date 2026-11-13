@@ -2,6 +2,8 @@
 
 Research date: 2026-11-12. Ultty source baseline: `b75af7ac35423e7103a1a9065ce64f118ae0d428`. This is research and an implementation proposal, not a completed integration or comparative benchmark. Terra and Sol researched Rex, inspected Ultty, and independently assessed Tailscale in parallel.
 
+Implementation followed this review on `feat/rex-session-workflows`. See the [implementation record](../docs/research/rex-implementation-progress.md) for completed features, tested artifacts and remaining qualification limits; the findings below retain their original research baseline.
+
 ## Recommendation
 
 Ultty should adopt Rex's separation between running work and the window displaying it, while extending its existing semantic TUI and automation capabilities. Tailscale should initially remain an optional transport supplied by the user. The best opportunity is a terminal where a human and an agent can inspect the same named UI elements, reconnect to running work, and understand why a remote connection is failing.
