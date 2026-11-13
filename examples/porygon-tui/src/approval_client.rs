@@ -257,7 +257,7 @@ pub async fn submit_decision(
         .await
         .with_context(|| {
             format!(
-                "No confirmation for {} of approval {approval_id}; outcome may be unknown, refresh before resubmitting",
+                "No confirmation for {} of approval {approval_id}; outcome may be unknown. Refresh and inspect the run; do not retry this request",
                 decision.route()
             )
         })?;
@@ -270,7 +270,7 @@ pub async fn submit_decision(
     }
     let payload: Value = response.json().await.with_context(|| {
         format!(
-            "Invalid confirmation for approval {approval_id}; outcome may be unknown, refresh before resubmitting"
+            "Invalid confirmation for approval {approval_id}; outcome may be unknown. Refresh and inspect the run; do not retry this request"
         )
     })?;
     if let Err(error) = reject_application_error(&payload) {
