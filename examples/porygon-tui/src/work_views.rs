@@ -88,7 +88,7 @@ fn rows(app: &PorygonTui) -> (Vec<String>, usize) {
                     width,
                 ));
             }
-            rows.extend(wrap("Questions: open the waiting run to continue; no separate question route is available.", width));
+            rows.extend(wrap("Select waiting work to inspect what it needs.", width));
         }
         Page::Detail => {
             if let Some(run) = state
@@ -161,7 +161,7 @@ pub(crate) fn view(app: &PorygonTui) -> Column {
     let title = match state.page {
         Page::Work => "Work | Enter review | r refresh | Esc",
         Page::Attention => "Attention | Enter inspect | r refresh | Esc",
-        Page::Detail => "Review | a attach | r refresh | Esc",
+        Page::Detail => "Review | a attach | c copy | r refresh | Esc",
         Page::Closed => "",
     };
     let (rows, selected_row) = rows(app);

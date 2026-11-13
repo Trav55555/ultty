@@ -18,6 +18,7 @@ mod commands;
 mod connection;
 mod contract_probe;
 mod conversations;
+mod copy;
 mod daemon;
 mod native_stream;
 mod session_ui;
@@ -340,6 +341,9 @@ enum Msg {
     ValidationError(String),
     VirtualScrollBenchReady(String),
     DiffBenchReady(String),
+    CopyLatestAssistant,
+    CopyReviewedWork,
+    ClipboardWritten(Result<(), String>),
     ExitRequested,
     DraftExitWarning,
 }

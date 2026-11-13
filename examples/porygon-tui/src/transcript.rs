@@ -4,7 +4,9 @@ use ulttui::prelude::{Color, Column, Dimension, MarkdownView, Style};
 use ulttui::widgets::{PreparedMarkdownRow, RichText};
 type Row = PreparedMarkdownRow;
 
-fn plain_row(content: ultty_protocol::RichText) -> Row { Row::new(content) }
+fn plain_row(content: ultty_protocol::RichText) -> Row {
+    Row::new(content)
+}
 
 use crate::types::{ChatMessage, ToolCall, ToolStatus};
 use crate::views::format_tool_result_with_diff;
@@ -30,7 +32,9 @@ impl Entry {
     }
 
     fn new(heading: String, body: String, color: Color, width: usize, assistant: bool) -> Self {
-        let header = || plain_row(ultty_protocol::RichText::new().span(&heading, Style::new().fg(color).bold()));
+        let header = || {
+            plain_row(ultty_protocol::RichText::new().span(&heading, Style::new().fg(color).bold()))
+        };
         let markdown = MarkdownView::new(&body).with_visible_link_targets();
         let mut rows = vec![header()];
         rows.extend(markdown.prepared_rows(width));
@@ -59,7 +63,13 @@ impl Transcript {
                 _ => ("System", Color::Rgb(136, 136, 136)),
             };
             let heading = format!("{name}  {}", message.timestamp);
-            self.update(index, heading, &message.content, color, message.role == "assistant");
+            self.update(
+                index,
+                heading,
+                &message.content,
+                color,
+                message.role == "assistant",
+            );
         }
         for (index, tool) in tools.iter().enumerate() {
             let (status, color) = match tool.status {
@@ -94,11 +104,9 @@ impl Transcript {
     }
 
     fn update(&mut self, index: usize, heading: String, body: &str, color: Color, assistant: bool) {
-        if self
-            .entries
-            .get(index)
-            .is_some_and(|entry| entry.matches(&heading, body, color) && entry.assistant == assistant)
-        {
+        if self.entries.get(index).is_some_and(|entry| {
+            entry.matches(&heading, body, color) && entry.assistant == assistant
+        }) {
             return;
         }
         let entry = Entry::new(heading, body.into(), color, self.width, assistant);
@@ -116,10 +124,21 @@ impl Transcript {
     fn rows(&self, start: usize, count: usize) -> impl Iterator<Item = &Row> {
         let entry = self.ends.partition_point(|end| *end <= start);
         let before = entry.checked_sub(1).map_or(0, |index| self.ends[index]);
-        self.entries[entry..].iter().flat_map(|entry| entry.rows.iter()).skip(start - before).take(count)
+        self.entries[entry..]
+            .iter()
+            .flat_map(|entry| entry.rows.iter())
+            .skip(start - before)
+            .take(count)
     }
 
-    pub(crate) fn view(&self, start: usize, height: usize, working: bool, active_response: Option<usize>, follow_output: bool) -> Column {
+    pub(crate) fn view(
+        &self,
+        start: usize,
+        height: usize,
+        working: bool,
+        active_response: Option<usize>,
+        follow_output: bool,
+    ) -> Column {
         let mut column = Column::new()
             .id("conversation-transcript")
             .width(Dimension::Percent(100.0))
@@ -128,14 +147,30 @@ impl Transcript {
             .overflow_y_hidden();
         let mut visible = 0;
         let live_range = if working && follow_output {
-            active_response.and_then(|index| self.entries.get(index).filter(|entry| entry.assistant).map(|_| {
-                let first = index.checked_sub(1).map_or(0, |previous| self.ends[previous]);
-                first..self.ends[index]
-            }))
-        } else { None };
+            active_response.and_then(|index| {
+                self.entries
+                    .get(index)
+                    .filter(|entry| entry.assistant)
+                    .map(|_| {
+                        let first = index
+                            .checked_sub(1)
+                            .map_or(0, |previous| self.ends[previous]);
+                        first..self.ends[index]
+                    })
+            })
+        } else {
+            None
+        };
         for (offset, row) in self.rows(start, height).enumerate() {
             let row = row.clone();
-            let row = if live_range.as_ref().is_some_and(|range| range.contains(&(start + offset))) { row.streaming() } else { row };
+            let row = if live_range
+                .as_ref()
+                .is_some_and(|range| range.contains(&(start + offset)))
+            {
+                row.streaming()
+            } else {
+                row
+            };
             column = column.child(row);
             visible += 1;
         }
@@ -164,26 +199,59 @@ mod tests {
     fn prepared_rows_preserve_checkbox_stream_and_copy_text() {
         use ultty_protocol::{Live, Role, Toggled};
         let mut transcript = Transcript::default();
-        let message = ChatMessage { role: "assistant".into(), timestamp: "now".into(), content: "- [x] done\n\n```\nlet x = 1;\n```".into() };
+        let message = ChatMessage {
+            role: "assistant".into(),
+            timestamp: "now".into(),
+            content: "- [x] done\n\n```\nlet x = 1;\n```".into(),
+        };
         transcript.sync(80, &[message], &[]);
         let rows: Vec<_> = transcript.rows(0, usize::MAX).collect();
-        let checkbox = rows.iter().find(|r| r.semantics.role == Role::Checkbox).unwrap();
+        let checkbox = rows
+            .iter()
+            .find(|r| r.semantics.role == Role::Checkbox)
+            .unwrap();
         assert_eq!(checkbox.semantics.toggled, Toggled::True);
         assert!(checkbox.semantics.read_only);
         assert_eq!(checkbox.semantics.label.as_deref(), Some("done"));
-        let code = rows.iter().find(|r| r.content.spans.iter().any(|s| s.text.contains("let x"))).unwrap();
-        assert_eq!(code.content.spans.iter().map(|s| s.text.as_str()).collect::<String>(), "let x = 1;");
-        let live: Vec<_> = transcript.rows(0, usize::MAX).cloned().map(Row::streaming).collect();
-        assert!(live.iter().any(|r| r.semantics.role == Role::Log && r.semantics.live == Live::Polite && r.semantics.busy));
-        assert!(!live.iter().any(|r| r.content.spans.iter().any(|s| s.text.starts_with("│ "))));
+        let code = rows
+            .iter()
+            .find(|r| r.content.spans.iter().any(|s| s.text.contains("let x")))
+            .unwrap();
+        assert_eq!(
+            code.content
+                .spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>(),
+            "let x = 1;"
+        );
+        let live: Vec<_> = transcript
+            .rows(0, usize::MAX)
+            .cloned()
+            .map(Row::streaming)
+            .collect();
+        assert!(live.iter().any(|r| r.semantics.role == Role::Log
+            && r.semantics.live == Live::Polite
+            && r.semantics.busy));
+        assert!(!live
+            .iter()
+            .any(|r| r.content.spans.iter().any(|s| s.text.starts_with("│ "))));
     }
 
     #[test]
     fn transcript_displays_link_destination() {
         let mut transcript = Transcript::default();
-        let message = ChatMessage { role: "user".into(), timestamp: "now".into(), content: "See [guide](https://example.org/path)".into() };
+        let message = ChatMessage {
+            role: "user".into(),
+            timestamp: "now".into(),
+            content: "See [guide](https://example.org/path)".into(),
+        };
         transcript.sync(80, &[message], &[]);
-        let text = transcript.rows(0, usize::MAX).flat_map(|row| &row.content.spans).map(|span| span.text.as_str()).collect::<String>();
+        let text = transcript
+            .rows(0, usize::MAX)
+            .flat_map(|row| &row.content.spans)
+            .map(|span| span.text.as_str())
+            .collect::<String>();
         assert!(text.contains("guide (https://example.org/path)"), "{text}");
     }
 
@@ -205,7 +273,12 @@ mod tests {
             .map(|span| span.text.as_str())
             .collect::<String>();
         assert!(first.contains("unique message 0"));
-        assert_eq!(transcript.view(bottom, 20, false, None, false).children_count(), 20);
+        assert_eq!(
+            transcript
+                .view(bottom, 20, false, None, false)
+                .children_count(),
+            20
+        );
     }
 
     #[test]

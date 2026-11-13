@@ -1010,6 +1010,12 @@ impl PorygonTui {
 
     pub(crate) fn handle_update(&mut self, msg: Msg) -> Cmd<Msg> {
         match msg {
+            Msg::CopyLatestAssistant => self.copy_latest_reply(),
+            Msg::CopyReviewedWork => self.copy_review(),
+            Msg::ClipboardWritten(result) => Cmd::ShowToast(match result {
+                Ok(()) => Toast::success("Copy request sent to terminal"),
+                Err(error) => Toast::error(format!("Copy failed: {error}")),
+            }),
             Msg::OpenWork(page) => {
                 self.work.page = page;
                 self.work.selected = 0;

@@ -246,6 +246,25 @@ impl PorygonTui {
         } else {
             "disconnected"
         };
+        let stream_decisions =
+            usize::from(self.approval_is_stream && self.pending_approval.is_some())
+                + self.queued_stream_approvals.len();
+        let attention = self
+            .work
+            .notice
+            .map(|count| (count + stream_decisions).to_string())
+            .unwrap_or_else(|| {
+                if stream_decisions > 0 {
+                    format!("{stream_decisions}+")
+                } else {
+                    "?".into()
+                }
+            });
+        let shortcuts = if self.terminal_width < 80 {
+            format!(" F1 help F2 F3 F4({attention}) ")
+        } else {
+            format!(" F1 help F2 sessions F3 work F4 attention {attention} ")
+        };
         Row::new()
             .height(Dimension::Cells(1.0))
             .flex_shrink(0.0)
@@ -265,16 +284,7 @@ impl PorygonTui {
                     ),
             )
             .child(Spacer)
-            .child(RichText::new().span(
-                format!(
-                        " F1 help F2 sessions F3 work F4 attention {} ",
-                        self.work
-                            .notice
-                            .map(|n| n.to_string())
-                            .unwrap_or_else(|| "?".into())
-                    ),
-                Style::default(),
-            ))
+            .child(RichText::new().span(shortcuts, Style::default()))
     }
 
     fn messages_view(&self) -> Column {
@@ -290,16 +300,18 @@ impl PorygonTui {
                 .saturating_sub(1 + self.bottom_height() + 2)
                 .max(1) as usize,
             self.waiting_response,
+            self.current_response,
+            self.follow_output,
         )
     }
 
     pub(crate) fn composer_hint(&self) -> &'static str {
         if self.newline_prefix {
             "Enter: insert newline | Esc: cancel chord"
+        } else if self.pending_approval.is_some() {
+            "Decision pending | F4: inspect | draft kept here"
         } else if self.waiting_response || self.stopping {
             "Working | draft kept here | Ctrl+C: stop"
-        } else if self.pending_approval.is_some() {
-            "Decision pending | draft kept here | /approvals"
         } else if self.run_unresolved && !self.run_can_continue {
             "Run unresolved | draft kept here | /reconnect"
         } else if !self.connected {
@@ -371,6 +383,33 @@ impl PorygonTui {
                 self.chat_scroll.scroll_to_bottom();
             }
             return None;
+        }
+        if !self.show_approval_modal {
+            if let Event::Key(key) = event {
+                match key.key {
+                    Key::F(1) => {
+                        self.conversations.open = false;
+                        self.work.page = crate::work::Page::Closed;
+                        self.show_help = !self.show_help;
+                        return None;
+                    }
+                    Key::F(2) => {
+                        self.show_help = false;
+                        self.work.page = crate::work::Page::Closed;
+                        return Some(Msg::OpenConversations);
+                    }
+                    Key::F(3) | Key::F(4) => {
+                        self.conversations.open = false;
+                        self.show_help = false;
+                        return Some(Msg::OpenWork(if key.key == Key::F(3) {
+                            crate::work::Page::Work
+                        } else {
+                            crate::work::Page::Attention
+                        }));
+                    }
+                    _ => {}
+                }
+            }
         }
         if self.conversations.open && !matches!(event, Event::Quit) {
             return self.conversation_event(event);
@@ -485,6 +524,9 @@ impl PorygonTui {
                         self.work.selected = (self.work.selected + 1).min(len.saturating_sub(1));
                     }
                     Key::Enter => return Some(Msg::InspectWork),
+                    Key::Char('c') if self.work.page == crate::work::Page::Detail => {
+                        return Some(Msg::CopyReviewedWork);
+                    }
                     Key::Char('a') if self.work.page == crate::work::Page::Detail => {
                         return Some(Msg::AttachWork)
                     }
@@ -534,18 +576,8 @@ impl PorygonTui {
                 None
             }
             Event::Key(ke) => {
-                if ke.key == Key::F(2) {
-                    return Some(Msg::OpenConversations);
-                }
-                if ke.key == Key::F(3) {
-                    return Some(Msg::OpenWork(crate::work::Page::Work));
-                }
-                if ke.key == Key::F(4) {
-                    return Some(Msg::OpenWork(crate::work::Page::Attention));
-                }
-                if ke.key == Key::F(1) {
-                    self.show_help = true;
-                    return None;
+                if ke.key == Key::Char('y') && ke.modifiers.ctrl {
+                    return Some(Msg::CopyLatestAssistant);
                 }
                 match ke.key {
                     Key::PageUp | Key::PageDown => {
@@ -558,6 +590,13 @@ impl PorygonTui {
                         if self.follow_output {
                             self.unread_output = false;
                         }
+                        self.persist_conversation();
+                        return None;
+                    }
+                    Key::Home if ke.modifiers.ctrl => {
+                        self.update_scroll_dimensions();
+                        self.chat_scroll.scroll_to(0.0);
+                        self.follow_output = false;
                         self.persist_conversation();
                         return None;
                     }
@@ -644,10 +683,11 @@ impl PorygonTui {
                 "Ctrl+X then Enter: newline.",
                 "Shift+Enter: newline when terminal supports it.",
                 "Paste: insert text without sending.",
+                "Ctrl+Y: copy latest reply. In review, c copies evidence.",
                 "Ctrl+C: stop active work.",
                 "Ctrl+C when idle: save draft and quit.",
                 "With a draft, press Ctrl+C twice to quit.",
-                "PgUp/PgDn: history. Ctrl+End: latest output.",
+                "PgUp/PgDn: history. Ctrl+Home/End: oldest/latest.",
                 "Type / for commands. Ctrl+Space: complete.",
                 "/reconnect: inspect. /attach ID: read a run.",
             ] {
