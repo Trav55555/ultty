@@ -17,7 +17,8 @@ use crate::scene::region::Region;
 
 /// Whether applying `msg` may change what the accessibility tree shows of
 /// the session, its focus included. Keepalives, the clipboard,
-/// subscriptions and styles do not. Streams do: an open one makes its
+/// and subscriptions do not. Styles count because they can hide a target.
+/// Streams also count: an open one makes its
 /// region busy (ADR 0021 §3).
 fn changes_what_is_shown(msg: &AppMessage) -> bool {
     !matches!(
@@ -25,11 +26,11 @@ fn changes_what_is_shown(msg: &AppMessage) -> bool {
         AppMessage::ClientHello { .. }
             | AppMessage::Subscribe { .. }
             | AppMessage::Unsubscribe { .. }
-            | AppMessage::SetStyle { .. }
             | AppMessage::ClipboardGet
             | AppMessage::ClipboardSet { .. }
             | AppMessage::Pong
             | AppMessage::OverrideResult { .. }
+            | AppMessage::ActionResult { .. }
             | AppMessage::Disconnect
     )
 }
@@ -300,6 +301,16 @@ impl NativeSession {
                 self.accept_override_result(request_id, error);
             }
 
+            AppMessage::ActionResult { request_id, error } => {
+                if self.has_capability(ultty_protocol::CAP_SEMANTIC_ACTIONS) {
+                    self.accept_semantic_result(request_id, error);
+                } else {
+                    self.queue_protocol_error(NativeProtocolError::missing_capability(
+                        "action_result",
+                    ));
+                }
+            }
+
             AppMessage::Disconnect => {
                 info!("Session {} disconnected (explicit)", self.session_id);
                 return Ok(false);
@@ -329,7 +340,12 @@ impl NativeSession {
         };
 
         self.protocol_version = negotiated_version;
-        self.capabilities = negotiate_capabilities(requested, self.supported_capabilities());
+        let capabilities = negotiate_capabilities(requested, self.supported_capabilities());
+        if self.capabilities != capabilities {
+            // A newly negotiated action capability requires a fresh committed frame.
+            self.semantic_committed_frame = None;
+        }
+        self.capabilities = capabilities;
 
         let hello = TerminalMessage::ServerHello {
             version: negotiated_version,
@@ -348,7 +364,7 @@ impl NativeSession {
         Ok(())
     }
 
-    fn has_capability(&self, capability: u32) -> bool {
+    pub(super) fn has_capability(&self, capability: u32) -> bool {
         self.capabilities & capability != 0
     }
 

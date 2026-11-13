@@ -16,6 +16,11 @@ const DEFAULT_LOG_FILTER: &str = "ultty=info,wgpu=warn";
 
 fn main() -> Result<ExitCode> {
     let command = match invocation(std::env::args().skip(1)) {
+        Ok(Invocation::Attach { args }) => {
+            initialize_logging();
+            ultty::viewer::cli::run(args)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         Ok(Invocation::Run { command }) => command,
         Ok(Invocation::Version) => {
             println!("{}", version_output());
@@ -31,7 +36,15 @@ fn main() -> Result<ExitCode> {
         }
     };
 
-    // Initialize logging
+    initialize_logging();
+
+    tracing::info!("Starting Ultty");
+
+    app::App::run(command)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn initialize_logging() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -39,17 +52,15 @@ fn main() -> Result<ExitCode> {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
-
-    tracing::info!("Starting Ultty");
-
-    // Run the application
-    app::App::run(command)?;
-    Ok(ExitCode::SUCCESS)
 }
 
 /// What the command line asks for.
 #[derive(Debug, PartialEq, Eq)]
 enum Invocation {
+    /// Attach a viewer to a persistent local or SSH owner.
+    Attach {
+        args: Vec<String>,
+    },
     /// Start the terminal. The first tab runs `command`, or the login shell
     /// when there is none.
     Run {
@@ -73,6 +84,11 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
     let mut selection_error = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--attach" if command.is_none() && unknown.is_none() && !version => {
+                return Ok(Invocation::Attach {
+                    args: args.collect(),
+                });
+            }
             "--help" | "-h" => return Ok(Invocation::Help),
             "--version" | "-V" => version = true,
             "--profile" | "--workspace" => {
@@ -148,6 +164,7 @@ Options:
   -V, --version         Print the version and exit
   --profile NAME        Launch configured tabs and panes instead of restoring.
   --workspace NAME      Open a saved layout in fresh shells; does not resume jobs.
+  --attach NAME         Attach to a live session host; close the window to detach.
 
 Configuration: ~/.config/ultty/config.toml
 Logging:       RUST_LOG (default \"{DEFAULT_LOG_FILTER}\")

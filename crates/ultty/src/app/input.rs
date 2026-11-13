@@ -149,11 +149,11 @@ impl App {
         // ends it, even one that goes nowhere.
         let target = self.native_mouse_capture.route(
             &event_type,
-            &self.terminal_manager.active_pane_rects(width, height),
+            &self.runtime.manager.active_pane_rects(width, height),
             (x as f32, y as f32),
             (cell_width, cell_height),
         );
-        let Some(ref mut server) = self.protocol_server else {
+        let Some(ref mut server) = self.runtime.protocol else {
             return false;
         };
         if server.session_count() == 0 || cell_width <= 0.0 || cell_height <= 0.0 {
@@ -328,12 +328,12 @@ impl App {
                     // Middle click closes tab
                     if button == MouseButton::Middle && is_tab_row {
                         if let Some(tab_idx) = self.tab_bar.tab_at_x(x) {
-                            if self.terminal_manager.tab_count() > 1 {
-                                let tabs = self.terminal_manager.tabs();
+                            if self.runtime.manager.tab_count() > 1 {
+                                let tabs = self.runtime.manager.tabs();
                                 if let Some(tab) = tabs.get(tab_idx) {
                                     let tab_id = tab.id;
                                     self.freeze_tab_width_after_close();
-                                    self.terminal_manager.close_tab(tab_id);
+                                    self.runtime.manager.close_tab(tab_id);
                                     tracing::info!("Closed tab {} via middle click", tab_idx);
                                     self.update_tab_bar();
                                     self.needs_redraw = true;
@@ -345,12 +345,12 @@ impl App {
 
                     // Check for close button click
                     if let Some(tab_idx) = self.tab_bar.close_button_at(x, y) {
-                        if self.terminal_manager.tab_count() > 1 {
-                            let tabs = self.terminal_manager.tabs();
+                        if self.runtime.manager.tab_count() > 1 {
+                            let tabs = self.runtime.manager.tabs();
                             if let Some(tab) = tabs.get(tab_idx) {
                                 let tab_id = tab.id;
                                 self.freeze_tab_width_after_close();
-                                self.terminal_manager.close_tab(tab_id);
+                                self.runtime.manager.close_tab(tab_id);
                                 tracing::info!("Closed tab {} via close button", tab_idx);
                                 self.update_tab_bar();
                                 self.needs_redraw = true;
@@ -377,7 +377,7 @@ impl App {
                     if is_tab_row {
                         if let Some(tab_idx) = self.tab_bar.tab_at_x(x) {
                             self.tab_bar.start_drag(tab_idx, x);
-                            self.terminal_manager.switch_to_tab(tab_idx);
+                            self.runtime.manager.switch_to_tab(tab_idx);
                             self.update_tab_bar();
                             self.needs_redraw = true;
                             tracing::debug!("Started drag on tab {}", tab_idx);
@@ -389,13 +389,13 @@ impl App {
                 // Not in tab bar - handle normal clicks
 
                 // In multi-pane mode, check for divider drag or pane focus
-                if button == MouseButton::Left && self.terminal_manager.pane_count() > 1 {
+                if button == MouseButton::Left && self.runtime.manager.pane_count() > 1 {
                     let content_y = y - self.tab_bar.content_top();
                     let (aw, ah) = self.renderer.terminal_area();
 
                     // A divider within 4 px: start dragging it.
                     if let Some(divider) =
-                        self.terminal_manager.divider_at(x, content_y, aw, ah, 4.0)
+                        self.runtime.manager.divider_at(x, content_y, aw, ah, 4.0)
                     {
                         let along = match divider.direction {
                             SplitDirection::Horizontal => x,
@@ -406,9 +406,9 @@ impl App {
                     }
 
                     // Otherwise, focus the clicked pane
-                    if let Some(pane) = self.terminal_manager.pane_at(x, content_y, aw, ah) {
-                        if Some(pane) != self.terminal_manager.focused_terminal_id() {
-                            self.terminal_manager.focus_terminal(pane);
+                    if let Some(pane) = self.runtime.manager.pane_at(x, content_y, aw, ah) {
+                        if Some(pane) != self.runtime.manager.focused_terminal_id() {
+                            self.runtime.manager.focus_terminal(pane);
                             self.needs_redraw = true;
                         }
                     }
@@ -531,7 +531,7 @@ impl App {
             let x = self.mouse_pos.x as f32;
             if let Some((from, to)) = self.tab_bar.update_drag(x) {
                 // Reorder tabs in terminal manager
-                if self.terminal_manager.reorder_tabs(from, to) {
+                if self.runtime.manager.reorder_tabs(from, to) {
                     self.update_tab_bar();
                     tracing::debug!("Reordered tab {} to {}", from, to);
                 }
@@ -548,7 +548,7 @@ impl App {
             };
             let delta = current_pos - last_pos;
             if delta.abs() > 1.0 {
-                self.terminal_manager.drag_divider(&divider, delta);
+                self.runtime.manager.drag_divider(&divider, delta);
                 self.divider_dragging = Some((divider, current_pos));
                 self.needs_redraw = true;
             }
@@ -654,8 +654,8 @@ impl App {
     /// (Vertical). Shared by the keybindings and the title-band buttons.
     pub(super) fn split_pane(&mut self, direction: SplitDirection) {
         let result = match direction {
-            SplitDirection::Horizontal => self.terminal_manager.split_horizontal(),
-            SplitDirection::Vertical => self.terminal_manager.split_vertical(),
+            SplitDirection::Horizontal => self.runtime.manager.split_horizontal(),
+            SplitDirection::Vertical => self.runtime.manager.split_vertical(),
         };
         match result {
             Ok(Some(terminal_id)) => {
@@ -1033,11 +1033,11 @@ impl App {
             return;
         }
         if self.check_keybinding(&event, &self.config.keybindings.close_tab.clone()) {
-            if self.terminal_manager.tab_count() > 1 {
-                if let Some(tab) = self.terminal_manager.active_tab() {
+            if self.runtime.manager.tab_count() > 1 {
+                if let Some(tab) = self.runtime.manager.active_tab() {
                     let tab_id = tab.id;
                     self.freeze_tab_width_after_close();
-                    self.terminal_manager.close_tab(tab_id);
+                    self.runtime.manager.close_tab(tab_id);
                     self.renderer.clear_image_cache();
                     tracing::info!("Closed tab {:?}", tab_id);
                     self.update_tab_bar();
@@ -1047,13 +1047,13 @@ impl App {
             return;
         }
         if self.check_keybinding(&event, &self.config.keybindings.next_tab.clone()) {
-            self.terminal_manager.next_tab();
+            self.runtime.manager.next_tab();
             self.update_tab_bar();
             self.needs_redraw = true;
             return;
         }
         if self.check_keybinding(&event, &self.config.keybindings.prev_tab.clone()) {
-            self.terminal_manager.prev_tab();
+            self.runtime.manager.prev_tab();
             self.update_tab_bar();
             self.needs_redraw = true;
             return;
@@ -1085,14 +1085,15 @@ impl App {
             };
             if let Some(direction) = direction {
                 let (width, height) = self.renderer.terminal_area();
-                self.terminal_manager
+                self.runtime
+                    .manager
                     .focus_direction(direction, width, height);
                 self.needs_redraw = true;
                 return;
             }
         }
         if self.check_keybinding(&event, &self.config.keybindings.close_pane.clone()) {
-            if self.terminal_manager.close_focused_pane() {
+            if self.runtime.manager.close_focused_pane() {
                 tracing::info!("Closed pane");
                 self.needs_redraw = true;
             }
@@ -1360,9 +1361,10 @@ impl App {
         ultty::terminal_manager::TerminalId,
         Option<i32>,
     )> {
-        let terminal = self.terminal_manager.focused_terminal()?;
+        let terminal = self.runtime.manager.focused_terminal()?;
         let foreground = terminal.event_loop.foreground_pgrp();
-        self.protocol_server
+        self.runtime
+            .protocol
             .as_ref()?
             .has_pane_key_subscribers(terminal.tab_id, terminal.id, foreground)
             .then_some((terminal.tab_id, terminal.id, foreground))
@@ -1374,7 +1376,7 @@ impl App {
         let Some((tab, pane, foreground)) = self.native_input_target() else {
             return false;
         };
-        let Some(server) = self.protocol_server.as_mut() else {
+        let Some(server) = self.runtime.protocol.as_mut() else {
             return false;
         };
         if let Err(error) = server.send_text_input_to_pane(tab, pane, text.to_owned(), foreground) {
@@ -1390,7 +1392,7 @@ impl App {
         let Some((tab, pane, foreground)) = self.native_input_target() else {
             return false;
         };
-        let Some(ref mut server) = self.protocol_server else {
+        let Some(ref mut server) = self.runtime.protocol else {
             return false;
         };
         if let Err(error) = server.send_key_to_pane(tab, pane, key, modifiers, foreground) {
@@ -1406,7 +1408,7 @@ impl App {
         let Some((tab, pane, foreground)) = self.native_input_target() else {
             return false;
         };
-        let Some(ref mut server) = self.protocol_server else {
+        let Some(ref mut server) = self.runtime.protocol else {
             return false;
         };
         if let Err(error) = server.send_key_up_to_pane(tab, pane, key, modifiers, foreground) {

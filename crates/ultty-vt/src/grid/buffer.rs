@@ -378,6 +378,22 @@ impl AnchorRuns {
 }
 
 impl Buffer {
+    /// Restore validated viewer anchor locations without reserving or erasing rows.
+    pub(super) fn restore_view_anchors(&mut self, anchors: &[(u16, u64, Anchor, usize)]) {
+        self.anchors.clear();
+        for &(tag, serial, anchor, line) in anchors {
+            self.anchors
+                .resize(self.anchors.len().max(usize::from(tag)), None);
+            self.anchors[usize::from(tag) - 1] = Some(AnchorEntry {
+                anchor,
+                serial,
+                first_line: line,
+                settled: false,
+            });
+            self.next_anchor_serial = self.next_anchor_serial.max(serial.saturating_add(1));
+        }
+    }
+
     /// Check the buffer's invariants: the grid's own (see
     /// [`Grid::check_integrity`]), scrollback within its limit, a viewport
     /// offset that points into history, and consistent history rows.

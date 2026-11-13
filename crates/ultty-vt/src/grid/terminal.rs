@@ -1,5 +1,7 @@
 //! Terminal state management with alternate screen support.
 
+pub mod snapshot;
+
 use super::{
     Anchor, AnchorRefusal, Buffer, CursorPosition, Dimensions, Grid, ImageStore, Palette, RowMarks,
     TerminalImage, ThemeColors,
@@ -61,7 +63,7 @@ pub const DEFAULT_TERMINAL_NAME: &str = "xterm-256color";
 const MAX_UTF8_MOUSE_VALUE: u32 = 2047;
 
 /// Mouse tracking mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum MouseMode {
     /// No mouse tracking
     #[default]
@@ -77,7 +79,7 @@ pub enum MouseMode {
 }
 
 /// Mouse encoding format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum MouseEncoding {
     /// Default X10 encoding (limited to 223 cols/rows)
     #[default]
@@ -91,7 +93,7 @@ pub enum MouseEncoding {
 }
 
 /// Terminal modes that affect behavior.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct TerminalModes {
     /// Application cursor keys (DECCKM)
     pub application_cursor_keys: bool,
@@ -173,7 +175,7 @@ pub mod kitty_keyboard {
 }
 
 /// Shell integration state for tracking command execution.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ShellIntegration {
     /// Current working directory (from OSC 7)
     pub working_directory: Option<String>,

@@ -20,6 +20,34 @@ use ultty_protocol::RegionId;
 use super::App;
 
 impl App {
+    /// Route a request against the last published accessibility tree through
+    /// the same application acknowledgement path as named control actions.
+    pub(super) fn handle_accessibility_event(&mut self, event: accesskit_winit::WindowEvent) {
+        let action = self
+            .accessibility
+            .as_mut()
+            .and_then(|adapter| adapter.handle(&self.window, event));
+        let Some((target, action)) = action else {
+            return;
+        };
+        let pane = self.runtime.protocol.as_ref().and_then(|server| {
+            server
+                .active_tab_sessions()
+                .find(|session| session.session_id() == target.session)
+                .and_then(|session| session.pane())
+        });
+        if let Some(pane) = pane {
+            self.dispatch_accessibility_action(
+                pane.raw() as u64,
+                target.session,
+                target.generation,
+                target.region,
+                target.widget_id,
+                action,
+            );
+        }
+    }
+
     /// Tell the accessibility adapter what changed this pass, including
     /// text appended to live regions, and send it a tree if one is due.
     /// `screen_changed` is output in the focused pane or a new title from
@@ -29,7 +57,7 @@ impl App {
     /// locked, kept or copied.
     pub(super) fn update_accessibility(&mut self, screen_changed: bool, now: Instant) {
         let active = self.accessibility.as_ref().is_some_and(|a| a.is_active());
-        if let Some(server) = self.protocol_server.as_mut() {
+        if let Some(server) = self.runtime.protocol.as_mut() {
             server.set_live_announcements(active);
         }
         if !active {
@@ -43,7 +71,7 @@ impl App {
         // visible tab (ADR 0025; see `accessibility_snapshot`); text for a
         // scene that is not shown is dropped rather than flushed into a
         // tree that leaves it out.
-        if let Some(server) = self.protocol_server.as_mut() {
+        if let Some(server) = self.runtime.protocol.as_mut() {
             let shown: std::collections::HashSet<u64> = server
                 .active_tab_sessions()
                 .filter(|session| session.pane().is_some())
@@ -63,9 +91,9 @@ impl App {
         adapter.observe_shown(digest);
         let snapshot = || {
             accessibility_snapshot(
-                &self.terminal_manager,
+                &self.runtime.manager,
                 &self.tab_bar.tabs,
-                self.protocol_server.as_ref(),
+                self.runtime.protocol.as_ref(),
                 self.renderer.surface_size(),
                 self.renderer.tab_bar_height(),
                 self.renderer.cell_dimensions(),
@@ -88,7 +116,7 @@ impl App {
         for tab in &self.tab_bar.tabs {
             (tab.id.raw(), &tab.title, tab.is_active).hash(&mut hasher);
         }
-        if let Some(tab) = self.terminal_manager.active_tab() {
+        if let Some(tab) = self.runtime.manager.active_tab() {
             tab.id.raw().hash(&mut hasher);
             for terminal in &tab.terminals {
                 terminal.raw().hash(&mut hasher);
@@ -98,7 +126,8 @@ impl App {
         let (width, height) = self.renderer.surface_size();
         let top = self.renderer.tab_bar_height();
         for (id, (x, y, w, h)) in self
-            .terminal_manager
+            .runtime
+            .manager
             .active_pane_rects(width as f32, height as f32 - top)
         {
             id.raw().hash(&mut hasher);
@@ -110,10 +139,10 @@ impl App {
         for value in [cell_width, cell_height, top] {
             value.to_bits().hash(&mut hasher);
         }
-        if let Some(terminal) = self.terminal_manager.focused_terminal() {
+        if let Some(terminal) = self.runtime.manager.focused_terminal() {
             scrolled_back(&terminal.event_loop.terminal()).hash(&mut hasher);
         }
-        if let Some(server) = &self.protocol_server {
+        if let Some(server) = &self.runtime.protocol {
             let mut sessions: Vec<(u64, u64)> = server
                 .active_tab_sessions()
                 .map(|session| (session.session_id(), session.shown_generation()))
@@ -242,14 +271,19 @@ fn scrolled_back(terminal: &ultty::grid::Terminal) -> bool {
 
 /// The region tree under `root` of `session`, drawn at `at`.
 fn capture(session: &NativeSession, root: RegionId, at: Placement) -> SceneSnapshot {
-    SceneSnapshot::capture(
+    let snapshot = SceneSnapshot::capture(
         session.scene(),
         root,
         session.session_id(),
         session.focused_region(),
         |id| session.scroll_offset(id),
         at,
-    )
+    );
+    if session.capabilities() & ultty_protocol::CAP_SEMANTIC_ACTIONS != 0 {
+        snapshot.with_actions(session.scene(), session.shown_generation())
+    } else {
+        snapshot
+    }
 }
 
 /// The title the pane's program set, else its default ("Terminal 3").

@@ -24,8 +24,11 @@ if [ -z "${ULTTY:-}" ] || [ -z "${ULTTYCTL:-}" ]; then
     ULTTY=${ULTTY:-${CARGO_TARGET_DIR:-target}/debug/ultty}
     ULTTYCTL=${ULTTYCTL:-${CARGO_TARGET_DIR:-target}/debug/ulttyctl}
 fi
-cargo build -q --locked -p ultty-client --example inline-surface
-client=$(realpath "${CARGO_TARGET_DIR:-target}/debug/examples/inline-surface")
+if [ -z "${INLINE_APP:-}" ]; then
+    cargo build -q --locked -p ultty-client --example inline-surface
+    INLINE_APP="${CARGO_TARGET_DIR:-target}/debug/examples/inline-surface"
+fi
+client=$(realpath "$INLINE_APP")
 ULTTY=$(realpath "$ULTTY")
 ULTTYCTL=$(realpath "$ULTTYCTL")
 
@@ -35,7 +38,7 @@ mkdir -p "$out/config/ultty"
 out=$(cd "$out" && pwd)
 rm -f "$out/go" "$out/close" "$out/split-close-1" "$out/split-close-2" "$out"/*.png "$out"/text-*.txt "$out/client.log"
 # Unix socket paths are short (108 bytes), so the runtime dir must be too.
-runtime=$(mktemp -d /tmp/ultty-inline.XXXXXX)
+runtime=$(mktemp -d "${TMPDIR:-/tmp}/ui.XXXXXX")
 chmod 700 "$runtime"
 cleanup() {
     kill "${ultty_pid-}" "${xvfb_pid-}" 2>/dev/null || true

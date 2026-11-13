@@ -3,7 +3,7 @@
 //! This module defines messages for external control of ultty,
 //! separate from the TUI app protocol.
 
-use crate::{Key, Modifiers, OverrideFormat};
+use crate::{Key, Modifiers, OverrideFormat, SemanticActionKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -297,6 +297,23 @@ pub enum ControlRequest {
         /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<u64>,
+    },
+
+    /// Invoke a declared action against an exact committed native target.
+    /// Success is delayed until the application acknowledges handling it.
+    InvokeAction {
+        /// Explicit pane; focus is never inferred.
+        target: u64,
+        /// Native session ID returned by Regions.
+        session: u64,
+        /// Exact shown_generation returned by Regions.
+        expected_generation: u64,
+        /// Region in that committed scene.
+        region: u32,
+        /// Exact application widget ID advertised in region metadata.
+        widget_id: String,
+        /// Focus or explicitly registered activation.
+        action: SemanticActionKind,
     },
 
     /// The last command the pane's shell ran (or is running) and what it
@@ -632,6 +649,13 @@ pub enum ControlData {
     /// A `WaitFor` for quiet saw no output for the whole period.
     WaitQuiet,
     WaitTimeout,
+    /// Correlated application acknowledgement, not asynchronous task completion.
+    ActionApplied {
+        /// Native session that acknowledged the action.
+        session: u64,
+        /// Request ID allocated within that live native session.
+        request_id: u32,
+    },
     /// Current or retained direct child lifecycle.
     ProcessJob {
         /// Job ID, also the original pane ID.
@@ -691,11 +715,17 @@ pub enum ControlData {
     TabOpened {
         tab_index: usize,
         pane: u64,
+        /// The child started, but a later presentation update failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        warning: Option<String>,
     },
     /// `SplitPane` opened a pane in the tab at `tab_index`.
     PaneOpened {
         tab_index: usize,
         pane: u64,
+        /// The child started, but a later presentation update failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        warning: Option<String>,
     },
     /// The native apps in a pane's tab; see `ControlRequest::Regions`.
     Regions {
@@ -825,6 +855,10 @@ pub struct TabInfo {
 pub struct NativeScene {
     /// The app's session, unique for the terminal's lifetime.
     pub session: u64,
+    /// Terminal display generation to pin on InvokeAction. Absent from older
+    /// servers; zero is omitted to preserve their JSON representation.
+    #[serde(default, skip_serializing_if = "is_zero_generation")]
+    pub shown_generation: u64,
     /// Connected in-band over the PTY rather than over the tab's socket.
     pub in_band: bool,
     /// The region with keyboard focus, if any.
@@ -837,6 +871,10 @@ pub struct NativeScene {
     /// predates them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub surfaces: Vec<SurfaceInfo>,
+}
+
+fn is_zero_generation(value: &u64) -> bool {
+    *value == 0
 }
 
 /// One inline surface of a native scene.
@@ -1042,10 +1080,12 @@ mod tests {
             ControlData::TabOpened {
                 tab_index: 2,
                 pane: 9,
+                warning: None,
             },
             ControlData::PaneOpened {
                 tab_index: 2,
                 pane: 10,
+                warning: None,
             },
             ControlData::LastCommand {
                 command: "make".to_string(),
@@ -1057,6 +1097,7 @@ mod tests {
             ControlData::Regions {
                 scenes: vec![NativeScene {
                     session: 3,
+                    shown_generation: 0,
                     in_band: false,
                     focused: Some(2),
                     regions: vec![RegionInfo {
@@ -1279,6 +1320,38 @@ mod tests {
     }
 
     /// ulttyctl reads every reply as JSON, so each one must survive the trip.
+    #[test]
+    fn test_semantic_action_control_round_trip_and_scene_generation_defaults() {
+        let request = ControlRequest::InvokeAction {
+            target: 1,
+            session: 2,
+            expected_generation: 3,
+            region: 4,
+            widget_id: "inc".into(),
+            action: SemanticActionKind::Activate,
+        };
+        assert_eq!(
+            serde_json::from_slice::<ControlRequest>(&serde_json::to_vec(&request).unwrap())
+                .unwrap(),
+            request
+        );
+        let response = ControlResponse::Data(ControlData::ActionApplied {
+            session: 2,
+            request_id: 5,
+        });
+        assert_eq!(
+            serde_json::from_slice::<ControlResponse>(&serde_json::to_vec(&response).unwrap())
+                .unwrap(),
+            response
+        );
+        let mut scene: NativeScene =
+            serde_json::from_str(r#"{"session":2,"in_band":false,"focused":null,"regions":[]}"#)
+                .unwrap();
+        assert_eq!(scene.shown_generation, 0);
+        scene.shown_generation = 7;
+        assert_eq!(serde_json::to_value(&scene).unwrap()["shown_generation"], 7);
+    }
+
     #[test]
     fn test_versioned_control_and_job_types_round_trip() {
         let owner = OwnerRef {

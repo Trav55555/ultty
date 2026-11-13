@@ -50,6 +50,10 @@ pub struct MockBackend {
     pushed_overrides: VecDeque<OverridePush>,
     /// The runner's answers to them: request id and the error, if any.
     pub override_results: Vec<(u32, Option<String>)>,
+    /// Native actions queued by the test terminal.
+    pub action_requests: VecDeque<ultty_protocol::SemanticActionRequest>,
+    /// Application acknowledgments, after focus or handler dispatch.
+    pub action_results: Vec<(u32, Option<String>)>,
 }
 
 impl MockBackend {
@@ -83,6 +87,8 @@ impl MockBackend {
             polls: Arc::new(AtomicUsize::new(0)),
             pushed_overrides: VecDeque::new(),
             override_results: Vec::new(),
+            action_requests: VecDeque::new(),
+            action_results: Vec::new(),
         }
     }
 
@@ -122,6 +128,7 @@ impl MockBackend {
             || !self.events.is_empty()
             || self.pending_error.is_some()
             || !self.pushed_overrides.is_empty()
+            || !self.action_requests.is_empty()
     }
 
     /// Keep polling `None` after the scripted events run out instead of

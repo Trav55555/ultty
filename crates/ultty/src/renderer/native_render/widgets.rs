@@ -1,11 +1,12 @@
-use super::super::{DeferredImageRender, Renderer, Vertex};
+use super::super::{DeferredImageRender, NativeResourceKey, Renderer, Vertex};
 
 impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_widget_content(
         &mut self,
         widget: &ultty_protocol::WidgetContent,
-        region_id: ultty_protocol::RegionId,
+        resource: NativeResourceKey,
+        revision: u64,
         x: f32,
         y: f32,
         w: f32,
@@ -46,7 +47,7 @@ impl Renderer {
                     // Lerp stored value toward target
                     let current = self
                         .animated_progress
-                        .get(&region_id)
+                        .get(&resource)
                         .copied()
                         .unwrap_or(target_value);
                     let lerped = current + (target_value - current) * 0.1;
@@ -55,7 +56,7 @@ impl Renderer {
                     } else {
                         lerped
                     };
-                    self.animated_progress.insert(region_id, lerped);
+                    self.animated_progress.insert(resource, lerped);
                     lerped
                 } else {
                     target_value
@@ -338,7 +339,7 @@ impl Renderer {
             }
             WidgetContent::Image(img) => {
                 // Upload image to GPU and defer rendering to image pipeline pass
-                if self.upload_native_image(region_id, img) {
+                if self.upload_native_image(resource, revision, img) {
                     // Compute quad dimensions based on ImageScale
                     let (img_x, img_y, img_w, img_h) = match img.scale {
                         ultty_protocol::ImageScale::Stretch => (x, y, w, h),
@@ -374,7 +375,7 @@ impl Renderer {
                         }
                     };
                     deferred_images.push(DeferredImageRender {
-                        region_id,
+                        resource,
                         x: img_x,
                         y: img_y,
                         w: img_w,

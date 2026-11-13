@@ -42,6 +42,12 @@ or a working directory without a command fail with code 4. Their successful
 startup receipt means no setup/exec failure was reported; application readiness
 and completion remain separate.
 
+If a child starts but the subsequent host layout update fails, the successful
+spawn response retains its pane identity and includes an optional `warning`.
+Inspect the pane before taking further action; launching again can duplicate the
+already running process. JSON and MCP retain the warning; text CLI output writes
+it to stderr while keeping the pane ID on stdout.
+
 The returned pane ID is also a direct-child job ID, scoped to the owner epoch.
 `job_status {job}` returns `running`, `exited {status}` or `closed`.
 `wait_job {job, timeout_ms}` waits by identity, including already completed jobs.
@@ -61,6 +67,46 @@ Previously queued completion events cannot satisfy the new wait. The timeout is
 Legacy `wait_for` keeps its future-event/text/quiet semantics. It is not a command
 receipt. Neither a quiet period nor a stale last-command query proves that a newly
 typed command completed. Deferred waits and subscriptions cannot appear in a batch.
+
+## Native semantic actions
+
+`regions` reports each session's `shown_generation`, regions and metadata.
+`ulttui.widget_id` identifies the application widget; `ulttui.actions` lists
+supported actions. This identity is separate from native reconciliation keys.
+First-stage dispatch supports full-scene `focus` and explicitly registered
+`activate`; inline surfaces and value editing are refused.
+
+`invoke_action` requires explicit `target` pane, `session`, `expected_generation`,
+`region`, `widget_id` and `action`. It does not infer a recipient from current
+focus. The native server checks the committed display generation, unique widget
+identity, declared action, visibility, disabled state and owning pane. It sends
+the actual last committed application FrameId with its request. The application
+checks that frame and its current registry again before handling the action.
+The terminal display generation and the application FrameId are distinct fences.
+
+The caller receives `action_applied {session, request_id}` only after the matching
+application acknowledgement. Activation dispatch acceptance does not establish
+completion of an asynchronous application task. Application refusal returns code
+15. A full acknowledgement queue returns code 12. There are at most 128 unresolved
+control/accessibility actions globally and 128 per native session; these are
+independent of transport byte limits.
+
+A disconnect, flush failure or five-second acknowledgement timeout may leave the
+outcome unknown: the application may already have applied the action. The error
+says to reinspect before retrying. Cancelling bookkeeping does not undo app work.
+Request IDs never repeat within one native session; late or mismatched replies
+cannot satisfy a newer request. AccessKit actions use the same dispatcher and
+acknowledgement tracking, with outcomes logged rather than sent to a control
+client. Keyboard and raw mouse events retain their application-owned behavior.
+
+```sh
+# Inspect IDs, shown_generation and declared actions first:
+ulttyctl --json --pane 4 regions
+ulttyctl invoke-action 4 12 37 8 inc activate
+```
+
+MCP exposes `ultty_invoke_action` with the same required identities. It never
+substitutes the focused pane for an omitted action target.
 
 ## V2 subscriptions
 

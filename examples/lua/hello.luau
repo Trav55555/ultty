@@ -9,17 +9,20 @@ local function change(state, by)
 end
 
 return app {
+	actions = { inc = "activate", dec = "activate", reset = "activate" },
 	init = function(prev)
 		return prev or { count = 0 }
 	end,
 
 	update = function(state, msg)
-		if msg.type ~= "key" then
+		local targets = { inc = "+", dec = "-", reset = "r" }
+		local key
+		if msg.type == "action" and msg.action == "activate" then
+			key = targets[msg.id]
+		elseif msg.type == "key" then
+			key = msg.key == "enter" and (targets[msg.focused] or msg.key) or msg.key
+		else
 			return state
-		end
-		local key = msg.key
-		if key == "enter" then
-			key = ({ inc = "+", dec = "-", reset = "r" })[msg.focused] or key
 		end
 		if key == "+" or key == "=" or key == "up" then
 			return change(state, 1)

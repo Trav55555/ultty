@@ -35,7 +35,7 @@ mkdir -p "$out/config/ultty"
 out=$(cd "$out" && pwd)
 rm -f "$out"/*.json "$out"/*.log "$out"/*.png
 # Unix socket paths are short (108 bytes), so the runtime dir must be too.
-runtime=$(mktemp -d /tmp/ultty-split.XXXXXX)
+runtime=$(mktemp -d "${TMPDIR:-/tmp}/us.XXXXXX")
 chmod 700 "$runtime"
 cleanup() {
     kill "${ultty_pid-}" "${xvfb_pid-}" 2>/dev/null || true

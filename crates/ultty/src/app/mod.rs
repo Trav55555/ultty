@@ -138,7 +138,7 @@ pub struct App {
     /// GPU renderer
     renderer: Renderer,
     /// Terminal manager (handles multiple tabs/panes)
-    terminal_manager: TerminalManager,
+    runtime: ultty::runtime::SessionRuntime,
     /// Where the session is saved on exit; `None` for an `ultty -e` window,
     /// whose one tab must not replace the user's saved tabs.
     session_file: Option<std::path::PathBuf>,
@@ -207,11 +207,6 @@ pub struct App {
     auto_dump_frames: u32,
     /// Frames drawn so far (saturating); marks the first in the startup log.
     frames_drawn: u32,
-    /// Native protocol server for TUI apps
-    protocol_server: Option<ProtocolServer>,
-    /// The pane layout native sessions were last sized for
-    /// (`TerminalManager::layout_generation`).
-    native_layout_generation: u64,
     /// The pane whose native sessions took the last mouse press, while the
     /// button is held: moves and the release go to it, wherever they are.
     native_mouse_capture: native_panes::MouseCapture,
@@ -222,6 +217,8 @@ pub struct App {
     /// Override pushes relayed to a native app and waiting for its answer
     /// (ADR 0023 §9).
     pending_override_pushes: Vec<control::PendingOverridePush>,
+    /// Semantic actions waiting for an application acknowledgement.
+    pending_semantic_actions: Vec<control::PendingSemanticAction>,
     /// `resize` requests waiting for the window to reach their size.
     pending_resizes: Vec<control_resize::PendingResize>,
     /// The `request_id` of the next override push.
@@ -404,11 +401,14 @@ impl App {
             .into_iter()
             .map(|(pane, _)| pane)
             .collect();
-        terminal_manager.set_waker(std::sync::Arc::new(move || {
+        let mut runtime =
+            ultty::runtime::SessionRuntime::new(terminal_manager, protocol_server, (cols, rows))?;
+        runtime.set_viewer_present(true);
+        runtime.set_viewer_waker(Some(std::sync::Arc::new(move || {
             if let Ok(proxy) = pty_proxy.lock() {
                 let _ = proxy.send_event(AppEvent::RuntimeReadable);
             }
-        }));
+        })));
         let socket_proxy = event_proxy.clone();
         let socket_wakeup = wakeup::SocketWakeup::new(move || {
             socket_proxy.send_event(AppEvent::RuntimeReadable).is_ok()
@@ -439,7 +439,7 @@ impl App {
             accessibility,
             surface,
             renderer,
-            terminal_manager,
+            runtime,
             session_file: session_file(
                 startup_command,
                 ultty::session::SessionData::last_session_path(),
@@ -479,10 +479,10 @@ impl App {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0),
-            protocol_server,
             control_server,
             pending_control_waits: Vec::new(),
             pending_override_pushes: Vec::new(),
+            pending_semantic_actions: Vec::new(),
             pending_resizes: Vec::new(),
             next_override_request: 1,
             published_panes,
@@ -491,7 +491,6 @@ impl App {
             native_search_active: false,
             native_search_query: String::new(),
             native_search_index: 0,
-            native_layout_generation: 0,
             native_mouse_capture: native_panes::MouseCapture::default(),
             url_row_buf: Vec::new(),
             url_hyperlink_grid: Vec::new(),
@@ -651,23 +650,14 @@ impl App {
                 profile_split_direction(pane.split.as_deref())?;
             }
         }
-        // Create an empty manager first
-        let mut manager = TerminalManager::with_tab_env(cols, rows, &mut |tab_id| {
-            tab_shell_env(protocol_server, term, tab_id)
-        })
-        .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e))?;
-
-        // If profile has tabs, close the default tab and create configured ones
-        if !profile.tabs.is_empty() {
-            // Close the default tab that was created
-            if let Some(tab) = manager.active_tab() {
-                let tab_id = tab.id;
-                manager.close_tab(tab_id);
-                if let Some(server) = protocol_server.as_mut() {
-                    server.close_tab(tab_id);
-                }
-            }
-
+        if profile.tabs.is_empty() {
+            return TerminalManager::with_tab_env(cols, rows, &mut |tab_id| {
+                tab_shell_env(protocol_server, term, tab_id)
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e));
+        }
+        let mut manager = TerminalManager::empty(cols, rows);
+        {
             // Get default shell for tabs without explicit command
             let default_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
 
@@ -736,7 +726,7 @@ impl App {
 
     /// Save the current session, unless this window keeps none.
     fn save_session(&self) {
-        save_session(&self.terminal_manager, self.session_file.as_deref());
+        save_session(&self.runtime.manager, self.session_file.as_deref());
     }
 
     /// Clear out the sockets and tokens that killed or crashed instances
@@ -782,9 +772,9 @@ impl App {
 
     /// Create a new tab whose shell is wired to its own protocol socket.
     fn create_tab(&mut self) -> std::io::Result<TabId> {
-        self.terminal_manager.create_tab_with_env(&mut |tab_id| {
+        self.runtime.manager.create_tab_with_env(&mut |tab_id| {
             tab_shell_env(
-                &mut self.protocol_server,
+                &mut self.runtime.protocol,
                 &self.config.terminal.term,
                 tab_id,
             )
@@ -799,14 +789,14 @@ impl App {
         working_dir: Option<&str>,
         title: Option<&str>,
     ) -> std::io::Result<TabId> {
-        self.terminal_manager.create_tab_with_command(
+        self.runtime.manager.create_tab_with_command(
             command,
             args,
             working_dir,
             title,
             &mut |tab_id| {
                 tab_shell_env(
-                    &mut self.protocol_server,
+                    &mut self.runtime.protocol,
                     &self.config.terminal.term,
                     tab_id,
                 )
@@ -818,20 +808,7 @@ impl App {
     /// manager: the visible tab owns keyboard input and clipboard access, and
     /// tabs that no longer exist lose their socket and sessions.
     fn sync_protocol_tabs(&mut self) {
-        let Some(server) = self.protocol_server.as_mut() else {
-            return;
-        };
-        let tabs = self.terminal_manager.tabs();
-        let closed: Vec<TabId> = server
-            .open_tabs()
-            .filter(|open| !tabs.iter().any(|tab| tab.id == *open))
-            .collect();
-        for tab_id in closed {
-            server.close_tab(tab_id);
-        }
-        let terminal_manager = &self.terminal_manager;
-        server.retain_pane_sessions(|pane| terminal_manager.terminal(pane).is_some());
-        server.set_active_tab(self.terminal_manager.active_tab().map(|tab| tab.id));
+        self.runtime.sync_tabs();
     }
 
     /// Run the application. The first tab runs `startup_command`, or the
@@ -869,21 +846,23 @@ impl App {
 
     /// Get the terminal state of the focused terminal.
     fn terminal(&self) -> Option<ultty::event_loop::TerminalGuard<'_>> {
-        self.terminal_manager
+        self.runtime
+            .manager
             .focused_terminal()
             .map(|t| t.event_loop.terminal())
     }
 
     /// Get mutable terminal state of the focused terminal.
     fn terminal_mut(&mut self) -> Option<ultty::event_loop::TerminalGuard<'_>> {
-        self.terminal_manager
+        self.runtime
+            .manager
             .focused_terminal_mut()
             .map(|t| t.event_loop.terminal_mut())
     }
 
     /// Send input to the focused terminal.
     fn send_input(&mut self, data: &[u8]) -> std::io::Result<()> {
-        if let Some(terminal) = self.terminal_manager.focused_terminal_mut() {
+        if let Some(terminal) = self.runtime.manager.focused_terminal_mut() {
             self.input_sent_at = Some(Instant::now());
             self.output_since_input = false;
             terminal.event_loop.send_input(data)
@@ -897,7 +876,7 @@ impl App {
     /// output that follows as an echo to draw at once: a moving mouse in
     /// vim or htop would otherwise force a frame for every motion event.
     fn send_report(&mut self, data: &[u8]) -> std::io::Result<()> {
-        match self.terminal_manager.focused_terminal_mut() {
+        match self.runtime.manager.focused_terminal_mut() {
             Some(terminal) => terminal.event_loop.send_input(data),
             None => Ok(()),
         }
@@ -910,7 +889,8 @@ impl App {
     /// Show the focused pane's directory and git branch in the title band.
     fn update_title_location(&mut self) {
         let cwd = self
-            .terminal_manager
+            .runtime
+            .manager
             .focused_terminal()
             .and_then(control::terminal_working_directory);
         let home = std::env::var("HOME").ok();
@@ -945,16 +925,17 @@ impl App {
 
         let total_width = self.renderer.surface_size().0 as f32;
         let active_tab_id = self
-            .terminal_manager
+            .runtime
+            .manager
             .active_tab()
             .map(|t| t.id)
             .unwrap_or_else(|| TabId::new(0));
 
         let tab_width_override = self.active_tab_width_freeze().map(|freeze| freeze.width);
-        let tab_titles = self.terminal_manager.tab_display_titles();
+        let tab_titles = self.runtime.manager.tab_display_titles();
 
         self.tab_bar.update_with_titles_and_tab_width_override(
-            self.terminal_manager.tabs(),
+            self.runtime.manager.tabs(),
             &tab_titles,
             active_tab_id,
             total_width,
@@ -980,7 +961,7 @@ impl App {
     /// Show each tab's most urgent pane status, and the focused pane's in
     /// the title band.
     fn update_tab_statuses(&mut self) {
-        let manager = &self.terminal_manager;
+        let manager = &self.runtime.manager;
         for (state, tab) in self.tab_bar.tabs.iter_mut().zip(manager.tabs()) {
             state.status = tab
                 .terminals
@@ -1030,7 +1011,7 @@ impl App {
     fn refresh_runtime_wakeup_fds(&mut self) {
         let mut readable = Vec::new();
         let mut writable = Vec::new();
-        if let Some(server) = self.protocol_server.as_ref() {
+        if let Some(server) = self.runtime.protocol.as_ref() {
             readable.extend(server.readiness_fds());
         }
         if let Some(server) = self.control_server.as_ref() {
@@ -1150,7 +1131,8 @@ impl App {
 
     /// Check if the visible tab has any native protocol sessions.
     fn has_native_sessions(&self) -> bool {
-        self.protocol_server
+        self.runtime
+            .protocol
             .as_ref()
             .is_some_and(|s| s.active_tab_sessions().next().is_some())
     }
@@ -1161,7 +1143,7 @@ impl App {
         self.native_search_matches.clear();
         self.native_search_index = 0;
 
-        if let Some(ref server) = self.protocol_server {
+        if let Some(ref server) = self.runtime.protocol {
             for session in server.active_tab_sessions() {
                 let matches = session.scene().search(query);
                 self.native_search_matches.extend(matches);
@@ -1316,7 +1298,7 @@ impl App {
         // Access terminal_manager directly (not self.terminal()) to enable
         // disjoint field borrows — Rust can see url_row_buf/url_hyperlink_grid/
         // url_hyperlink_map are separate from terminal_manager.
-        let Some(focused) = self.terminal_manager.focused_terminal() else {
+        let Some(focused) = self.runtime.manager.focused_terminal() else {
             return;
         };
         let terminal = focused.event_loop.terminal();
@@ -1385,7 +1367,7 @@ impl App {
     /// to accommodate the requested column count.
     fn handle_column_resize_requests(&mut self) {
         // Check if focused terminal has a pending resize request
-        if let Some(terminal) = self.terminal_manager.focused_terminal_mut() {
+        if let Some(terminal) = self.runtime.manager.focused_terminal_mut() {
             if let Some(columns) = terminal
                 .event_loop
                 .terminal_mut()
@@ -1424,7 +1406,7 @@ impl App {
             cell_width,
             cell_height,
         };
-        if let Err(e) = self.terminal_manager.layout_panes(area) {
+        if let Err(e) = self.runtime.manager.layout_panes(area) {
             tracing::warn!("Failed to resize terminals: {}", e);
         }
     }
@@ -1746,9 +1728,8 @@ impl ApplicationHandler<AppEvent> for AppHandler {
             }
             AppEvent::Accessibility(event) => {
                 if let Some(app) = self.app.as_mut() {
-                    if let Some(adapter) = app.accessibility.as_mut() {
-                        adapter.handle(&app.window, event.window_event);
-                    }
+                    app.handle_accessibility_event(event.window_event);
+                    app.update_and_schedule(event_loop);
                 }
             }
             AppEvent::ShutdownSignal => {
@@ -1847,6 +1828,8 @@ mod tests {
         let manager =
             super::App::create_terminal_manager(&config, 80, 24, &mut None, Some(&choice)).unwrap();
         assert_eq!(manager.tab_count(), 1);
+        // The configured command is the first child: no throwaway shell/job.
+        assert_eq!(manager.tabs()[0].terminals[0].raw(), 0);
         assert_eq!(manager.pane_count(), 2);
         let rects = manager.active_pane_rects(800.0, 600.0);
         assert_eq!(rects[0].1, (0.0, 0.0, 800.0, 300.0));

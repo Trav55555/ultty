@@ -4,7 +4,7 @@
 //! ImageWidget rendering, including pipeline creation, texture upload,
 //! caching, and draw calls.
 
-use super::{CachedImageTexture, ImagePipeline, Renderer, Vertex};
+use super::{CachedImageTexture, ImagePipeline, NativeResourceKey, Renderer, Vertex};
 use crate::grid::{Terminal, TerminalImage};
 use wgpu::util::DeviceExt;
 
@@ -51,20 +51,22 @@ fn image_upload_size_ok(
 }
 
 impl Renderer {
-    /// Upload a native protocol ImageWidget to the GPU, caching by region ID.
+    /// Upload a native protocol ImageWidget, caching by session, region and revision.
     /// Returns true if the texture is ready for rendering.
     pub(super) fn upload_native_image(
         &mut self,
-        region_id: ultty_protocol::RegionId,
+        resource: NativeResourceKey,
+        revision: u64,
         img: &ultty_protocol::ImageWidget,
     ) -> bool {
-        // Check cache — re-upload if dimensions changed
-        if let Some(cached) = self.native_image_cache.get(&region_id) {
-            if cached.width == img.width && cached.height == img.height {
+        if let Some(cached) = self.native_image_cache.get(&resource) {
+            if cached.width == img.width
+                && cached.height == img.height
+                && cached.revision == Some(revision)
+            {
                 return true;
             }
-            // Dimensions changed, remove old entry
-            self.native_image_cache.remove(&region_id);
+            self.native_image_cache.remove(&resource);
         }
 
         if !image_upload_size_ok(
@@ -137,12 +139,13 @@ impl Renderer {
         });
 
         self.native_image_cache.insert(
-            region_id,
+            resource,
             CachedImageTexture {
                 texture,
                 bind_group,
                 width: img.width,
                 height: img.height,
+                revision: Some(revision),
             },
         );
 
@@ -248,6 +251,7 @@ impl Renderer {
                 bind_group,
                 width: image.width,
                 height: image.height,
+                revision: None,
             },
         );
 
@@ -382,7 +386,14 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         terminal: &Terminal,
+        origin: (f32, f32),
+        scissor: Option<super::native_render::Scissor>,
     ) {
+        // ImageId is allocated per terminal. The single-pane renderer may
+        // switch terminals between frames without a globally unique pane key,
+        // so discard these textures before drawing a different observation.
+        // This conservatively reuploads VT images on every render.
+        self.image_cache.clear();
         if terminal.images().is_empty() {
             return;
         }
@@ -402,8 +413,8 @@ impl Renderer {
             };
 
             // Build vertices for this single image
-            let x0 = image.start_col as f32 * self.cell_width;
-            let y0 = image.start_row as f32 * self.cell_height + self.tab_bar_height;
+            let x0 = image.start_col as f32 * self.cell_width + origin.0;
+            let y0 = image.start_row as f32 * self.cell_height + origin.1;
             let x1 = x0 + image.cell_width as f32 * self.cell_width;
             let y1 = y0 + image.cell_height as f32 * self.cell_height;
 
@@ -472,6 +483,9 @@ impl Renderer {
                 });
 
                 if let Some(img_pipeline) = self.image_pipeline.as_ref() {
+                    if let Some((x, y, width, height)) = scissor {
+                        render_pass.set_scissor_rect(x, y, width, height);
+                    }
                     render_pass.set_pipeline(&img_pipeline.pipeline);
                     render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                     render_pass.set_bind_group(1, &cached.bind_group, &[]);
@@ -505,5 +519,171 @@ mod tests {
         // width * height * 4 would overflow u32 but not the u64 check;
         // the buffer is far too short so it is still rejected.
         assert!(!image_upload_size_ok(65536, 65536, 16, u32::MAX, "t"));
+    }
+
+    /// Exercises the actual pane renderer and GPU readback. Run explicitly on
+    /// a machine with a software or hardware Vulkan adapter.
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn gpu_pane_images_are_scoped_and_native_updates_replace_pixels() {
+        use crate::attach::native::NativeSnapshot;
+        use crate::grid::{Dimensions, ImageId};
+        use crate::protocol::NativeSession;
+        use crate::renderer::{OverlayState, PaneDraw, PaneInfo};
+        use crate::scene::view::NativeRenderSource;
+        use crate::terminal_manager::TabId;
+        use ultty_protocol::{
+            AppMessage, Constraints, Content, Dimension, FrameId, ImageScale, ImageWidget,
+            RegionId, Style, WidgetContent, CLIENT_DEFAULT_CAPABILITIES, PROTOCOL_VERSION,
+        };
+        use ultty_vt::grid::snapshot::TerminalSnapshot;
+
+        fn native(id: u64, rgba: [u8; 4]) -> (NativeSession, std::os::unix::net::UnixStream) {
+            let (socket, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            let mut session = NativeSession::new(socket, id, TabId::new(0)).unwrap();
+            session.set_viewport(16.0, 8.0);
+            session
+                .handle_message(AppMessage::ClientHello {
+                    version: PROTOCOL_VERSION,
+                    requested_capabilities: CLIENT_DEFAULT_CAPABILITIES,
+                })
+                .unwrap();
+            session
+                .handle_message(AppMessage::BeginFrame {
+                    frame_id: FrameId(1),
+                })
+                .unwrap();
+            session
+                .handle_message(AppMessage::CreateRegion {
+                    id: RegionId::new(7),
+                    parent: RegionId::ROOT,
+                    insert_index: -1,
+                    constraints: Constraints {
+                        width: Dimension::Cells(8.0),
+                        height: Dimension::Cells(3.0),
+                        ..Default::default()
+                    },
+                    style: Style::default(),
+                })
+                .unwrap();
+            content(&mut session, rgba);
+            session
+                .handle_message(AppMessage::EndFrame {
+                    frame_id: FrameId(1),
+                })
+                .unwrap();
+            (session, peer)
+        }
+        fn content(session: &mut NativeSession, rgba: [u8; 4]) {
+            session
+                .handle_message(AppMessage::SetContent {
+                    id: RegionId::new(7),
+                    content: Content::Widget(WidgetContent::Image(ImageWidget {
+                        width: 1,
+                        height: 1,
+                        data: rgba.to_vec(),
+                        scale: ImageScale::Stretch,
+                    })),
+                })
+                .unwrap();
+        }
+        fn pixels(
+            renderer: &mut Renderer,
+            panes: &[PaneDraw<'_>],
+            path: &std::path::Path,
+        ) -> Vec<u8> {
+            renderer
+                .capture_panes_screenshot(panes, &OverlayState::default(), path)
+                .unwrap();
+            let bytes = std::fs::read(path).unwrap();
+            let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+                .read_info()
+                .unwrap();
+            let mut data = vec![0; reader.output_buffer_size()];
+            reader.next_frame(&mut data).unwrap();
+            data
+        }
+        fn rgb(data: &[u8], x: usize, y: usize) -> [u8; 3] {
+            let offset = (y * 256 + x) * 4;
+            [data[offset], data[offset + 1], data[offset + 2]]
+        }
+        fn draw<'a>(
+            a: &'a Terminal,
+            b: &'a Terminal,
+            left: &'a dyn NativeRenderSource,
+            right: &'a dyn NativeRenderSource,
+        ) -> Vec<PaneDraw<'a>> {
+            vec![
+                PaneDraw {
+                    terminal: a,
+                    info: PaneInfo::new(0.0, 0.0, 128.0, 96.0, true),
+                    sessions: vec![left],
+                },
+                PaneDraw {
+                    terminal: b,
+                    info: PaneInfo::new(128.0, 0.0, 128.0, 96.0, true),
+                    sessions: vec![right],
+                },
+            ]
+        }
+        let mut renderer = pollster::block_on(Renderer::new_headless(256, 100)).unwrap();
+        let x = (renderer.cell_width * 3.0) as usize;
+        let y = (4.0 + renderer.cell_height) as usize;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panes.png");
+        let (mut left, _left_peer) = native(1, [255, 0, 0, 255]);
+        let (right, _right_peer) = native(2, [0, 0, 255, 255]);
+        let a = Terminal::new(Dimensions::new(16, 8));
+        let b = Terminal::new(Dimensions::new(16, 8));
+        let left_view = NativeSnapshot::capture(&left).unwrap().to_view().unwrap();
+        let right_view = NativeSnapshot::capture(&right).unwrap().to_view().unwrap();
+        let image = pixels(&mut renderer, &draw(&a, &b, &left_view, &right_view), &path);
+        assert_eq!(rgb(&image, x, y), [255, 0, 0]);
+        assert_eq!(rgb(&image, 128 + x, y), [0, 0, 255]);
+        left.handle_message(AppMessage::BeginFrame {
+            frame_id: FrameId(2),
+        })
+        .unwrap();
+        content(&mut left, [0, 255, 0, 255]);
+        left.handle_message(AppMessage::EndFrame {
+            frame_id: FrameId(2),
+        })
+        .unwrap();
+        let left_view = NativeSnapshot::capture(&left).unwrap().to_view().unwrap();
+        let image = pixels(&mut renderer, &draw(&a, &b, &left_view, &right_view), &path);
+        assert_eq!(rgb(&image, x, y), [0, 255, 0]);
+        assert_eq!(rgb(&image, 128 + x, y), [0, 0, 255]);
+
+        let mut a = Terminal::new(Dimensions::new(16, 8));
+        let mut b = Terminal::new(Dimensions::new(16, 8));
+        for (terminal, color) in [(&mut a, [255, 0, 0, 255]), (&mut b, [0, 0, 255, 255])] {
+            terminal.images_mut().add(TerminalImage {
+                id: ImageId(0),
+                width: 1,
+                height: 1,
+                data: color.to_vec(),
+                start_col: 0,
+                start_row: 0,
+                cell_width: 8,
+                cell_height: 3,
+            });
+        }
+        let a = TerminalSnapshot::capture(&a).unwrap().to_view().unwrap();
+        let b = TerminalSnapshot::capture(&b).unwrap().to_view().unwrap();
+        let panes = [
+            PaneDraw {
+                terminal: &a,
+                info: PaneInfo::new(0.0, 0.0, 128.0, 96.0, true),
+                sessions: vec![],
+            },
+            PaneDraw {
+                terminal: &b,
+                info: PaneInfo::new(128.0, 0.0, 128.0, 96.0, true),
+                sessions: vec![],
+            },
+        ];
+        let image = pixels(&mut renderer, &panes, &path);
+        assert_eq!(rgb(&image, x, y), [255, 0, 0]);
+        assert_eq!(rgb(&image, 128 + x, y), [0, 0, 255]);
     }
 }

@@ -357,7 +357,19 @@ impl Deref for TerminalGuard<'_> {
 
 impl DerefMut for TerminalGuard<'_> {
     fn deref_mut(&mut self) -> &mut Terminal {
+        // Conservative invalidation: even a mutable borrow which makes no
+        // change is cheaper than missing a viewer-visible local mutation.
+        self.state.generation = self.state.generation.wrapping_add(1);
         &mut self.state.terminal
+    }
+}
+
+impl TerminalGuard<'_> {
+    /// Authoritative observation generation at this locked snapshot boundary.
+    /// Parsing, stream closure and local mutable access advance it, independently
+    /// of coalesced/lost display events. Scoped to this terminal's lifetime.
+    pub fn snapshot_generation(&self) -> u64 {
+        self.state.generation
     }
 }
 
@@ -536,6 +548,11 @@ impl EventLoop {
         self.terminal()
     }
 
+    /// Observe whether a snapshot may have changed without consuming events.
+    pub fn snapshot_generation(&self) -> u64 {
+        self.shared.lock().generation
+    }
+
     /// Check if the child process has exited.
     pub fn has_exited(&self) -> bool {
         self.child.has_exited()
@@ -601,9 +618,20 @@ impl EventLoop {
     /// The grid is resized before the PTY, so output the child produces in
     /// response to SIGWINCH is always parsed at the new size.
     pub fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
-        self.terminal().resize(Dimensions::new(cols, rows));
+        let pixels = {
+            let mut terminal = self.terminal();
+            if terminal.dimensions() != Dimensions::new(cols, rows) {
+                terminal.resize(Dimensions::new(cols, rows));
+            }
+            terminal.cell_pixel_size().unwrap_or((0, 0))
+        };
         self.child
-            .resize(PtySize::new(cols, rows))
+            .resize(PtySize::with_pixels(
+                cols,
+                rows,
+                cols.saturating_mul(pixels.0),
+                rows.saturating_mul(pixels.1),
+            ))
             .map_err(io::Error::other)
     }
 
@@ -826,6 +854,7 @@ impl EventLoop {
                 state.attached_exited = true;
                 state.shell_commands.cancel();
                 state.terminal.process_exited();
+                state.generation = state.generation.wrapping_add(1);
                 exited_status = self.child.exit_status();
             }
         }
@@ -1820,6 +1849,25 @@ mod status_and_submission_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_snapshot_revision_tracks_mutation_without_consuming_events() {
+        let event_loop =
+            EventLoop::with_command("/bin/sleep", &["/bin/sleep", "5"], 20, 3).expect("create");
+        let before = event_loop.snapshot_generation();
+        {
+            let terminal = event_loop.terminal();
+            assert_eq!(terminal.snapshot_generation(), before);
+            assert_eq!(terminal.dimensions().cols, 20);
+        }
+        assert_eq!(event_loop.snapshot_generation(), before);
+        {
+            let mut terminal = event_loop.terminal();
+            terminal.set_title("changed locally".to_owned());
+            assert_ne!(terminal.snapshot_generation(), before);
+        }
+        assert_ne!(event_loop.snapshot_generation(), before);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn parse_proc_stat_handles_process_names_with_spaces() {
@@ -2155,6 +2203,29 @@ mod tests {
         assert!(event_loop.resize(120, 40).is_ok());
         assert_eq!(event_loop.terminal().dimensions().cols, 120);
         assert_eq!(event_loop.terminal().dimensions().rows, 40);
+    }
+
+    #[test]
+    fn test_resize_publishes_pixel_metrics_when_grid_is_unchanged() {
+        let mut event_loop =
+            EventLoop::with_command("/bin/sleep", &["/bin/sleep", "5"], 80, 24).unwrap();
+        for (width, height) in [(8, 16), (11, 23)] {
+            event_loop.terminal().set_cell_pixel_size(width, height);
+            event_loop.resize(80, 24).unwrap();
+            let mut size = libc::winsize {
+                ws_row: 0,
+                ws_col: 0,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            // SAFETY: the child owns this live PTY fd and size is writable winsize storage.
+            assert_eq!(
+                unsafe { libc::ioctl(event_loop.child.pty_fd(), libc::TIOCGWINSZ, &mut size) },
+                0
+            );
+            assert_eq!((size.ws_col, size.ws_row), (80, 24));
+            assert_eq!((size.ws_xpixel, size.ws_ypixel), (80 * width, 24 * height));
+        }
     }
 
     #[test]

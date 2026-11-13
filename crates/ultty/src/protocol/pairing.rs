@@ -45,9 +45,9 @@ pub struct SurfaceOnScreen {
 
 /// The placed surfaces of `sessions` that show on `terminal`'s screen, in
 /// drawing order: none while the alternate screen shows.
-pub fn surfaces_on_screen<'a>(
+pub fn surfaces_on_screen<'a, S: crate::scene::view::NativeRenderSource + ?Sized + 'a>(
     terminal: &Terminal,
-    sessions: impl IntoIterator<Item = &'a NativeSession>,
+    sessions: impl IntoIterator<Item = &'a S>,
 ) -> Vec<SurfaceOnScreen> {
     if terminal.is_alternate_screen() {
         return Vec::new();
@@ -56,9 +56,9 @@ pub fn surfaces_on_screen<'a>(
     let screen_rows = buffer.dimensions().rows;
     let mut visible = Vec::new();
     for session in sessions {
-        for surface in session.placed_surfaces() {
+        session.placed_surfaces(&mut |surface| {
             let Some(line) = buffer.anchor_line(surface.tag) else {
-                continue;
+                return;
             };
             let row = visual_row(buffer, line);
             if rows_on_screen(row, surface.rows, screen_rows) {
@@ -69,7 +69,7 @@ pub fn surfaces_on_screen<'a>(
                     row,
                 });
             }
-        }
+        });
     }
     visible
 }

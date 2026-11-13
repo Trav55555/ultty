@@ -38,14 +38,38 @@ impl NativeSession {
 
         match msg {
             AppMessage::BeginFrame { frame_id } => {
-                self.handle_begin_frame(frame_id);
-                Ok(FrameMessageOutcome::Handled(true))
+                let accepted = self.handle_begin_frame(frame_id);
+                Ok(FrameMessageOutcome::Handled(accepted))
             }
             AppMessage::EndFrame { frame_id } => {
                 self.handle_end_frame(frame_id)?;
                 Ok(FrameMessageOutcome::Handled(true))
             }
-            other => Ok(FrameMessageOutcome::Apply(Box::new(other))),
+            other => {
+                if self.has_capability(ultty_protocol::CAP_SEMANTIC_ACTIONS)
+                    && matches!(
+                        other,
+                        AppMessage::CreateRegion { .. }
+                            | AppMessage::SetConstraints { .. }
+                            | AppMessage::SetStyle { .. }
+                            | AppMessage::SetContent { .. }
+                            | AppMessage::AppendContent { .. }
+                            | AppMessage::StreamStart { .. }
+                            | AppMessage::StreamEnd { .. }
+                            | AppMessage::SetRegionMetadata { .. }
+                            | AppMessage::SetSemantics { .. }
+                            | AppMessage::DeleteRegion { .. }
+                            | AppMessage::CreateSurface { .. }
+                            | AppMessage::CloseSurface { .. }
+                            | AppMessage::ReparentRegion { .. }
+                    )
+                {
+                    // A scene mutation without a frame cannot be correlated
+                    // with the app's committed action registry.
+                    self.semantic_committed_frame = None;
+                }
+                Ok(FrameMessageOutcome::Apply(Box::new(other)))
+            }
         }
     }
 
@@ -98,10 +122,25 @@ impl NativeSession {
     }
 
     /// Handle BeginFrame.
-    fn handle_begin_frame(&mut self, frame_id: FrameId) {
+    fn handle_begin_frame(&mut self, frame_id: FrameId) -> bool {
+        if self.has_capability(ultty_protocol::CAP_SEMANTIC_ACTIONS) {
+            if frame_id.0 == 0
+                || self
+                    .semantic_last_frame
+                    .is_some_and(|last| frame_id.0 <= last.0)
+            {
+                self.queue_protocol_error(NativeProtocolError::bad_request(
+                    "semantic frame IDs must strictly increase",
+                ));
+                self.semantic_committed_frame = None;
+                return false;
+            }
+            self.semantic_last_frame = Some(frame_id);
+        }
         self.discard_pending_frame();
         self.current_frame = Some(frame_id);
         debug!("Begin frame {:?}", frame_id);
+        true
     }
 
     /// Drop the open frame and everything queued for it.
@@ -126,9 +165,11 @@ impl NativeSession {
             // Never apply a frame whose bracket does not match: reset so the
             // next BeginFrame starts clean instead of wedging the session.
             self.discard_pending_frame();
+            self.semantic_committed_frame = None;
             return Ok(());
         }
 
+        let errors_before = self.protocol_errors;
         self.current_frame = None;
         self.pending_frame_bytes = 0;
         let queued_ops = std::mem::take(&mut self.pending_frame_ops);
@@ -147,6 +188,10 @@ impl NativeSession {
             self.mark_scene_layout_clean();
         }
 
+        if self.has_capability(ultty_protocol::CAP_SEMANTIC_ACTIONS) {
+            self.semantic_committed_frame =
+                (self.protocol_errors == errors_before).then_some(frame_id);
+        }
         Ok(())
     }
 }

@@ -531,8 +531,8 @@ impl TerminalManager {
         Ok(manager)
     }
 
-    /// A manager with no tabs yet; every constructor adds at least one.
-    fn empty(cols: u16, rows: u16) -> Self {
+    /// Create a manager with no tabs or child processes.
+    pub fn empty(cols: u16, rows: u16) -> Self {
         Self {
             terminals: Vec::new(),
             completed_jobs: VecDeque::new(),
@@ -797,7 +797,7 @@ impl TerminalManager {
     /// Resize all terminals.
     /// Size every pane's terminal to its share of `area`, in every tab, and
     /// remember `area` so later splits, closes and divider drags keep panes
-    /// sized. A pane whose grid size is unchanged is left alone.
+    /// sized. Unchanged grids avoid reflow; pixel metrics still reach the PTY.
     pub fn layout_panes(&mut self, area: PaneArea) -> io::Result<()> {
         self.pane_area = Some(area);
         self.layout_generation = self.layout_generation.wrapping_add(1);
@@ -829,14 +829,11 @@ impl TerminalManager {
             let Some(terminal) = self.terminals.iter_mut().find(|t| t.id == terminal_id) else {
                 continue;
             };
-            let current = {
+            {
                 let mut state = terminal.event_loop.terminal();
                 state.set_cell_pixel_size(cell_width, cell_height);
-                state.dimensions()
-            };
-            if (current.cols, current.rows) != (cols, rows) {
-                terminal.resize(cols, rows)?;
             }
+            terminal.resize(cols, rows)?;
         }
         Ok(())
     }

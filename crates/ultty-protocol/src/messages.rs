@@ -8,7 +8,7 @@ use crate::{
     semantics::Semantics,
     style::Style,
     surface::SurfaceEventKind,
-    RegionId,
+    RegionId, SemanticActionRequest,
 };
 
 /// Frame identifier.
@@ -145,11 +145,21 @@ pub enum AppMessage {
         request_id: u32,
         error: Option<String>,
     },
+    /// Answer a semantic action after dispatch. `None` means applied, rather
+    /// than completion of any asynchronous work the handler started.
+    ActionResult {
+        /// Correlation identity from `InvokeAction`.
+        request_id: u32,
+        /// Bounded plain refusal, without application secrets.
+        error: Option<String>,
+    },
 }
 
 /// Messages from terminal to app.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TerminalMessage {
+    /// Invoke an explicitly declared action against one committed app frame.
+    InvokeAction(SemanticActionRequest),
     // Connection
     /// Server hello (capabilities).
     ServerHello { version: u16, capabilities: u32 },

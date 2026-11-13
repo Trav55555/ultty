@@ -31,6 +31,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use polling::{Event, Events, Poller};
@@ -67,7 +68,7 @@ struct TabListener {
 pub struct ProtocolServer {
     /// Directory that holds the per-tab socket files.
     socket_dir: PathBuf,
-    poller: Poller,
+    poller: Arc<Poller>,
     /// Listeners keyed by their poller key.
     listeners: HashMap<usize, TabListener>,
     /// Sessions keyed by their poller key.
@@ -143,7 +144,7 @@ impl ProtocolServer {
 
         Ok(Self {
             socket_dir,
-            poller: Poller::new()?,
+            poller: Arc::new(Poller::new()?),
             listeners: HashMap::new(),
             sessions: HashMap::new(),
             orphaned_override_results: Vec::new(),
@@ -288,6 +289,13 @@ impl ProtocolServer {
             .filter(move |session| session.pane() == Some(pane))
     }
 
+    /// Confirmed sessions bound to `pane`, including detached or hidden tabs.
+    pub fn all_pane_sessions(&self, pane: TerminalId) -> impl Iterator<Item = &NativeSession> {
+        self.sessions
+            .values()
+            .filter(move |session| session.is_confirmed() && session.pane() == Some(pane))
+    }
+
     /// The shown sessions a one-pane tab draws over `pane`: the ones bound
     /// to it and the ones not bound yet. A session bound to another pane
     /// (one that closed under it) is left out.
@@ -399,6 +407,16 @@ impl ProtocolServer {
                 let _ = self.poller.delete(fd);
             }
         }
+    }
+
+    /// A thread-safe wake handle for a runtime waiting in [`Self::poll`].
+    pub fn wake_handle(&self) -> crate::event_loop::Waker {
+        let poller = Arc::clone(&self.poller);
+        Arc::new(move || {
+            if let Err(error) = poller.notify() {
+                warn!(%error, "failed to wake native protocol poller");
+            }
+        })
     }
 
     /// File descriptors that should wake the UI loop when readable.
@@ -1137,6 +1155,70 @@ impl ProtocolServer {
     /// [`ProtocolServer::take_override_results`].
     pub fn sessions_with_keys(&self) -> impl Iterator<Item = (usize, &NativeSession)> {
         self.sessions.iter().map(|(&key, session)| (key, session))
+    }
+
+    /// Whether a session with this stable native session ID is still connected.
+    pub fn has_session_id(&self, session_id: u64) -> bool {
+        self.sessions
+            .values()
+            .any(|session| session.session_id() == session_id)
+    }
+
+    /// Queue an action to an exact pane/session and scene generation.
+    pub fn request_action(
+        &mut self,
+        session_id: u64,
+        pane: TerminalId,
+        expected_generation: u64,
+        region_id: ultty_protocol::RegionId,
+        widget_id: &str,
+        action: ultty_protocol::SemanticActionKind,
+    ) -> io::Result<u32> {
+        let session = self
+            .sessions
+            .values_mut()
+            .find(|session| session.session_id() == session_id && session.pane() == Some(pane))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "native session is gone or belongs to another pane",
+                )
+            })?;
+        let request =
+            session.request_semantic_action(expected_generation, region_id, widget_id, action)?;
+        if let Err(error) = session.flush() {
+            session.cancel_semantic_action(request);
+            return Err(io::Error::new(
+                error.kind(),
+                format!("action may have reached the application: {error}"),
+            ));
+        }
+        Ok(request)
+    }
+
+    /// Forget an action when its caller stops waiting.
+    pub fn cancel_action(&mut self, session_id: u64, request_id: u32) {
+        if let Some(session) = self
+            .sessions
+            .values_mut()
+            .find(|session| session.session_id() == session_id)
+        {
+            session.cancel_semantic_action(request_id);
+        }
+    }
+
+    /// Drain correlated application acknowledgements, grouped by native session ID.
+    pub fn take_action_results(&mut self) -> Vec<(u64, u32, Option<String>)> {
+        self.sessions
+            .values_mut()
+            .flat_map(|session| {
+                let session_id = session.session_id();
+                session
+                    .take_semantic_action_results()
+                    .into_iter()
+                    .map(move |(request, error)| (session_id, request, error))
+            })
+            .collect()
     }
 
     /// Whether the session `key` names is still connected.

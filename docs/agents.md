@@ -67,7 +67,8 @@ global identities across terminal restarts.
 | `ultty_wait` | Wait for text to appear, the next command to finish (with its exit code), the bell, or a quiet period |
 | `ultty_last_command` | The last command in a pane: command line, output (last 200 lines unless asked), exit code, still running or not |
 | `ultty_read_text` | A pane's screen, optionally with scrollback |
-| `ultty_regions` | A native (ulttui) app's regions: layout, text, widget ids, focus |
+| `ultty_regions` | Native regions, exact widget IDs, declared actions and displayed generation |
+| `ultty_invoke_action` | Focus or activate an exact native widget; success requires application acknowledgement |
 | `ultty_push_override`, `ultty_clear_override` | Reshape a native app by widget id without editing its files (colour, hide, relabel, remap keys; [docs/overrides.md](overrides.md)), and take it back |
 | `ultty_type_text`, `ultty_send_key` | Type text, or press a key: `enter`, `up`, or `c` with `modifiers: "ctrl"` |
 | `ultty_search` | Find text in a pane's screen and scrollback |
@@ -131,6 +132,20 @@ launch-and-wait workflows.
 A program that prints ConEmu's progress report (`OSC 9;4;1;<percent>`, as
 Windows Terminal and Ghostty read it) gets the same progress marker without
 the socket. A status set through the socket takes precedence.
+
+### Native widget actions
+
+Read `ultty_regions`, then pass its explicit `pane`, `session`, `shown_generation`
+(as `expected_generation`), `region`, `widget_id` and `action` to
+`ultty_invoke_action`. Focus works for unique visible focusable widgets. Activation
+requires the application to register a handler; a button label alone does not
+authorize an action. The first stage supports full-scene native widgets.
+
+A stale, hidden, ambiguous, unsupported or disabled target fails. The app checks
+its committed frame again before handling the request. Success means the app
+acknowledged dispatch, not that an asynchronous task finished. After a timeout or
+connection error, reinspect state before retrying: the action may have applied.
+See [Control protocol](CONTROL_PROTOCOL.md#native-semantic-actions).
 
 ### Asking for the user
 

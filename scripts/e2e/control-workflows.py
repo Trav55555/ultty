@@ -116,6 +116,103 @@ def terminate(process):
         process.wait(timeout=5)
 
 
+def semantic_actions(ctl, args, output):
+    """Exercise real native app acknowledgements, with no inferred target IDs."""
+    def spawn(program, arguments):
+        return data(ctl.request({"type": "new_tab", "title": None, "command": str(program),
+                                 "args": arguments, "working_dir": None}), "tab_opened")["pane"]
+
+    def scene(pane):
+        scenes = data(ctl.request({"type": "regions", "target": pane}), "regions")["scenes"]
+        return next((item for item in scenes if item.get("shown_generation") and item["regions"]), None)
+
+    def ready(pane):
+        return eventually(lambda: scene(pane), "native committed action scene")
+
+    def count(pane, text):
+        return eventually(lambda: (lambda current: current if current and any(
+            region.get("text") == text for region in current["regions"]) else None)(scene(pane)),
+            f"native count {text}")
+
+    def target(pane, widget, action="activate"):
+        current = ready(pane)
+        region = next(item for item in current["regions"]
+                      if item.get("metadata", {}).get("ulttui.widget_id") == widget)
+        assert action in region["metadata"]["ulttui.actions"].split(","), region
+        return {"type": "invoke_action", "target": pane, "session": current["session"],
+                "expected_generation": current["shown_generation"], "region": region["id"],
+                "widget_id": widget, "action": action}
+
+    def invoke(pane, widget, action="activate"):
+        request = target(pane, widget, action)
+        reply = data(ctl.request(request), "action_applied")
+        assert reply["session"] == request["session"]
+        return request, reply
+
+    counter = spawn(args.counter.resolve(), [])
+    count(counter, "0")
+    pinned = target(counter, "inc")
+    for replacement in ({"expected_generation": pinned["expected_generation"] + 1},
+                        {"widget_id": "missing"}, {"region": 2**32 - 1}):
+        error(ctl.request(dict(pinned, **replacement)), 15)
+        count(counter, "0")
+    invoke(counter, "inc", "focus")
+    def increment_is_focused():
+        current = scene(counter)
+        if not current:
+            return False
+        inc = next(item for item in current["regions"] if item.get("metadata", {}).get("ulttui.widget_id") == "inc")
+        return current["focused"] == inc["id"]
+
+    eventually(increment_is_focused, "native focus acknowledgement displayed")
+    count(counter, "0")
+    _, accepted = invoke(counter, "inc")
+    count(counter, "1")
+    assert ctl.request({"type": "send_key", "key": "enter", "modifiers": {"bits": 0}, "target": counter})["status"] == "ok"
+    count(counter, "2")
+
+    # An app can apply a queued action after its caller times out. Never retry it.
+    child = next(pane for pane in data(ctl.request({"type": "list_panes"}), "panes")["panes"] if pane["id"] == counter)["pid"]
+    request = target(counter, "inc")
+    os.kill(child, signal.SIGSTOP)
+    try:
+        refused = error(ctl.request(request), 15)
+        assert "may have applied" in refused["message"], refused
+    finally:
+        os.kill(child, signal.SIGCONT)
+    count(counter, "3")
+    _, later = invoke(counter, "inc")
+    assert later["request_id"] > accepted["request_id"]
+    count(counter, "4")
+
+    lua = spawn(args.lua.resolve(), [str(Path(__file__).resolve().parents[2] / "examples/lua/hello.luau")])
+    count(lua, "Count: 0")
+    invoke(lua, "inc")
+    count(lua, "Count: 1")
+    invoke(lua, "reset")
+    count(lua, "Count: 0")
+
+    no_handler = output / "no-handler.luau"
+    no_handler.write_text("return app {init=function() return {} end, update=function(s,m) return s end, "
+                          "view=function(s) return button {id='plain',label='No handler'} end}\n")
+    plain = spawn(args.lua.resolve(), [str(no_handler)])
+    current = ready(plain)
+    region = next(item for item in current["regions"] if item.get("metadata", {}).get("ulttui.widget_id") == "plain")
+    error(ctl.request({"type": "invoke_action", "target": plain, "session": current["session"],
+                       "expected_generation": current["shown_generation"], "region": region["id"],
+                       "widget_id": "plain", "action": "activate"}), 15)
+
+    # The same example's ANSI keyboard path reaches the same model update.
+    ansi = spawn("/usr/bin/env", ["-u", "ULTTY_SOCKET", "ULTTY_IN_BAND=0", str(args.counter.resolve())])
+    read = lambda: ctl.request({"type": "get_text", "include_scrollback": False,
+                               "scrollback_lines": None, "target": ansi}).get("text", "")
+    eventually(lambda: "Counter" in read(), "ANSI counter render")
+    assert ctl.request({"type": "send_text", "text": "+", "target": ansi})["status"] == "ok"
+    eventually(lambda: any(line.strip(" │┃|╎║") == "1" for line in read().splitlines()), "ANSI counter increment")
+    (output / "semantic-result.json").write_text(json.dumps({"passed": True, "counter": counter,
+        "lua": lua, "no_handler": plain, "ansi": ansi, "timeout_outcome": "unknown_then_applied"}, indent=2))
+
+
 def run(args):
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -127,12 +224,15 @@ def run(args):
     config = output / "config/ultty"
     config.mkdir(parents=True)
     (config / "config.toml").write_text("[behavior]\ncursor_blink = false\n")
-    binaries = {str(path): file_hash(path) for path in (ultty, ulttyctl, integration, Path(__file__).resolve())}
+    paths = [ultty, ulttyctl, integration, Path(__file__).resolve()]
+    if args.counter:
+        paths.extend([args.counter.resolve(), args.lua.resolve()])
+    binaries = {str(path): file_hash(path) for path in paths}
     (output / "inputs.json").write_text(json.dumps({"sha256": binaries, "budget_seconds": 90}, indent=2))
     xvfb = terminal = None
     streams = []
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="uc-", dir="/tmp") as runtime_dir, \
+    with tempfile.TemporaryDirectory(prefix="uc-", dir=os.environ.get("TMPDIR", "/tmp")) as runtime_dir, \
             (output / "xvfb.log").open("wb") as xvfb_log, \
             (output / "ultty.log").open("wb") as terminal_log, \
             (output / "receipts.jsonl").open("w") as receipt:
@@ -292,6 +392,8 @@ def run(args):
                 completed = subprocess.run([str(ulttyctl), "panes"], env=dict(cli_env, ULTTY_PID=selected),
                                            capture_output=True, text=True, timeout=5)
                 assert completed.returncode != 0 and completed.stderr, completed
+            if args.counter:
+                semantic_actions(ctl, args, output)
             elapsed = time.monotonic() - started
             assert elapsed < 90, f"gate exceeded fixed 90 second budget: {elapsed}"
             (output / "result.json").write_text(json.dumps({"passed": True, "seconds": elapsed,
@@ -309,7 +411,11 @@ def main():
     parser.add_argument("--ultty", required=True, type=Path)
     parser.add_argument("--ulttyctl", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--counter", type=Path, help="also verify native/ANSI counter semantic actions")
+    parser.add_argument("--lua", type=Path, help="ulttui-lua executable for semantic action gate")
     args = parser.parse_args()
+    if bool(args.counter) != bool(args.lua):
+        parser.error("--counter and --lua must be supplied together")
     assert shutil.which("Xvfb"), "Xvfb is required"
     def deadline_expired(_signum, _frame):
         raise TimeoutError("control-workflows exceeded fixed 90 second wall budget")

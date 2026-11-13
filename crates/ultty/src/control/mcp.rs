@@ -14,7 +14,7 @@ use ultty_protocol::control::{
     ControlData, ControlRequest, ControlResponse, PaneInfo, PaneState, PaneStatus, SplitDirection,
     WaitCondition,
 };
-use ultty_protocol::OverrideFormat;
+use ultty_protocol::{OverrideFormat, SemanticActionKind};
 
 use super::server::{parse_key, parse_modifiers};
 
@@ -95,7 +95,10 @@ impl McpServer<'_, '_> {
         let result = match method {
             "initialize" => initialize(&params),
             "ping" => json!({}),
-            "tools/list" => json!({ "tools": tools() }),
+            "tools/list" => match self.available_tools() {
+                Ok(tools) => json!({ "tools": tools }),
+                Err(message) => return Some(rpc_error(id, -32603, &message)),
+            },
             "tools/call" => self.call(&params),
             _ => {
                 return Some(rpc_error(
@@ -122,6 +125,36 @@ impl McpServer<'_, '_> {
                 "isError": true,
             }),
         }
+    }
+
+    fn available_tools(&mut self) -> Result<Vec<Value>, String> {
+        let ControlResponse::Data(ControlData::Description {
+            supported_operations,
+            ..
+        }) = self.request(ControlRequest::Describe)?
+        else {
+            return Err("Selected owner did not return control capabilities".into());
+        };
+        Ok(tools()
+            .into_iter()
+            .filter(|tool| {
+                let operation = match tool["name"].as_str().unwrap_or("") {
+                    "ultty_list_panes" => "list_panes",
+                    "ultty_info" => "get_info",
+                    "ultty_read_text" => "get_text",
+                    "ultty_type_text" => "send_text",
+                    "ultty_send_key" => "send_key",
+                    "ultty_wait" => "wait_for",
+                    "ultty_run_and_wait" => "run_command_and_wait",
+                    "ultty_split" => "split_pane",
+                    "ultty_set_status" => "set_pane_status",
+                    name => name.strip_prefix("ultty_").unwrap_or(name),
+                };
+                supported_operations
+                    .iter()
+                    .any(|supported| supported == operation)
+            })
+            .collect())
     }
 
     fn request(&mut self, request: ControlRequest) -> Result<ControlResponse, String> {
@@ -167,6 +200,28 @@ impl McpServer<'_, '_> {
                     key,
                     modifiers,
                     target: pane,
+                })?
+            }
+            "ultty_invoke_action" => {
+                let widget_id = required_str(args, "widget_id")?;
+                if !ultty_protocol::valid_action_widget_id(widget_id) {
+                    return Err("invalid widget identity".into());
+                }
+                let action = match required_str(args, "action")? {
+                    "focus" => SemanticActionKind::Focus,
+                    "activate" => SemanticActionKind::Activate,
+                    _ => return Err("action must be focus or activate".into()),
+                };
+                self.request(ControlRequest::InvokeAction {
+                    target: pane.ok_or("pane is required")?,
+                    session: optional_u64(args, "session")?.ok_or("session is required")?,
+                    expected_generation: optional_u64(args, "expected_generation")?
+                        .ok_or("expected_generation is required")?,
+                    region: optional_u64(args, "region")?
+                        .and_then(|id| u32::try_from(id).ok())
+                        .ok_or("region must be a u32 ID")?,
+                    widget_id: widget_id.to_string(),
+                    action,
                 })?
             }
             "ultty_run_command" => self.request(ControlRequest::RunCommand {
@@ -522,6 +577,19 @@ fn tools() -> Vec<Value> {
             &["key"],
         ),
         tool(
+            "ultty_invoke_action",
+            "Focus or activate an explicitly declared native widget. Copy pane/session/shown_generation/region/widget ID from regions. Success means application acknowledgement, not asynchronous task completion. Stale, hidden, ambiguous or unsupported targets fail; reinspect before retrying an unknown outcome.",
+            json!({
+                "pane": pane_property(),
+                "session": {"type": "integer", "minimum": 0},
+                "expected_generation": {"type": "integer", "minimum": 0},
+                "region": {"type": "integer", "minimum": 0, "maximum": 4294967295u64},
+                "widget_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                "action": {"type": "string", "enum": ["focus", "activate"]},
+            }),
+            &["pane", "session", "expected_generation", "region", "widget_id", "action"],
+        ),
+        tool(
             "ultty_run_command",
             "Type shell text into the foreground PTY and press Enter. The program \
              there must be a shell. Success means input accepted, not completion. \
@@ -732,6 +800,45 @@ mod tests {
     }
 
     #[test]
+    fn test_invoke_action_tool_requires_exact_identity_and_propagates_refusal() {
+        let args = json!({"pane":1,"session":2,"expected_generation":3,"region":4,"widget_id":"inc","action":"activate"});
+        let (lines, sent) = exchange(&[call(1, "ultty_invoke_action", args.clone())], |_| {
+            ControlResponse::Error {
+                code: 15,
+                message: "stale frame".into(),
+            }
+        });
+        assert_eq!(
+            sent,
+            vec![ControlRequest::InvokeAction {
+                target: 1,
+                session: 2,
+                expected_generation: 3,
+                region: 4,
+                widget_id: "inc".into(),
+                action: SemanticActionKind::Activate
+            }]
+        );
+        assert_eq!(lines[0]["result"]["isError"], true);
+        for field in [
+            "pane",
+            "session",
+            "expected_generation",
+            "region",
+            "widget_id",
+            "action",
+        ] {
+            let mut invalid = args.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            let (lines, sent) = exchange(&[call(1, "ultty_invoke_action", invalid)], |_| {
+                panic!("invalid target reached dispatch")
+            });
+            assert!(sent.is_empty());
+            assert_eq!(lines[0]["result"]["isError"], true);
+        }
+    }
+
+    #[test]
     fn test_job_tools_preserve_job_identity_and_timeout() {
         let (_, sent) = exchange(
             &[
@@ -772,6 +879,7 @@ mod tests {
                 ControlResponse::Data(ControlData::PaneOpened {
                     tab_index: 0,
                     pane: 8,
+                    warning: None,
                 })
             },
         );
@@ -866,14 +974,24 @@ mod tests {
                 json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
                 json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
             ],
-            |_| ControlResponse::Ok,
+            |_| {
+                ControlResponse::Data(ControlData::Description {
+                    schema_version: 2,
+                    owner: ultty_protocol::control::OwnerRef {
+                        pid: 1,
+                        epoch: "test".into(),
+                    },
+                    supported_operations: vec!["wait_for".into(), "get_text".into()],
+                })
+            },
         );
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0]["result"]["protocolVersion"], "2024-11-05");
         assert_eq!(lines[0]["result"]["serverInfo"]["name"], "ultty");
         let tools = lines[1]["result"]["tools"].as_array().unwrap();
         assert!(tools.iter().any(|tool| tool["name"] == "ultty_wait"));
-        assert!(sent.is_empty());
+        assert_eq!(sent, vec![ControlRequest::Describe]);
+        assert!(!tools.iter().any(|tool| tool["name"] == "ultty_screenshot"));
     }
 
     #[test]
@@ -884,6 +1002,20 @@ mod tests {
             |_| ControlResponse::Ok,
         );
         assert_eq!(lines[0]["result"]["protocolVersion"], PROTOCOL_VERSIONS[0]);
+    }
+
+    #[test]
+    fn test_tools_list_reports_selected_owner_discovery_failure() {
+        let (lines, sent) = exchange(
+            &[json!({"jsonrpc":"2.0", "id":1, "method":"tools/list"})],
+            |_| ControlResponse::Error {
+                code: 409,
+                message: "owner changed".into(),
+            },
+        );
+        assert_eq!(sent, vec![ControlRequest::Describe]);
+        assert_eq!(lines[0]["error"]["code"], -32603);
+        assert!(lines[0].get("result").is_none());
     }
 
     #[test]
@@ -1004,6 +1136,7 @@ mod tests {
                 ControlResponse::Data(ControlData::TabOpened {
                     tab_index: 1,
                     pane: 5,
+                    warning: None,
                 })
             },
         );

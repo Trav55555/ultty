@@ -10,7 +10,7 @@ use ultty_protocol::control::{
     ControlData, ControlEnvelope, ControlEvent, ControlRequest, ControlResponse, OutputFormat,
     OwnerRef, PaneState, PaneStatus, SplitDirection, WaitCondition,
 };
-use ultty_protocol::{Key, Modifiers, OverrideFormat, MAX_OVERRIDE_SOURCE_LEN};
+use ultty_protocol::{Key, Modifiers, OverrideFormat, SemanticActionKind, MAX_OVERRIDE_SOURCE_LEN};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -104,6 +104,19 @@ fn main() {
     } else {
         OutputFormat::Text
     };
+    if let ControlResponse::Data(
+        ControlData::TabOpened {
+            warning: Some(warning),
+            ..
+        }
+        | ControlData::PaneOpened {
+            warning: Some(warning),
+            ..
+        },
+    ) = &response
+    {
+        eprintln!("warning: {warning}");
+    }
     print!("{}", format_response(&response, format));
     std::process::exit(exit_status(&response));
 }
@@ -120,7 +133,9 @@ fn read_timeout_for(request: &ControlRequest, read_timeout_secs: u64) -> u64 {
         | ControlRequest::WaitJob { timeout_ms, .. } => {
             read_timeout_secs.max(timeout_ms.div_ceil(1000) + WAIT_FOR_MARGIN_SECS)
         }
-        ControlRequest::PushOverride { .. } | ControlRequest::ClearOverride { .. } => {
+        ControlRequest::PushOverride { .. }
+        | ControlRequest::ClearOverride { .. }
+        | ControlRequest::InvokeAction { .. } => {
             read_timeout_secs.max(OVERRIDE_REPLY_SECS + WAIT_FOR_MARGIN_SECS)
         }
         _ => read_timeout_secs,
@@ -492,6 +507,26 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
                 target: None,
             })
         }
+        "invoke-action" => match rest {
+            [pane, session, generation, region, widget_id, action] => {
+                if !ultty_protocol::valid_action_widget_id(widget_id) {
+                    return Err("invalid widget identity".into());
+                }
+                let action = match action.as_str() {
+                    "focus" => SemanticActionKind::Focus,
+                    "activate" => SemanticActionKind::Activate,
+                    _ => return Err("action must be focus or activate".into()),
+                };
+                Ok(ControlRequest::InvokeAction {
+                    target: pane.parse().map_err(|_| "pane must be a numeric ID")?,
+                    session: session.parse().map_err(|_| "session must be a numeric ID")?,
+                    expected_generation: generation.parse().map_err(|_| "generation must be a numeric ID")?,
+                    region: region.parse().map_err(|_| "region must be a u32 ID")?,
+                    widget_id: widget_id.clone(), action,
+                })
+            }
+            _ => Err("usage: invoke-action <pane> <session> <generation> <region> <widget-id> <focus|activate>".into()),
+        },
         "regions" if rest.is_empty() => Ok(ControlRequest::Regions { target: None }),
         "regions" => Err("usage: regions".to_string()),
         "override" => parse_override(rest),
@@ -1144,6 +1179,9 @@ QUERY COMMANDS:
                             The last command the shell ran and its output
                             (needs OSC 133 shell integration); exits with
                             the command's status
+    invoke-action <pane> <session> <generation> <region> <widget-id> <focus|activate>
+                            Request a declared native action against exact IDs;
+                            success requires application acknowledgement
     regions                 The native apps in the pane's tab: each region
                             by depth with its content kind, accessibility
                             role, position and size in cells, metadata and
@@ -1285,6 +1323,34 @@ mod tests {
         PaneStatus, SplitDirection, WaitCondition,
     };
     use ultty_protocol::OverrideFormat;
+
+    #[test]
+    fn test_invoke_action_cli_preserves_exact_target_and_waits_for_ack() {
+        let args =
+            ["invoke-action", "1", "2", "3", "4", "increment", "activate"].map(str::to_string);
+        let request = parse_cli_request(&args).unwrap();
+        assert_eq!(
+            request,
+            ControlRequest::InvokeAction {
+                target: 1,
+                session: 2,
+                expected_generation: 3,
+                region: 4,
+                widget_id: "increment".into(),
+                action: ultty_protocol::SemanticActionKind::Activate
+            }
+        );
+        assert!(read_timeout_for(&request, 1) >= 10);
+        let mut bad = args.clone();
+        bad[4] = "4294967296".into();
+        assert!(parse_cli_request(&bad).is_err());
+        let mut bad = args.clone();
+        bad[6] = "edit".into();
+        assert!(parse_cli_request(&bad).is_err());
+        let mut bad = args;
+        bad[5] = String::new();
+        assert!(parse_cli_request(&bad).is_err());
+    }
 
     #[test]
     fn test_versioned_and_job_cli_requests() {

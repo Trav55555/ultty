@@ -170,8 +170,9 @@ App                                          Terminal
 | `CAP_SEMANTICS` | `0x0200` |
 | `CAP_INPUT_CURSOR` | `0x0400` |
 | `CAP_OVERRIDE_PUSH` | `0x0800` |
+| `CAP_SEMANTIC_ACTIONS` | `0x1000` |
 
-`CAP_ALL_KNOWN` is the OR of those bits. `CLIENT_DEFAULT_CAPABILITIES`, what a client asks for unless it has reason not to, is `CAP_ALL_KNOWN` without `CAP_OVERRIDE_PUSH`: that bit commits the client to answering `SetOverride` (section 10.7), so only a client with that code adds it. Capabilities are negotiated as `requested & supported`; the version is `min(client, server)`. A version below `MIN_PROTOCOL_VERSION` is rejected with `Error` 426.
+`CAP_ALL_KNOWN` is the OR of those bits. `CLIENT_DEFAULT_CAPABILITIES`, what a client asks for unless it has reason not to, is `CAP_ALL_KNOWN` without `CAP_OVERRIDE_PUSH` and `CAP_SEMANTIC_ACTIONS`. These bits commit the client to dispatching and answering override or action requests, so only a client with that code adds them. Capabilities are negotiated as `requested & supported`; the version is `min(client, server)`. A version below `MIN_PROTOCOL_VERSION` is rejected with `Error` 426.
 
 | Response | Payload in encoding order |
 |----------|---------------------------|
@@ -232,7 +233,8 @@ App and terminal codes are separate namespaces.
 | `Blur` | `0x0042` | `Subscribe` | `0x0050` |
 | `Unsubscribe` | `0x0051` | `ClipboardGet` | `0x0060` |
 | `ClipboardSet` | `0x0061` | `Pong` | `0x0070` |
-| `OverrideResult` | `0x0080` | `Disconnect` | `0x00FF` |
+| `OverrideResult` | `0x0080` | `ActionResult` | `0x0081` |
+| `Disconnect` | `0x00FF` | | |
 
 #### Terminal → App
 
@@ -243,7 +245,8 @@ App and terminal codes are separate namespaces.
 | `Resize` | `0x0022` | `FocusEvent` | `0x0023` |
 | `ScrollEvent` | `0x0024` | `ClipboardContent` | `0x0025` |
 | `SurfaceEvent` | `0x0026` | `Ping` | `0x0070` |
-| `SetOverride` | `0x0080` | `Error` | `0x00FF` |
+| `SetOverride` | `0x0080` | `InvokeAction` | `0x0081` |
+| `Error` | `0x00FF` | | |
 
 Code `0x0026` is `SetSemantics` from the app and `SurfaceEvent` from the terminal; `0x0080` is `OverrideResult` from the app and `SetOverride` from the terminal.
 
@@ -716,3 +719,10 @@ Supply row and column track vectors and place children with start/end `GridLine`
 1. Which additional properties should transitions support?
 2. Should app-defined widgets be added in a future version?
 3. Should terminal tabs or splits be represented?
+
+## Semantic actions
+
+[Native semantic actions](SEMANTIC_ACTIONS.md) specifies capability `0x1000`,
+request/result type `0x0081`, exact widget identity, increasing committed app
+frame IDs, explicit activation dispatch, bounds, and applied/refused replies.
+The external displayed generation and the app frame ID are separate fences.

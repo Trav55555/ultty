@@ -335,6 +335,19 @@ impl Application for LuaApp {
         )
     }
 
+    fn supports_action(&self, widget_id: &str, action: ulttui::SemanticActionKind) -> bool {
+        action == ulttui::SemanticActionKind::Activate && self.script.supports_activation(widget_id)
+    }
+
+    fn on_action(&mut self, widget_id: &str, action: ulttui::SemanticActionKind) -> Option<Msg> {
+        self.supports_action(widget_id, action).then(|| {
+            Msg::Script(ScriptMsg::Action {
+                id: widget_id.to_owned(),
+                action,
+            })
+        })
+    }
+
     fn on_event(&mut self, event: &Event) -> Option<Msg> {
         match event {
             // Tab and Shift+Tab stay with ulttui's focus navigation.

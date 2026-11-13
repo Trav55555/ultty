@@ -151,7 +151,20 @@ impl ControlServer {
         ))
     }
 
+    /// Bind this process's local privileged control endpoint using an already
+    /// established runtime owner, so attach and control share one lifetime.
+    pub fn new_with_owner(owner: OwnerRef) -> io::Result<Self> {
+        Self::new_at_with_owner(
+            ControlEndpoint::for_pid(&control_dir()?, std::process::id()),
+            owner,
+        )
+    }
+
     fn new_at(endpoint: ControlEndpoint) -> io::Result<Self> {
+        Self::new_at_with_owner(endpoint, random_owner()?)
+    }
+
+    fn new_at_with_owner(endpoint: ControlEndpoint, owner: OwnerRef) -> io::Result<Self> {
         let ControlEndpoint {
             socket: socket_path,
             token: token_path,
@@ -184,7 +197,7 @@ impl ControlServer {
             clients: HashMap::new(),
             next_key: CLIENT_KEY_BASE,
             pending_requests: Vec::new(),
-            owner: random_owner()?,
+            owner,
             event_sequence: 0,
             history: VecDeque::new(),
             history_bytes: 0,
@@ -194,6 +207,19 @@ impl ControlServer {
     /// Stable identity for this server lifetime.
     pub fn owner(&self) -> &OwnerRef {
         &self.owner
+    }
+
+    /// Describe only operations implemented by a particular control adapter.
+    /// The shared wire schema and runtime owner stay identical.
+    pub fn description_with_operations(&self, operations: &[&str]) -> ControlResponse {
+        ControlResponse::Data(ControlData::Description {
+            schema_version: ultty_protocol::control::CONTROL_VERSION,
+            owner: self.owner.clone(),
+            supported_operations: operations
+                .iter()
+                .map(|operation| (*operation).to_string())
+                .collect(),
+        })
     }
 
     /// Authenticated discovery response for this control implementation.
@@ -229,6 +255,7 @@ impl ControlServer {
                 "workspace_save",
                 "program_status",
                 "regions",
+                "invoke_action",
                 "get_info",
                 "push_override",
                 "clear_override",
@@ -316,6 +343,7 @@ impl ControlServer {
     }
 
     pub fn poll(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        self.prune_disconnected_waiters()?;
         let mut events = Events::new();
         self.poller.wait(&mut events, timeout)?;
 
@@ -335,6 +363,52 @@ impl ControlServer {
             }
         }
 
+        Ok(())
+    }
+
+    /// Deferred requests are removed from the readiness poller because request
+    /// EOF is a valid half-close. Probe only hangup/error, without consuming
+    /// data or treating the peer's write EOF as a full disconnect.
+    fn prune_disconnected_waiters(&mut self) -> io::Result<()> {
+        let mut keys = Vec::new();
+        let mut descriptors = Vec::new();
+        for (&key, client) in &self.clients {
+            if client.awaiting_response && client.reply.is_empty() && client.subscription.is_none()
+            {
+                keys.push(key);
+                descriptors.push(libc::pollfd {
+                    fd: client.stream.as_raw_fd(),
+                    events: 0,
+                    revents: 0,
+                });
+            }
+        }
+        if descriptors.is_empty() {
+            return Ok(());
+        }
+        // SAFETY: descriptors is a contiguous initialized pollfd array. Each fd
+        // remains owned by self.clients, unchanged until this zero-time poll
+        // returns. The count is exactly the allocated array length.
+        let result = unsafe {
+            libc::poll(
+                descriptors.as_mut_ptr(),
+                descriptors.len() as libc::nfds_t,
+                0,
+            )
+        };
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            return if error.kind() == io::ErrorKind::Interrupted {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        for (key, descriptor) in keys.into_iter().zip(descriptors) {
+            if descriptor.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+                self.remove_client(key);
+            }
+        }
         Ok(())
     }
 
@@ -757,6 +831,11 @@ impl ControlServer {
             .get(&client_key)
             .map(|c| c.authenticated)
             .unwrap_or(false)
+    }
+
+    /// Whether a client is still connected, for releasing deferred work.
+    pub fn has_client(&self, client_key: usize) -> bool {
+        self.clients.contains_key(&client_key)
     }
 }
 
@@ -1216,7 +1295,8 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                 Some(code) => format!("SUBMISSION {sequence} FINISHED exit {code}\n"),
                 None => format!("SUBMISSION {sequence} FINISHED\n"),
             },
-            ControlData::ProcessJob { .. }
+            ControlData::ActionApplied { .. }
+            | ControlData::ProcessJob { .. }
             | ControlData::Description { .. }
             | ControlData::SubscribedV2 { .. }
             | ControlData::ResyncRequired { .. }
@@ -1288,6 +1368,9 @@ fn format_regions(scenes: &[ultty_protocol::control::NativeScene]) -> String {
     for scene in scenes {
         let transport = if scene.in_band { "in-band" } else { "socket" };
         let _ = write!(out, "session {} ({transport})", scene.session);
+        if scene.shown_generation != 0 {
+            let _ = write!(out, ", generation {}", scene.shown_generation);
+        }
         if let Some(focused) = scene.focused {
             let _ = write!(out, ", focus #{focused}");
         }
@@ -1710,6 +1793,7 @@ mod tests {
         card.role = "group".to_string();
         let scenes = vec![NativeScene {
             session: 4,
+            shown_generation: 0,
             in_band: true,
             focused: Some(3),
             regions: vec![
@@ -1844,6 +1928,28 @@ mod tests {
 
         assert_eq!(response, "PONG\n");
         assert!(!server.clients.contains_key(&client_key));
+    }
+
+    #[test]
+    fn test_deferred_disconnect_sweep_preserves_half_closed_response_reader() {
+        let mut server = test_server("defer-close");
+        let mut closed = UnixStream::connect(server.socket_path()).unwrap();
+        closed.write_all(b"ping\n").unwrap();
+        let pending = poll_until_pending(&mut server);
+        let closed_key = pending[0].0;
+        let mut half_closed = UnixStream::connect(server.socket_path()).unwrap();
+        half_closed.write_all(b"ping").unwrap();
+        half_closed.shutdown(std::net::Shutdown::Write).unwrap();
+        let pending = poll_until_pending(&mut server);
+        let half_closed_key = pending[0].0;
+        drop(closed);
+        server.poll(Some(Duration::ZERO)).unwrap();
+        assert!(!server.has_client(closed_key));
+        assert!(server.has_client(half_closed_key));
+        server.send_response(half_closed_key, &ControlResponse::Data(ControlData::Pong));
+        let mut response = String::new();
+        half_closed.read_to_string(&mut response).unwrap();
+        assert_eq!(response, "PONG\n");
     }
 
     #[test]

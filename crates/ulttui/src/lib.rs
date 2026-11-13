@@ -85,3 +85,6 @@ pub mod prelude {
     // Vim types
     pub use crate::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator};
 }
+
+/// Application-owned semantic action vocabulary.
+pub use ultty_protocol::SemanticActionKind;

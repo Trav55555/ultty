@@ -48,6 +48,17 @@ impl Renderer {
         panes: &[PaneDraw<'_>],
         overlay: &OverlayState,
     ) {
+        let live_resources: std::collections::HashSet<_> = panes
+            .iter()
+            .flat_map(|pane| pane.sessions.iter())
+            .flat_map(|session| {
+                session
+                    .scene()
+                    .iter_all()
+                    .map(move |region| (session.session_id(), region.id))
+            })
+            .collect();
+        self.retain_native_images(&live_resources);
         // Update tab bar height from overlay state
         self.tab_bar_height = overlay
             .tab_bar
@@ -267,6 +278,15 @@ impl Renderer {
                 .filter(|session| session.is_full_scene())
                 .collect();
             if scenes.is_empty() {
+                if let Some(scissor) = scissor_for(pane_bounds(info), surface) {
+                    self.render_images(
+                        encoder,
+                        view,
+                        terminal,
+                        (self.pane_offset_x, self.pane_offset_y),
+                        Some(scissor),
+                    );
+                }
                 // Render pane text
                 self.text_renderer.render_with_offset(
                     encoder,
@@ -294,7 +314,7 @@ impl Renderer {
                         .map(|(_, origin)| *origin)
                         .collect();
                     if !origins.is_empty() {
-                        self.render_native_surfaces(encoder, view, session, &origins, bounds);
+                        self.render_native_surfaces(encoder, view, *session, &origins, bounds);
                     }
                 }
             } else if !native_cached {

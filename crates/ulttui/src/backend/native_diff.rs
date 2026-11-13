@@ -24,6 +24,7 @@ use ultty_protocol::{
 pub(super) struct RegionSnapshot {
     pub(super) parent: RegionId,
     pub(super) key: Option<String>,
+    pub(super) widget: Option<WidgetIdentity>,
     pub(super) constraints: Constraints,
     pub(super) style: Style,
     pub(super) content: Content,
@@ -102,12 +103,65 @@ impl RetainedTree {
     }
 }
 
+/// Application identity captured independently of native reconciliation keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WidgetIdentity {
+    pub(crate) id: String,
+    pub(crate) focusable: bool,
+}
+
+/// A rendered widget after inherited visibility and enabled state are resolved.
+pub(super) struct RenderedWidget<'a> {
+    pub(super) region: RegionId,
+    pub(super) identity: &'a WidgetIdentity,
+    pub(super) enabled: bool,
+}
+
+impl RetainedTree {
+    pub(super) fn rendered_widgets(&self) -> Vec<RenderedWidget<'_>> {
+        let mut widgets = Vec::new();
+        for (id, region) in &self.regions {
+            let Some(identity) = &region.widget else {
+                continue;
+            };
+            let mut cursor = Some(region);
+            let mut visible = true;
+            let mut enabled = true;
+            while let Some(ancestor) = cursor {
+                if ancestor.constraints.display == ultty_protocol::Display::None
+                    || ancestor
+                        .semantics
+                        .as_ref()
+                        .is_some_and(|semantics| semantics.hidden)
+                {
+                    visible = false;
+                    break;
+                }
+                enabled &= !ancestor
+                    .semantics
+                    .as_ref()
+                    .is_some_and(|semantics| semantics.disabled);
+                cursor = self.regions.get(&ancestor.parent);
+            }
+            if visible {
+                widgets.push(RenderedWidget {
+                    region: *id,
+                    identity,
+                    enabled,
+                });
+            }
+        }
+        widgets
+    }
+}
+
 /// What the view walk says about its regions besides the messages, keyed
 /// by provisional region id.
 #[derive(Debug, Default)]
 pub(crate) struct FrameNotes {
     /// Native keys ([`crate::widgets::View::native_key`]).
     pub(crate) keys: HashMap<RegionId, String>,
+    pub(crate) widgets: HashMap<RegionId, WidgetIdentity>,
     /// Live regions whose text is markdown prose still arriving: an inline
     /// opener at the end of it may yet turn into styling, so it is not
     /// announced yet ([`held_back`]).
@@ -129,6 +183,21 @@ pub(crate) fn record_native_key(id: RegionId, key: &str) {
     NOTES_RECORDER.with(|recorder| {
         if let Some(notes) = recorder.borrow_mut().as_mut() {
             notes.keys.insert(id, key.to_string());
+        }
+    });
+}
+
+/// Record actual widget identity, without changing native reconciliation keys.
+pub(crate) fn record_widget(id: RegionId, widget_id: &str, focusable: bool) {
+    NOTES_RECORDER.with(|recorder| {
+        if let Some(notes) = recorder.borrow_mut().as_mut() {
+            notes.widgets.insert(
+                id,
+                WidgetIdentity {
+                    id: widget_id.to_owned(),
+                    focusable,
+                },
+            );
         }
     });
 }
@@ -163,6 +232,7 @@ pub(crate) fn take_frame_notes() -> FrameNotes {
 
 struct ProvisionalNode {
     key: Option<String>,
+    widget: Option<WidgetIdentity>,
     constraints: Constraints,
     style: Style,
     content: Content,
@@ -219,7 +289,7 @@ pub(crate) fn optimize_frame_messages(
     if !capabilities.input_cursor {
         drop_input_cursors(&mut frame_messages);
     }
-    let (nodes, order) = parse_provisional_tree(&frame_messages, &notes.keys);
+    let (nodes, order) = parse_provisional_tree(&frame_messages, notes);
     let mut reconciliation = Reconciliation {
         mapping: HashMap::new(),
         retained: HashSet::new(),
@@ -473,7 +543,7 @@ type ProvisionalOrder = HashMap<RegionId, Vec<RegionId>>;
 
 fn parse_provisional_tree(
     frame_messages: &[AppMessage],
-    native_keys: &HashMap<RegionId, String>,
+    notes: &FrameNotes,
 ) -> (HashMap<RegionId, ProvisionalNode>, ProvisionalOrder) {
     let mut nodes = HashMap::new();
     let mut order: ProvisionalOrder = HashMap::new();
@@ -489,7 +559,8 @@ fn parse_provisional_tree(
                 nodes.insert(
                     *id,
                     ProvisionalNode {
-                        key: native_keys.get(id).cloned(),
+                        key: notes.keys.get(id).cloned(),
+                        widget: notes.widgets.get(id).cloned(),
                         constraints: constraints.clone(),
                         style: style.clone(),
                         content: Content::None,
@@ -603,6 +674,7 @@ fn reconcile_children(
             RegionSnapshot {
                 parent: stable_parent,
                 key: effective_keys[index].map(str::to_string),
+                widget: node.widget.clone(),
                 constraints: node.constraints.clone(),
                 style: node.style.clone(),
                 content: node.content.clone(),
@@ -1158,6 +1230,7 @@ mod tests {
             super::RegionSnapshot {
                 parent: ROOT,
                 key: None,
+                widget: None,
                 constraints: Constraints::default(),
                 style: Style::default(),
                 content,
