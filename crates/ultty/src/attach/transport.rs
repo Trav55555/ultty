@@ -573,7 +573,10 @@ impl Write for DeadlineStream<'_> {
 /// Blocking worker-thread client. Pins owner identity and never automatically
 /// retries a mutation whose outcome is uncertain.
 pub struct AttachmentClient {
-    connection: Connection,
+    connection: Option<Connection>,
+    reconnect_target: Option<ReconnectTarget>,
+    session: String,
+    credential: Token,
     owner: OwnerRef,
     grant_id: u64,
     capabilities: Vec<Capability>,
@@ -582,6 +585,22 @@ pub struct AttachmentClient {
     mutation_id: u64,
     read_id: u64,
     pending: Option<Request>,
+    uncertain_id: Option<u64>,
+    mutations_blocked: bool,
+}
+
+enum ReconnectTarget {
+    Local(PathBuf),
+    Ssh(String),
+}
+
+/// Mutation safety after reconnecting to the original owner and grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconnectOutcome {
+    /// An unreserved unknown request ID prevents mutations for this client lifetime.
+    pub mutations_blocked: bool,
+    /// A previous mutation may have applied and was never replayed.
+    pub previous_mutation_unconfirmed: bool,
 }
 impl AttachmentClient {
     /// Authenticate to one named local session using an explicit credential.
@@ -595,21 +614,34 @@ impl AttachmentClient {
         token: &str,
         controller: bool,
     ) -> io::Result<Self> {
-        Self::handshake(
+        let mut client = Self::handshake(
             Connection::Local(UnixStream::connect(endpoint)?),
             session,
             token,
             controller,
-        )
+            None,
+        )?;
+        client.reconnect_target = Some(ReconnectTarget::Local(endpoint.to_owned()));
+        Ok(client)
     }
     /// Authenticate over a separately spawned SSH child with piped streams.
     /// Only scoped credentials are accepted; local admin credentials are refused.
     pub fn from_ssh_child(
-        mut child: Child,
+        child: Child,
         session: &str,
         token: &str,
         controller: bool,
     ) -> io::Result<Self> {
+        Self::handshake(
+            Self::ssh_connection(child, token)?,
+            session,
+            token,
+            controller,
+            None,
+        )
+    }
+
+    fn ssh_connection(mut child: Child, token: &str) -> io::Result<Connection> {
         let result = (|| {
             if token.starts_with("0.") {
                 return Err(io::Error::new(
@@ -635,22 +667,18 @@ impl AttachmentClient {
                 return Err(error);
             }
         };
-        Self::handshake(
-            Connection::Stdio {
-                reader,
-                writer,
-                child,
-            },
-            session,
-            token,
-            controller,
-        )
+        Ok(Connection::Stdio {
+            reader,
+            writer,
+            child,
+        })
     }
     fn handshake(
         mut connection: Connection,
         session: &str,
         token: &str,
         controller: bool,
+        expected_owner: Option<OwnerRef>,
     ) -> io::Result<Self> {
         let command = Command::Hello {
             version: wire::VERSION,
@@ -659,17 +687,30 @@ impl AttachmentClient {
             controller,
         };
         command.validate()?;
-        let response = connection.exchange(&Request {
+        let recovering = expected_owner.is_some();
+        let request = Request {
             id: 0,
-            owner: None,
+            owner: expected_owner,
             grant_id: None,
             command,
-        })?;
+        };
+        let response = if recovering {
+            connection.exchange_frame(&wire::encode(&request, wire::MAX_REQUEST_BYTES)?, false)?
+        } else {
+            connection.exchange(&request)?
+        };
         if response.id != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "uncorrelated attachment hello",
             ));
+        }
+        if let Reply::Error {
+            code: wire::ErrorCode::Busy,
+            message,
+        } = &response.reply
+        {
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, message.clone()));
         }
         let Reply::Welcome {
             grant_id,
@@ -685,7 +726,10 @@ impl AttachmentClient {
             ));
         };
         Ok(Self {
-            connection,
+            connection: Some(connection),
+            reconnect_target: None,
+            session: session.to_owned(),
+            credential: Token::new(token),
             owner: response.owner,
             grant_id,
             capabilities,
@@ -694,7 +738,123 @@ impl AttachmentClient {
             mutation_id: response.last_mutation_id,
             read_id: 0,
             pending: None,
+            uncertain_id: None,
+            mutations_blocked: false,
         })
+    }
+
+    /// Remember the validated fixed-helper destination used by the SSH adapter.
+    pub(crate) fn set_ssh_reconnect_target(&mut self, host: &str) {
+        self.reconnect_target = Some(ReconnectTarget::Ssh(host.to_owned()));
+    }
+
+    /// Drop a failed transport without replaying or forgetting uncertain input.
+    pub fn disconnect(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.uncertain_id = Some(
+                self.uncertain_id
+                    .map_or(pending.id, |previous| previous.max(pending.id)),
+            );
+        }
+        self.connection.take();
+        self.controller = false;
+    }
+
+    /// Whether a submitted mutation still has an unknown application outcome.
+    pub fn has_unconfirmed_mutation(&self) -> bool {
+        self.uncertain_id.is_some() || self.pending.is_some()
+    }
+
+    /// Whether an unreserved unknown mutation permanently blocks fresh mutations.
+    pub fn mutations_blocked(&self) -> bool {
+        self.mutations_blocked
+    }
+
+    fn open_pinned(&self, controller: bool) -> io::Result<Self> {
+        let connection = match &self.reconnect_target {
+            Some(ReconnectTarget::Local(endpoint)) => {
+                Connection::Local(UnixStream::connect(endpoint)?)
+            }
+            Some(ReconnectTarget::Ssh(host)) => Self::ssh_connection(
+                super::remote::ssh_command(host)?.spawn()?,
+                self.credential.expose_secret(),
+            )?,
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "attachment transport has no reconnect destination",
+                ))
+            }
+        };
+        let replacement = Self::handshake(
+            connection,
+            &self.session,
+            self.credential.expose_secret(),
+            controller,
+            Some(self.owner.clone()),
+        )?;
+        if replacement.owner != self.owner
+            || replacement.grant_id != self.grant_id
+            || replacement.capabilities != self.capabilities
+            || replacement.admin != self.admin
+            || replacement.mutation_id < self.mutation_id
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "reconnect owner, grant, capabilities or watermark changed; reopen explicitly",
+            ));
+        }
+        Ok(replacement)
+    }
+
+    /// Reauthenticate as an observer, keeping the exact original credential,
+    /// owner and grant. Unknown mutations are discarded, never retransmitted.
+    /// If the owner never reserved their ID, mutation access remains disabled.
+    pub fn reconnect(&mut self) -> io::Result<ReconnectOutcome> {
+        self.disconnect();
+        let mut replacement = self.open_pinned(false)?;
+        self.mutations_blocked |= self
+            .uncertain_id
+            .is_some_and(|id| id > replacement.mutation_id);
+        self.connection = replacement.connection.take();
+        self.mutation_id = replacement.mutation_id;
+        self.read_id = 0;
+        self.pending = None;
+        Ok(ReconnectOutcome {
+            mutations_blocked: self.mutations_blocked,
+            previous_mutation_unconfirmed: self.uncertain_id.is_some(),
+        })
+    }
+
+    /// Acquire a vacant lease only after owner/grant verification. The new
+    /// Hello carries the pinned owner before it can change controller state;
+    /// it cannot alias a cached ClaimControl mutation from another connection.
+    pub fn claim_verified_control(&mut self) -> io::Result<bool> {
+        if self.connection.is_none() || self.pending.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "reconnect before requesting a controller lease",
+            ));
+        }
+        if self.mutations_blocked {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "previous input outcome unknown; reopen to resume control",
+            ));
+        }
+        if self.controller {
+            return Ok(true);
+        }
+        let mut replacement = match self.open_pinned(true) {
+            Ok(replacement) => replacement,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        self.connection = replacement.connection.take();
+        self.mutation_id = replacement.mutation_id;
+        self.read_id = 0;
+        self.controller = true;
+        Ok(true)
     }
     /// Exact owner lifetime.
     pub fn owner(&self) -> &OwnerRef {
@@ -726,6 +886,18 @@ impl AttachmentClient {
     }
     /// Execute once. Transport errors never cause automatic replay.
     pub fn request(&mut self, command: Command) -> io::Result<Response> {
+        if self.connection.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "attachment disconnected",
+            ));
+        }
+        if self.mutations_blocked && command.is_mutation() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "previous input outcome unknown; reopen to resume control",
+            ));
+        }
         if self.pending.is_some() {
             return Err(io::Error::other(
                 "previous mutation outcome unknown; reconnect and explicitly reconcile",
@@ -758,6 +930,12 @@ impl AttachmentClient {
     /// Reconcile an exact previously issued mutation after explicit reconnect.
     /// An unknown/evicted receipt never executes the operation again.
     pub fn retry_exact(&mut self, request: Request) -> io::Result<Response> {
+        if self.connection.is_none() || self.pending.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "reconnect before reconciling a mutation",
+            ));
+        }
         if request.owner.as_ref() != Some(&self.owner)
             || request.grant_id != Some(self.grant_id)
             || !request.command.is_mutation()
@@ -778,7 +956,11 @@ impl AttachmentClient {
         if request.command.is_mutation() {
             self.pending = Some(request.clone());
         }
-        let response = self.connection.exchange_frame(&frame, false)?;
+        let response = self
+            .connection
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "attachment disconnected"))?
+            .exchange_frame(&frame, false)?;
         if response.id != request.id || response.owner != self.owner {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -798,6 +980,9 @@ impl AttachmentClient {
         Ok(response)
     }
 }
+
+#[cfg(test)]
+mod reconnect_tests;
 
 #[cfg(test)]
 mod tests {

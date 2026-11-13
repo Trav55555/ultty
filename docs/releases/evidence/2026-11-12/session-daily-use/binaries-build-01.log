@@ -1,0 +1,7 @@
+   Compiling ultty-protocol v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/session-daily-use/crates/ultty-protocol)
+   Compiling ultty-vt v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/session-daily-use/crates/ultty-vt)
+   Compiling ultty-client v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/session-daily-use/crates/ultty-client)
+   Compiling ulttui v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/session-daily-use/crates/ulttui)
+   Compiling ultty v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/session-daily-use/crates/ultty)
+   Compiling counter-app v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/session-daily-use/examples/counter-app)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 1m 59s

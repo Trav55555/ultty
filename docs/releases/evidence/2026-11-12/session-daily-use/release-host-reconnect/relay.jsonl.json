@@ -1,0 +1,4192 @@
+[
+  {
+    "event": "connection",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "argv_valid": true,
+    "inherited_local_auth": false
+  },
+  {
+    "event": "helper",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "helper_pid": 3378117
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "hello",
+    "request_id": 0,
+    "owner": null,
+    "hello_controller": true
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "welcome",
+    "code": null,
+    "last_mutation_id": 0
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 1,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 1,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "snapshot",
+    "code": null,
+    "last_mutation_id": 0
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 2,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 2,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 0
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 3,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 3,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 0
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "resize",
+    "request_id": 1,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "resize",
+    "request_id": 1,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "ok",
+    "code": null,
+    "last_mutation_id": 1
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 4,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 4,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "snapshot",
+    "code": null,
+    "last_mutation_id": 1
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 5,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 5,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 1
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "native_input",
+    "request_id": 2,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "native_input",
+    "request_id": 2,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "ok",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 6,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 6,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 7,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 7,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 8,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 8,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 9,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 9,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 10,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 10,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 11,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 11,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 12,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 12,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 13,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 13,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 14,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 14,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 15,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 15,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 16,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 16,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 17,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 17,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 18,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 18,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 19,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 19,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 20,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 20,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 21,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 21,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 22,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 22,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 23,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 23,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 24,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 24,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 25,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 25,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 26,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 26,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 27,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 27,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 28,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 28,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 29,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 29,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 30,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 30,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 31,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 31,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 32,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 32,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 33,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 33,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 34,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 34,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 35,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 35,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 36,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 36,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 37,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 37,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 38,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 38,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 39,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "initial",
+    "proxy_pid": 3378040,
+    "command": "snapshot",
+    "request_id": 39,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 2
+  },
+  {
+    "event": "request",
+    "phase": "after-ack-loss",
+    "proxy_pid": 3378040,
+    "command": "native_input",
+    "request_id": 3,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "after-ack-loss",
+    "proxy_pid": 3378040,
+    "command": "native_input",
+    "request_id": 3,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "ok",
+    "code": null,
+    "last_mutation_id": 3
+  },
+  {
+    "event": "dropped_after_ack",
+    "phase": "after-ack-loss",
+    "proxy_pid": 3378040,
+    "request_id": 3,
+    "acknowledged": true
+  },
+  {
+    "event": "connection",
+    "phase": "busy-reconnect",
+    "proxy_pid": 3379870,
+    "argv_valid": true,
+    "inherited_local_auth": false
+  },
+  {
+    "event": "helper",
+    "phase": "busy-reconnect",
+    "proxy_pid": 3379870,
+    "helper_pid": 3380045
+  },
+  {
+    "event": "request",
+    "phase": "busy-reconnect",
+    "proxy_pid": 3379870,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": false
+  },
+  {
+    "event": "response",
+    "phase": "busy-reconnect",
+    "proxy_pid": 3379870,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "welcome",
+    "code": null,
+    "last_mutation_id": 3
+  },
+  {
+    "event": "connection",
+    "phase": "busy-reconnect",
+    "proxy_pid": 3380049,
+    "argv_valid": true,
+    "inherited_local_auth": false
+  },
+  {
+    "event": "helper",
+    "phase": "busy-reconnect",
+    "proxy_pid": 3380049,
+    "helper_pid": 3380123
+  },
+  {
+    "event": "request",
+    "phase": "busy-reconnect",
+    "proxy_pid": 3380049,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": true
+  },
+  {
+    "event": "response",
+    "phase": "busy-reconnect",
+    "proxy_pid": 3380049,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "error",
+    "code": "busy",
+    "last_mutation_id": 0
+  },
+  {
+    "event": "request",
+    "phase": "busy-reconnect",
+    "proxy_pid": 3379870,
+    "command": "snapshot",
+    "request_id": 1,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "busy-reconnect",
+    "proxy_pid": 3379870,
+    "command": "snapshot",
+    "request_id": 1,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "snapshot",
+    "code": null,
+    "last_mutation_id": 3
+  },
+  {
+    "event": "request",
+    "phase": "busy-reconnect",
+    "proxy_pid": 3379870,
+    "command": "snapshot",
+    "request_id": 2,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "busy-reconnect",
+    "proxy_pid": 3379870,
+    "command": "snapshot",
+    "request_id": 2,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 3
+  },
+  {
+    "event": "connection",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380217,
+    "argv_valid": true,
+    "inherited_local_auth": false
+  },
+  {
+    "event": "helper",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380217,
+    "helper_pid": 3380266
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380217,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": false
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380217,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "welcome",
+    "code": null,
+    "last_mutation_id": 3
+  },
+  {
+    "event": "connection",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "argv_valid": true,
+    "inherited_local_auth": false
+  },
+  {
+    "event": "helper",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "helper_pid": 3380357
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": true
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "welcome",
+    "code": null,
+    "last_mutation_id": 3
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 1,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 1,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "snapshot",
+    "code": null,
+    "last_mutation_id": 3
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "resize",
+    "request_id": 4,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "resize",
+    "request_id": 4,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "ok",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 2,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 2,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "snapshot",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 3,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 3,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 4,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 4,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 5,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 5,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 6,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 6,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 7,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 7,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 8,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 8,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 9,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 9,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 10,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 10,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 11,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 11,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 12,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 12,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 13,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 13,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 14,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 14,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 15,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 15,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 16,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 16,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 17,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 17,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 18,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 18,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 19,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 19,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 20,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "snapshot",
+    "request_id": 20,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 4
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "native_input",
+    "request_id": 5,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "native_input",
+    "request_id": 5,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "ok",
+    "code": null,
+    "last_mutation_id": 5
+  },
+  {
+    "event": "request",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "native_input",
+    "request_id": 6,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "controller-reconnect",
+    "proxy_pid": 3380275,
+    "command": "native_input",
+    "request_id": 6,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "ok",
+    "code": null,
+    "last_mutation_id": 6
+  },
+  {
+    "event": "connection",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "argv_valid": true,
+    "inherited_local_auth": false
+  },
+  {
+    "event": "helper",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "helper_pid": 3381087
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "hello",
+    "request_id": 0,
+    "owner": null,
+    "hello_controller": true
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "welcome",
+    "code": null,
+    "last_mutation_id": 6
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 1,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 1,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "snapshot",
+    "code": null,
+    "last_mutation_id": 6
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 2,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 2,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 6
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 3,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 3,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 6
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 4,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 4,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 6
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "resize",
+    "request_id": 7,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "resize",
+    "request_id": 7,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "ok",
+    "code": null,
+    "last_mutation_id": 7
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 5,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 5,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "snapshot",
+    "code": null,
+    "last_mutation_id": 7
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "native_input",
+    "request_id": 8,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "native_input",
+    "request_id": 8,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "ok",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 6,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 6,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 7,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 7,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 8,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 8,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 9,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 9,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 10,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 10,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 11,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 11,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 12,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 12,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 13,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 13,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 14,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 14,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 15,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 15,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 16,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 16,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 17,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 17,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 18,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 18,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 19,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 19,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 20,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 20,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 21,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 21,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 22,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 22,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 23,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 23,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 24,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 24,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 25,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 25,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 26,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 26,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 27,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 27,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 28,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "snapshot",
+    "request_id": 28,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "command": "native_input",
+    "request_id": 9,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "dropped_before_forward",
+    "phase": "before-forward-loss",
+    "proxy_pid": 3381012,
+    "request_id": 9
+  },
+  {
+    "event": "connection",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "argv_valid": true,
+    "inherited_local_auth": false
+  },
+  {
+    "event": "helper",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "helper_pid": 3383076
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": false
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "welcome",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 1,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 1,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "snapshot",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 2,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 2,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 3,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 3,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 4,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 4,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 5,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 5,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 6,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 6,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 7,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 7,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 8,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 8,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 9,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 9,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 10,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 10,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 11,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 11,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 12,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 12,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 13,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 13,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 14,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 14,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 15,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 15,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 16,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 16,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 17,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 17,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 18,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 18,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 19,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 19,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 20,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 20,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 21,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 21,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 22,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 22,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 23,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 23,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 24,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 24,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 25,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 25,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 26,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 26,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 27,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 27,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 28,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 28,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 29,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 29,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 30,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 30,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 31,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "unreserved-reconnect",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 31,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 32,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 32,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 33,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 33,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 34,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 34,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 35,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 35,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 36,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 36,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 37,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 37,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 38,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 38,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 39,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 39,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 40,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 40,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 41,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 41,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 42,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 42,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 43,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 43,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 44,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 44,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 45,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 45,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 46,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 46,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 47,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 47,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 48,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 48,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 49,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 49,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 50,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 50,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "request",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 51,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": null
+  },
+  {
+    "event": "response",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot",
+    "request_id": 51,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "reply": "unchanged",
+    "code": null,
+    "last_mutation_id": 8
+  },
+  {
+    "event": "transport_cut",
+    "phase": "owner-replacement-cut",
+    "proxy_pid": 3382987,
+    "command": "snapshot"
+  },
+  {
+    "event": "connection",
+    "phase": "replacement-owner",
+    "proxy_pid": 3385207,
+    "argv_valid": true,
+    "inherited_local_auth": false
+  },
+  {
+    "event": "helper",
+    "phase": "replacement-owner",
+    "proxy_pid": 3385207,
+    "helper_pid": 3385253
+  },
+  {
+    "event": "request",
+    "phase": "replacement-owner",
+    "proxy_pid": 3385207,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3377975,
+      "epoch": "2509099a36b7bb7ed33fdb6a896442a745ee18dad621929cf5ed5451d597f0fd"
+    },
+    "hello_controller": false
+  },
+  {
+    "event": "replacement_credential_substituted",
+    "phase": "replacement-owner",
+    "proxy_pid": 3385207
+  },
+  {
+    "event": "response",
+    "phase": "replacement-owner",
+    "proxy_pid": 3385207,
+    "command": "hello",
+    "request_id": 0,
+    "owner": {
+      "pid": 3385144,
+      "epoch": "73ff034d4c1126fe76cd9561430121e4e4614fb80bcfb0dd400301bb8f34a245"
+    },
+    "reply": "error",
+    "code": "stale_owner",
+    "last_mutation_id": 0
+  }
+]

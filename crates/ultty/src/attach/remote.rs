@@ -76,7 +76,10 @@ pub fn connect_ssh(
             "SSH requires a valid session and scoped token",
         ));
     }
-    AttachmentClient::from_ssh_child(ssh_command(host)?.spawn()?, session, token, controller)
+    let mut client =
+        AttachmentClient::from_ssh_child(ssh_command(host)?.spawn()?, session, token, controller)?;
+    client.set_ssh_reconnect_target(host);
+    Ok(client)
 }
 
 fn scoped_token(token: &str) -> bool {

@@ -35,6 +35,10 @@ fn main() -> anyhow::Result<()> {
             println!("{USAGE}");
             Ok(())
         }
+        Some("--version" | "-V") => {
+            println!("ultty-session {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Some(
             command @ ("grant" | "revoke" | "stop" | "snapshot" | "client" | "input"
             | "diagnostics"),
@@ -89,6 +93,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 const USAGE: &str = "usage:
+  ultty-session --version
   ultty-session host NAME [-e PROGRAM ARGS...]
   ultty-session grant NAME --caps read,input,spawn,layout --ttl SECONDS --out FILE
   ultty-session revoke NAME GRANT_ID

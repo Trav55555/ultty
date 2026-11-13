@@ -1,0 +1,11 @@
+[Unit]
+Description=Ultty persistent session %i
+
+[Service]
+Type=simple
+Environment=XDG_RUNTIME_DIR=%t
+ExecStart=%h/.local/opt/ultty/current/bin/ultty-session host %i
+ExecStop=%h/.local/opt/ultty/current/bin/ultty-session stop %i
+Restart=no
+KillMode=control-group
+TimeoutStopSec=15s
