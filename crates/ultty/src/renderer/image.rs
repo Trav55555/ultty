@@ -368,12 +368,25 @@ impl Renderer {
         !terminal.images().is_empty()
     }
 
-    /// Render terminal images (Sixel, etc.).
+    /// Render terminal images (Sixel, etc.) of the single-terminal window.
     pub(super) fn render_images(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         terminal: &Terminal,
+    ) {
+        let origin = (0.0, self.tab_bar_height);
+        self.render_images_at(encoder, view, terminal, origin);
+    }
+
+    /// Render the images of `terminal`, whose top-left cell is at `origin`
+    /// in window pixels, clipped to the terminal's own cells.
+    pub(super) fn render_images_at(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        terminal: &Terminal,
+        origin: (f32, f32),
     ) {
         if terminal.images().is_empty() {
             return;
@@ -384,9 +397,26 @@ impl Renderer {
             self.create_image_pipeline();
         }
 
-        // Upload any new image, then render each one with its own texture
+        let buffer = terminal.buffer();
+        let dims = terminal.dimensions();
+        // The line shown on the top row, as the view is scrolled back.
+        let top_line = buffer
+            .screen_top_line()
+            .saturating_sub(buffer.scroll_offset());
         let owner = terminal.uid();
+
+        // Upload any new image, then render each one with its own texture
         for image in terminal.images().images() {
+            let Some(quad) = clip_image(
+                image.line as isize - top_line as isize,
+                image.start_col,
+                image.cell_width,
+                image.cell_height,
+                dims.cols,
+                dims.rows,
+            ) else {
+                continue;
+            };
             if !self.upload_image(owner, image) {
                 continue;
             }
@@ -394,35 +424,35 @@ impl Renderer {
                 continue;
             };
 
-            // Build vertices for this single image
-            let x0 = image.start_col as f32 * self.cell_width;
-            let y0 = image.start_row as f32 * self.cell_height + self.tab_bar_height;
-            let x1 = x0 + image.cell_width as f32 * self.cell_width;
-            let y1 = y0 + image.cell_height as f32 * self.cell_height;
+            let x0 = origin.0 + quad.col0 * self.cell_width;
+            let y0 = origin.1 + quad.row0 * self.cell_height;
+            let x1 = origin.0 + quad.col1 * self.cell_width;
+            let y1 = origin.1 + quad.row1 * self.cell_height;
+            let (u0, v0, u1, v1) = (quad.u0, quad.v0, quad.u1, quad.v1);
 
             let color = [1.0f32, 1.0, 1.0, 1.0];
             let vertices = vec![
                 Vertex {
                     position: [x0, y0],
-                    tex_coord: [0.0, 0.0],
+                    tex_coord: [u0, v0],
                     color,
                     is_color: 0,
                 },
                 Vertex {
                     position: [x1, y0],
-                    tex_coord: [1.0, 0.0],
+                    tex_coord: [u1, v0],
                     color,
                     is_color: 0,
                 },
                 Vertex {
                     position: [x1, y1],
-                    tex_coord: [1.0, 1.0],
+                    tex_coord: [u1, v1],
                     color,
                     is_color: 0,
                 },
                 Vertex {
                     position: [x0, y1],
-                    tex_coord: [0.0, 1.0],
+                    tex_coord: [u0, v1],
                     color,
                     is_color: 0,
                 },
@@ -477,9 +507,90 @@ impl Renderer {
     }
 }
 
+/// Where an image is drawn, in cells from the terminal's top-left corner,
+/// and which part of its texture shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ClippedImage {
+    col0: f32,
+    row0: f32,
+    col1: f32,
+    row1: f32,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+}
+
+/// Clip an image of `cell_width` x `cell_height` cells, whose top-left cell
+/// is at `visual_row` (negative above the view) and `start_col`, to a view
+/// of `cols` x `rows` cells. `None` when none of it shows.
+fn clip_image(
+    visual_row: isize,
+    start_col: u16,
+    cell_width: u16,
+    cell_height: u16,
+    cols: u16,
+    rows: u16,
+) -> Option<ClippedImage> {
+    let (width, height) = (f32::from(cell_width), f32::from(cell_height));
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let col0 = f32::from(start_col);
+    let row0 = visual_row as f32;
+    let col1 = (col0 + width).min(f32::from(cols));
+    let row1 = (row0 + height).min(f32::from(rows));
+    let (shown_col0, shown_row0) = (col0.max(0.0), row0.max(0.0));
+    if col1 <= shown_col0 || row1 <= shown_row0 {
+        return None;
+    }
+    Some(ClippedImage {
+        col0: shown_col0,
+        row0: shown_row0,
+        col1,
+        row1,
+        u0: (shown_col0 - col0) / width,
+        v0: (shown_row0 - row0) / height,
+        u1: (col1 - col0) / width,
+        v1: (row1 - row0) / height,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_in_view_is_drawn_whole() {
+        let quad = clip_image(2, 3, 4, 2, 80, 24).unwrap();
+        assert_eq!(
+            (quad.col0, quad.row0, quad.col1, quad.row1),
+            (3.0, 2.0, 7.0, 4.0)
+        );
+        assert_eq!((quad.u0, quad.v0, quad.u1, quad.v1), (0.0, 0.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn an_image_scrolled_partly_off_the_top_shows_its_lower_part() {
+        // Four rows tall, one row above the view: the top quarter is cut.
+        let quad = clip_image(-1, 0, 2, 4, 80, 24).unwrap();
+        assert_eq!((quad.row0, quad.row1), (0.0, 3.0));
+        assert_eq!((quad.v0, quad.v1), (0.25, 1.0));
+    }
+
+    #[test]
+    fn an_image_past_the_bottom_and_right_edges_is_clipped() {
+        let quad = clip_image(22, 78, 4, 4, 80, 24).unwrap();
+        assert_eq!((quad.col1, quad.row1), (80.0, 24.0));
+        assert_eq!((quad.u1, quad.v1), (0.5, 0.5));
+    }
+
+    #[test]
+    fn an_image_wholly_out_of_view_is_not_drawn() {
+        assert_eq!(clip_image(-4, 0, 2, 4, 80, 24), None);
+        assert_eq!(clip_image(24, 0, 2, 4, 80, 24), None);
+        assert_eq!(clip_image(0, 80, 2, 4, 80, 24), None);
+    }
 
     #[test]
     fn rgba_byte_len_rejects_overflow() {

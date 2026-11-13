@@ -67,11 +67,7 @@ impl<'a> TerminalHandler<'a> {
     /// callback.
     #[inline(never)]
     fn print(&mut self, c: char) {
-        if !self.terminal.is_alternate_screen() {
-            self.terminal.buffer_mut().write_char(c);
-        } else {
-            self.terminal.grid_mut().write_char(c);
-        }
+        self.terminal.buffer_mut().write_char(c);
     }
 
     /// [`Self::handle`] for everything but printing.
@@ -189,11 +185,11 @@ impl<'a> TerminalHandler<'a> {
 
             // Line operations
             Action::InsertLines(n) => {
-                self.terminal.grid_mut().insert_lines(n);
+                self.terminal.buffer_mut().insert_lines(n);
                 self.terminal.grid_mut().carriage_return();
             }
             Action::DeleteLines(n) => {
-                self.terminal.grid_mut().delete_lines(n);
+                self.terminal.buffer_mut().delete_lines(n);
                 self.terminal.grid_mut().carriage_return();
             }
             Action::DeleteCharacters(n) => self.terminal.grid_mut().delete_chars(n),
@@ -201,20 +197,16 @@ impl<'a> TerminalHandler<'a> {
 
             // Scrolling (use buffer for scrollback on main screen)
             Action::ScrollUp(n) => {
-                if !self.terminal.is_alternate_screen() {
-                    self.terminal.buffer_mut().scroll_grid_up(n);
-                } else {
-                    self.terminal.grid_mut().scroll_up(n);
-                }
+                self.terminal.buffer_mut().scroll_grid_up(n);
             }
-            Action::ScrollDown(n) => self.terminal.grid_mut().scroll_down(n),
+            Action::ScrollDown(n) => self.terminal.buffer_mut().scroll_grid_down(n),
             Action::ReverseIndex => {
                 // Move cursor up, scroll down if at top of scroll region
                 let grid = self.terminal.grid_mut();
                 let region = grid.effective_scroll_region();
                 let cursor_row = grid.cursor().position.row;
                 if cursor_row <= region.top {
-                    grid.scroll_down(1);
+                    self.terminal.buffer_mut().scroll_grid_down(1);
                 } else {
                     grid.cursor_up(1);
                 }
@@ -225,11 +217,7 @@ impl<'a> TerminalHandler<'a> {
                 let region = grid.effective_scroll_region();
                 let cursor_row = grid.cursor().position.row;
                 if cursor_row >= region.bottom {
-                    if !self.terminal.is_alternate_screen() {
-                        self.terminal.buffer_mut().scroll_grid_up(1);
-                    } else {
-                        self.terminal.grid_mut().scroll_up(1);
-                    }
+                    self.terminal.buffer_mut().scroll_grid_up(1);
                 } else {
                     self.terminal.grid_mut().cursor_down(1);
                 }
@@ -241,11 +229,7 @@ impl<'a> TerminalHandler<'a> {
                 let region = grid.effective_scroll_region();
                 let cursor_row = grid.cursor().position.row;
                 if cursor_row >= region.bottom {
-                    if !self.terminal.is_alternate_screen() {
-                        self.terminal.buffer_mut().scroll_grid_up(1);
-                    } else {
-                        self.terminal.grid_mut().scroll_up(1);
-                    }
+                    self.terminal.buffer_mut().scroll_grid_up(1);
                 } else {
                     self.terminal.grid_mut().cursor_down(1);
                 }
@@ -354,11 +338,7 @@ impl<'a> TerminalHandler<'a> {
                 }
             }
             Action::Newline => {
-                if !self.terminal.is_alternate_screen() {
-                    self.terminal.buffer_mut().newline();
-                } else {
-                    self.terminal.grid_mut().newline();
-                }
+                self.terminal.buffer_mut().newline();
                 if self.terminal.modes().linefeed_newline {
                     self.terminal.grid_mut().carriage_return();
                 }
@@ -899,7 +879,10 @@ impl<'a> TerminalHandler<'a> {
         // Get current cursor position for image placement
         let cursor = self.terminal.grid().cursor();
         let start_col = cursor.position.col;
-        let start_row = cursor.position.row;
+        let line = self
+            .terminal
+            .buffer()
+            .line_of_screen_row(cursor.position.row);
 
         // Size the image in cells with the cell size the embedder reported,
         // the one XTWINOPS 16 tells applications, so an image drawn for it
@@ -922,7 +905,7 @@ impl<'a> TerminalHandler<'a> {
             height,
             data: pixels,
             start_col,
-            start_row,
+            line,
             cell_width,
             cell_height,
         };
@@ -934,7 +917,7 @@ impl<'a> TerminalHandler<'a> {
             cell_width,
             cell_height,
             start_col,
-            start_row
+            line
         );
 
         // Add the image to the terminal
@@ -943,11 +926,7 @@ impl<'a> TerminalHandler<'a> {
 
     /// Write a contiguous printable ASCII span to the active terminal buffer.
     pub fn handle_ascii_span(&mut self, bytes: &[u8]) {
-        if !self.terminal.is_alternate_screen() {
-            self.terminal.buffer_mut().write_ascii_span(bytes);
-        } else {
-            self.terminal.grid_mut().write_ascii_span(bytes);
-        }
+        self.terminal.buffer_mut().write_ascii_span(bytes);
     }
 }
 
