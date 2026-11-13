@@ -46,7 +46,9 @@ pub(crate) struct WorkState {
     pub runs: Vec<WorkRun>,
     pub approvals: Vec<PendingApproval>,
     pub selected: usize,
-    pub detail_scroll: f32,
+    pub detail_scroll: usize,
+    pub generation: u64,
+    pub notice: Option<usize>,
     pub detail_id: Option<String>,
     pub reports: Vec<Report>,
     pub error: Option<String>,
@@ -59,13 +61,76 @@ impl Default for WorkState {
             runs: Vec::new(),
             approvals: Vec::new(),
             selected: 0,
-            detail_scroll: 0.0,
+            detail_scroll: 0,
+            generation: 0,
+            notice: None,
             detail_id: None,
             reports: Vec::new(),
             error: None,
             loading: false,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AttentionItem {
+    Stream,
+    Approval(usize),
+    Run(usize),
+}
+
+pub(crate) fn attention(state: &WorkState, stream_id: Option<&str>) -> Vec<AttentionItem> {
+    let mut items = Vec::new();
+    if stream_id.is_some() {
+        items.push(AttentionItem::Stream);
+    }
+    for (i, item) in state.approvals.iter().enumerate() {
+        if Some(item.id.as_str()) != stream_id {
+            items.push(AttentionItem::Approval(i));
+        }
+    }
+    for (i, run) in state.runs.iter().enumerate() {
+        if matches!(category(&run.status), "waiting" | "blocked") && run.status != "idle" {
+            items.push(AttentionItem::Run(i));
+        }
+    }
+    items
+}
+
+pub(crate) fn attention_key(
+    state: &WorkState,
+    item: &AttentionItem,
+    stream_id: Option<&str>,
+) -> String {
+    match item {
+        AttentionItem::Stream => format!("approval:{}", stream_id.unwrap_or_default()),
+        AttentionItem::Approval(i) => format!("approval:{}", state.approvals[*i].id),
+        AttentionItem::Run(i) => format!("run:{}", state.runs[*i].id),
+    }
+}
+
+pub(crate) async fn detail(
+    connection: Connection,
+    id: String,
+) -> Result<(WorkRun, Vec<Report>), String> {
+    let url = endpoint(&connection, &["runs", &id])?;
+    let response = connection
+        .client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let run: WorkRun = response
+        .json()
+        .await
+        .map_err(|e| format!("Invalid run response: {e}"))?;
+    if run.id != id {
+        return Err("Daemon returned a different run id".into());
+    }
+    let reports = reports(connection, id).await?;
+    Ok((run, reports))
 }
 
 fn endpoint(connection: &Connection, segments: &[&str]) -> Result<reqwest::Url, String> {
@@ -211,12 +276,83 @@ mod tests {
         app.work.page = Page::Detail;
         app.work.detail_id = Some("current".into());
         app.work.loading = true;
-        app.handle_update(crate::Msg::WorkReports(
+        app.handle_update(crate::Msg::WorkDetail(
             "previous".into(),
+            0,
             Err("stale".into()),
         ));
         assert!(app.work.error.is_none());
         assert!(app.work.loading);
+    }
+
+    #[test]
+    fn test_same_run_old_generation_does_not_replace_new_detail() {
+        let mut app = crate::PorygonTui::new();
+        app.work.page = Page::Detail;
+        app.work.detail_id = Some("current".into());
+        app.work.generation = 2;
+        app.work.loading = true;
+        app.handle_update(crate::Msg::WorkDetail(
+            "current".into(),
+            1,
+            Err("stale".into()),
+        ));
+        assert!(app.work.loading);
+        assert!(app.work.error.is_none());
+    }
+
+    #[test]
+    fn test_stream_approval_does_not_open_modal() {
+        let mut app = crate::PorygonTui::new();
+        app.handle_update(crate::Msg::ApprovalReceived(
+            crate::types::ApprovalRequest {
+                id: "stream".into(),
+                tool_name: "shell".into(),
+                params: serde_json::json!({}),
+                risk_score: -1.0,
+                reasoning: "approval".into(),
+                blast_radius: "unknown".into(),
+                reversible: None,
+            },
+            true,
+        ));
+        assert!(!app.show_approval_modal);
+        assert_eq!(
+            attention(&app.work, Some("stream")),
+            vec![AttentionItem::Stream]
+        );
+    }
+
+    #[test]
+    fn test_detail_long_result_is_reachable_in_narrow_terminal() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use ulttui::prelude::View;
+        let mut app = crate::PorygonTui::new();
+        app.terminal_width = 40;
+        app.terminal_height = 10;
+        app.work.page = Page::Detail;
+        app.work.detail_id = Some("r".into());
+        app.work.runs.push(WorkRun {
+            id: "r".into(),
+            objective: "objective first".into(),
+            status: "completed".into(),
+            result: Some(format!("{}\nEND-MARKER", "word ".repeat(80))),
+            error: None,
+        });
+        app.work.detail_scroll = 1000;
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        terminal
+            .draw(|frame| app.render_view().render_ansi(frame, frame.area()))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("END-MARKER"), "{screen}");
     }
 
     #[test]

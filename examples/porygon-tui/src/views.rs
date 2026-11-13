@@ -270,7 +270,10 @@ impl PorygonTui {
                     ),
             )
             .child(Spacer)
-            .child(RichText::new().span("  F1 help · F2 conversations ", Style::default()))
+            .child(RichText::new().span(
+                format!(" F1 help F2 sessions F3 work F4 attention {} ", self.work.notice.map(|n| n.to_string()).unwrap_or_else(|| "?".into())),
+                Style::default(),
+            ))
     }
 
     fn messages_view(&self) -> Column {
@@ -403,21 +406,31 @@ impl PorygonTui {
                         };
                     }
                     Key::Up if self.work.page == crate::work::Page::Detail => {
-                        self.work.detail_scroll = (self.work.detail_scroll - 1.0).max(0.0)
+                        self.work.detail_scroll = self.work.detail_scroll.saturating_sub(1)
                     }
                     Key::Down if self.work.page == crate::work::Page::Detail => {
-                        self.work.detail_scroll += 1.0
+                        self.work.detail_scroll = self.work.detail_scroll.saturating_add(1)
                     }
                     Key::Up => self.work.selected = self.work.selected.saturating_sub(1),
                     Key::Down => {
                         let len = if self.work.page == crate::work::Page::Work {
                             self.work.runs.len()
                         } else {
-                            self.work.approvals.len()
+                            crate::work::attention(
+                                &self.work,
+                                self.pending_approval
+                                    .as_ref()
+                                    .filter(|_| self.approval_is_stream)
+                                    .map(|r| r.id.as_str()),
+                            )
+                            .len()
                         };
                         self.work.selected = (self.work.selected + 1).min(len.saturating_sub(1));
                     }
                     Key::Enter => return Some(Msg::InspectWork),
+                    Key::Char('a') if self.work.page == crate::work::Page::Detail => {
+                        return Some(Msg::AttachWork)
+                    }
                     Key::Char('r') => return Some(Msg::RefreshWork),
                     _ => {}
                 }
@@ -584,7 +597,7 @@ impl PorygonTui {
             return Stack::new().child(help);
         }
         if self.work.page != crate::work::Page::Closed && !self.show_approval_modal {
-            return Stack::new().child(crate::work_views::view(&self.work, self.terminal_height));
+            return Stack::new().child(crate::work_views::view(self));
         }
         if self.show_approval_modal {
             if let Some(req) = &self.pending_approval {

@@ -1072,6 +1072,44 @@ impl PorygonTui {
                 self.work.selected = 0;
                 Cmd::message(Msg::RefreshWork)
             }
+            Msg::PollAttention => {
+                let Some(connection) = self.connection.clone() else {
+                    return Cmd::none();
+                };
+                if !self.connected {
+                    return Cmd::none();
+                }
+                Cmd::spawn(async move {
+                    let result = async {
+                        let runs = crate::work::runs(connection.clone()).await?;
+                        let approvals = crate::approval_client::fetch_pending(
+                            &connection.client,
+                            &connection.base_url,
+                            200,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        Ok(approvals.count as usize
+                            + runs
+                                .iter()
+                                .filter(|run| {
+                                    matches!(
+                                        run.status.as_str(),
+                                        "awaiting_input"
+                                            | "paused_needs_review"
+                                            | "insufficient_oracle"
+                                    )
+                                })
+                                .count())
+                    }
+                    .await;
+                    Msg::AttentionNotice(result)
+                })
+            }
+            Msg::AttentionNotice(result) => {
+                self.work.notice = result.ok();
+                Cmd::none()
+            }
             Msg::RefreshWork => {
                 let Some(connection) = self.connection.clone() else {
                     self.work.error = Some("Daemon connection is not configured".into());
@@ -1079,6 +1117,7 @@ impl PorygonTui {
                 };
                 self.work.loading = true;
                 self.work.error = None;
+                self.work.generation = self.work.generation.wrapping_add(1);
                 match self.work.page {
                     crate::work::Page::Work => {
                         Cmd::spawn(
@@ -1086,17 +1125,32 @@ impl PorygonTui {
                         )
                     }
                     crate::work::Page::Attention => Cmd::spawn(async move {
-                        let result = crate::approval_client::fetch_pending(
-                            &connection.client,
-                            &connection.base_url,
-                            200,
-                        )
-                        .await
-                        .map(|list| list.items)
-                        .map_err(|e| e.to_string());
-                        Msg::WorkApprovals(result)
+                        let result = async {
+                            let runs = crate::work::runs(connection.clone()).await?;
+                            let approvals = crate::approval_client::fetch_pending(
+                                &connection.client,
+                                &connection.base_url,
+                                200,
+                            )
+                            .await
+                            .map_err(|e| e.to_string())?;
+                            Ok((runs, approvals.items))
+                        }
+                        .await;
+                        Msg::WorkAttention(result)
                     }),
-                    _ => {
+                    crate::work::Page::Detail => {
+                        let Some(id) = self.work.detail_id.clone() else {
+                            self.work.loading = false;
+                            return Cmd::none();
+                        };
+                        let generation = self.work.generation;
+                        Cmd::spawn(async move {
+                            let result = crate::work::detail(connection, id.clone()).await;
+                            Msg::WorkDetail(id, generation, result)
+                        })
+                    }
+                    crate::work::Page::Closed => {
                         self.work.loading = false;
                         Cmd::none()
                     }
@@ -1109,104 +1163,146 @@ impl PorygonTui {
                 self.work.loading = false;
                 match result {
                     Ok(runs) => {
-                        let selected_id = self
-                            .work
-                            .runs
-                            .get(self.work.selected)
-                            .map(|run| run.id.clone());
-                        self.work.selected = selected_id
-                            .and_then(|id| runs.iter().position(|run| run.id == id))
+                        let selected = self.work.runs.get(self.work.selected).map(|r| r.id.clone());
+                        self.work.selected = selected
+                            .and_then(|id| runs.iter().position(|r| r.id == id))
                             .unwrap_or(0);
                         self.work.runs = runs;
                     }
-                    Err(error) => self.work.error = Some(error),
+                    Err(e) => self.work.error = Some(e),
                 }
                 Cmd::none()
             }
-            Msg::WorkApprovals(result) => {
+            Msg::WorkAttention(result) => {
                 if self.work.page != crate::work::Page::Attention {
                     return Cmd::none();
                 }
                 self.work.loading = false;
                 match result {
-                    Ok(items) => {
-                        let selected_id = self
-                            .work
-                            .approvals
+                    Ok((runs, approvals)) => {
+                        let stream = self
+                            .pending_approval
+                            .as_ref()
+                            .filter(|_| self.approval_is_stream)
+                            .map(|r| r.id.as_str());
+                        let selected = crate::work::attention(&self.work, stream)
                             .get(self.work.selected)
-                            .map(|item| item.id.clone());
-                        self.work.selected = selected_id
-                            .and_then(|id| items.iter().position(|item| item.id == id))
+                            .map(|item| crate::work::attention_key(&self.work, item, stream));
+                        self.work.runs = runs;
+                        self.work.approvals = approvals;
+                        self.work.selected = selected
+                            .and_then(|key| {
+                                crate::work::attention(&self.work, stream)
+                                    .iter()
+                                    .position(|item| {
+                                        crate::work::attention_key(&self.work, item, stream) == key
+                                    })
+                            })
                             .unwrap_or(0);
-                        self.work.approvals = items;
                     }
-                    Err(error) => self.work.error = Some(error),
+                    Err(e) => self.work.error = Some(e),
                 }
                 Cmd::none()
             }
-            Msg::InspectWork => match self.work.page {
-                crate::work::Page::Work => {
-                    let Some(run) = self.work.runs.get(self.work.selected) else {
-                        return Cmd::none();
-                    };
-                    let id = run.id.clone();
-                    self.work.detail_id = Some(id.clone());
-                    self.work.reports.clear();
-                    self.work.detail_scroll = 0.0;
-                    self.work.error = None;
-                    self.work.page = crate::work::Page::Detail;
-                    let Some(connection) = self.connection.clone() else {
-                        self.work.error = Some("Daemon connection is not configured".into());
-                        return Cmd::none();
-                    };
-                    self.work.loading = true;
-                    Cmd::spawn(async move {
-                        let result = crate::work::reports(connection, id.clone()).await;
-                        Msg::WorkReports(id, result)
-                    })
-                }
-                crate::work::Page::Attention => {
-                    let Some(item) = self.work.approvals.get(self.work.selected) else {
-                        return Cmd::none();
-                    };
-                    if let Some(pending) = &self.pending_approval {
-                        if pending.id == item.id {
-                            self.show_approval_modal = true;
-                        } else {
-                            self.work.error =
-                                Some("Resolve or refresh the current approval first".into());
+            Msg::InspectWork => {
+                use crate::work::{attention, AttentionItem, Page};
+                match self.work.page {
+                    Page::Work => {
+                        let Some(run) = self.work.runs.get(self.work.selected) else {
+                            return Cmd::none();
+                        };
+                        self.work.detail_id = Some(run.id.clone());
+                        self.work.reports.clear();
+                        self.work.detail_scroll = 0;
+                        self.work.page = Page::Detail;
+                        Cmd::message(Msg::RefreshWork)
+                    }
+                    Page::Attention => {
+                        let stream = self
+                            .pending_approval
+                            .as_ref()
+                            .filter(|_| self.approval_is_stream)
+                            .map(|r| r.id.as_str());
+                        match attention(&self.work, stream)
+                            .get(self.work.selected)
+                            .cloned()
+                        {
+                            Some(AttentionItem::Stream) => {
+                                self.show_approval_modal = true;
+                                Cmd::none()
+                            }
+                            Some(AttentionItem::Run(index)) => {
+                                self.work.detail_id = Some(self.work.runs[index].id.clone());
+                                self.work.reports.clear();
+                                self.work.detail_scroll = 0;
+                                self.work.page = Page::Detail;
+                                Cmd::message(Msg::RefreshWork)
+                            }
+                            Some(AttentionItem::Approval(index)) => {
+                                let item = &self.work.approvals[index];
+                                if let Some(pending) = &self.pending_approval {
+                                    if pending.id == item.id {
+                                        self.show_approval_modal = true;
+                                    } else {
+                                        self.work.error = Some(
+                                            "Resolve or refresh the current approval first".into(),
+                                        );
+                                    }
+                                    return Cmd::none();
+                                }
+                                if self.approval_in_flight {
+                                    self.work.error = Some("Decision is unconfirmed".into());
+                                    return Cmd::none();
+                                }
+                                self.pending_approval = Some(ApprovalRequest {
+                                    id: item.id.clone(),
+                                    tool_name: item
+                                        .context
+                                        .tool_name
+                                        .clone()
+                                        .unwrap_or_else(|| item.source.clone()),
+                                    params: serde_json::to_value(&item.context).unwrap_or_default(),
+                                    risk_score: -1.0,
+                                    reasoning: item.objective.clone(),
+                                    blast_radius: "unknown".into(),
+                                    reversible: None,
+                                });
+                                self.approval_is_stream = false;
+                                self.show_approval_modal = true;
+                                Cmd::none()
+                            }
+                            None => Cmd::none(),
                         }
-                        return Cmd::none();
                     }
-                    if self.approval_in_flight {
-                        self.work.error = Some("Decision is unconfirmed".into());
-                        return Cmd::none();
-                    }
-                    let request = ApprovalRequest {
-                        id: item.id.clone(),
-                        tool_name: item
-                            .context
-                            .tool_name
-                            .clone()
-                            .unwrap_or_else(|| item.source.clone()),
-                        params: serde_json::to_value(&item.context).unwrap_or_default(),
-                        risk_score: -1.0,
-                        reasoning: item.objective.clone(),
-                        blast_radius: "unknown".into(),
-                        reversible: None,
-                    };
-                    self.pending_approval = Some(request);
-                    self.approval_is_stream = false;
-                    self.show_approval_modal = true;
-                    Cmd::none()
+                    _ => Cmd::none(),
                 }
-                _ => Cmd::none(),
-            },
-            Msg::WorkReports(id, result) => {
-                if self.work.detail_id.as_deref() == Some(&id) {
+            }
+            Msg::AttachWork => {
+                let Some(id) = self.work.detail_id.clone() else {
+                    return Cmd::none();
+                };
+                let permitted = self.pending_approval.is_none()
+                    && !self.approval_in_flight
+                    && !self.waiting_response;
+                let cmd = self.handle_command_action(CommandAction::AttachRun { id });
+                if permitted {
+                    self.work.page = crate::work::Page::Closed;
+                }
+                cmd
+            }
+            Msg::WorkDetail(id, generation, result) => {
+                if self.work.page == crate::work::Page::Detail
+                    && self.work.detail_id.as_deref() == Some(&id)
+                    && self.work.generation == generation
+                {
                     self.work.loading = false;
                     match result {
-                        Ok(reports) => self.work.reports = reports,
+                        Ok((run, reports)) => {
+                            if let Some(old) = self.work.runs.iter_mut().find(|r| r.id == id) {
+                                *old = run;
+                            }
+                            self.work.reports = reports;
+                        }
                         Err(error) => self.work.error = Some(error),
                     }
                 }
@@ -1374,7 +1470,7 @@ impl PorygonTui {
                 }
                 self.approval_is_stream = is_stream;
                 self.pending_approval = Some(request);
-                self.show_approval_modal = is_stream;
+                self.show_approval_modal = false;
                 Cmd::none()
             }
             Msg::ApprovalDecision(approved) => self.decide_approval(approved),
@@ -1393,6 +1489,9 @@ impl PorygonTui {
                         self.pending_approval = None;
                         self.show_approval_modal = false;
                         self.approval_is_stream = false;
+                        if let Some(next) = self.queued_stream_approvals.pop_front() {
+                            self.handle_update(Msg::ApprovalReceived(next, true));
+                        }
                         Cmd::ShowToast(Toast::success(
                             "Daemon confirmed the decision; execution may still be pending.",
                         ))

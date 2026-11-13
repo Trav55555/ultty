@@ -1,108 +1,171 @@
-use crate::work::{category, Page, WorkState};
 use ulttui::prelude::*;
+use unicode_width::UnicodeWidthChar;
 
-pub(crate) fn view(state: &WorkState, height: u16) -> ScrollView {
-    let visible = usize::from(height.saturating_sub(5).max(1));
-    let start = state.selected.saturating_add(1).saturating_sub(visible);
-    let mut column = Column::new().width(Dimension::Percent(100.0)).padding(1.0);
+use crate::work::{attention, category, AttentionItem, Page};
+use crate::PorygonTui;
+
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    for line in text.split('\n') {
+        let mut row = String::new();
+        let mut used = 0;
+        for ch in line.chars() {
+            let cells = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + cells > width && !row.is_empty() {
+                rows.push(std::mem::take(&mut row));
+                used = 0;
+            }
+            row.push(ch);
+            used += cells;
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+pub(crate) fn view(app: &PorygonTui) -> Column {
+    let state = &app.work;
+    let width = usize::from(app.terminal_width.saturating_sub(2).max(1));
+    let available = usize::from(app.terminal_height.saturating_sub(3).max(1));
     let title = match state.page {
-        Page::Work => "Work | Up/Down select | Enter review | r refresh | Esc back",
-        Page::Attention => "Attention | Up/Down select | Enter inspect | r refresh | Esc back",
-        Page::Detail => "Run review | Up/Down scroll | Esc work list",
+        Page::Work => "Work | Enter review | r refresh | Esc",
+        Page::Attention => "Attention | Enter inspect | r refresh | Esc",
+        Page::Detail => "Review | a attach | r refresh | Esc",
         Page::Closed => "",
     };
-    column = column.child(Text::new(title));
+    let mut rows = Vec::new();
+    let mut selected_row = 0;
     if state.loading {
-        column = column.child(Text::new("Loading..."));
+        rows.extend(wrap("Loading...", width));
     }
     if let Some(error) = &state.error {
-        column = column.child(Text::new(format!("Error: {error}")));
+        rows.extend(wrap(&format!("Error: {error}"), width));
     }
     match state.page {
         Page::Work => {
             if state.runs.is_empty() && !state.loading && state.error.is_none() {
-                column = column.child(Text::new("No runs returned."));
+                rows.push("No runs returned.".into());
             }
-            for (i, run) in state.runs.iter().enumerate().skip(start).take(visible) {
-                column = column.child(Text::new(format!(
-                    "{} [{} / {}] {}  {}",
-                    if i == state.selected { ">" } else { " " },
-                    category(&run.status),
-                    run.status,
-                    run.id,
-                    run.objective
-                )));
+            for (i, run) in state.runs.iter().enumerate() {
+                if i == state.selected {
+                    selected_row = rows.len();
+                }
+                rows.extend(wrap(
+                    &format!(
+                        "{} [{} / {}] {} | {}",
+                        if i == state.selected { ">" } else { " " },
+                        category(&run.status),
+                        run.status,
+                        run.objective,
+                        run.id
+                    ),
+                    width,
+                ));
             }
         }
         Page::Attention => {
-            if state.approvals.is_empty() && !state.loading && state.error.is_none() {
-                column = column.child(Text::new(
-                    "No pending approvals returned. Questions are not available in this daemon.",
+            let stream = app
+                .pending_approval
+                .as_ref()
+                .filter(|_| app.approval_is_stream);
+            let items = attention(state, stream.map(|r| r.id.as_str()));
+            if items.is_empty() && !state.loading && state.error.is_none() {
+                rows.push("No pending approvals or waiting runs returned.".into());
+            }
+            for (i, item) in items.iter().enumerate() {
+                if i == state.selected {
+                    selected_row = rows.len();
+                }
+                let text = match item {
+                    AttentionItem::Stream => stream
+                        .map(|r| format!("Approval: {} | {}", r.reasoning, r.id))
+                        .unwrap_or_default(),
+                    AttentionItem::Approval(index) => {
+                        let a = &state.approvals[*index];
+                        format!("Approval: {} | {}", a.objective, a.id)
+                    }
+                    AttentionItem::Run(index) => {
+                        let r = &state.runs[*index];
+                        format!("{}: {} | {}", r.status, r.objective, r.id)
+                    }
+                };
+                rows.extend(wrap(
+                    &format!("{} {text}", if i == state.selected { ">" } else { " " }),
+                    width,
                 ));
             }
-            for (i, item) in state.approvals.iter().enumerate().skip(start).take(visible) {
-                column = column.child(Text::new(format!(
-                    "{} {} | {} | {}",
-                    if i == state.selected { ">" } else { " " },
-                    item.id,
-                    item.source,
-                    item.objective
-                )));
-            }
+            rows.extend(wrap("Questions: open the waiting run to continue; no separate question route is available.", width));
         }
         Page::Detail => {
             if let Some(run) = state
                 .runs
                 .iter()
-                .find(|run| Some(&run.id) == state.detail_id.as_ref())
+                .find(|r| Some(&r.id) == state.detail_id.as_ref())
             {
                 for line in [
-                    format!("Run {} | {}", run.id, run.status),
                     format!("Objective: {}", run.objective),
+                    format!("Run: {} | {}", run.id, run.status),
                     format!("Result: {}", run.result.as_deref().unwrap_or("unknown")),
                     format!("Error: {}", run.error.as_deref().unwrap_or("none reported")),
-                    "Revision, changed files and diff: unknown".into(),
                     "Accepted: unknown | Merged: unknown".into(),
-                    format!(
-                        "To open this run, return to chat and use /attach {}",
-                        run.id
-                    ),
                 ] {
-                    column = column.child(Text::new(line));
+                    rows.extend(wrap(&line, width));
                 }
                 if state.reports.is_empty() && !state.loading && state.error.is_none() {
-                    column = column.child(Text::new("Verification: no reports returned"));
+                    rows.push("Verification: no reports returned".into());
                 }
                 for report in &state.reports {
-                    column = column.child(Text::new(format!(
-                        "Verification {} | passed={} | {}",
-                        report.report_type, report.passed, report.summary
-                    )));
-                    column = column.child(Text::new(format!(
-                        "Checks: {}",
-                        report
-                            .checks
-                            .iter()
-                            .map(ValueDisplay::display)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )));
-                    column = column.child(Text::new(format!("Artifacts: {}", report.artifacts)));
+                    rows.extend(wrap(
+                        &format!(
+                            "Verification {} | passed={} | {}",
+                            report.report_type, report.passed, report.summary
+                        ),
+                        width,
+                    ));
+                    let revision = report
+                        .artifacts
+                        .get("revision")
+                        .or_else(|| report.artifacts.get("commit_sha"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    rows.extend(wrap(&format!("Reported revision: {revision}"), width));
+                    rows.extend(wrap(
+                        &format!(
+                            "Checks: {}",
+                            serde_json::to_string_pretty(&report.checks).unwrap_or_default()
+                        ),
+                        width,
+                    ));
+                    rows.extend(wrap(
+                        &format!(
+                            "Artifacts: {}",
+                            serde_json::to_string_pretty(&report.artifacts).unwrap_or_default()
+                        ),
+                        width,
+                    ));
+                }
+                if state.reports.is_empty() {
+                    rows.push("Reported revision: unknown".into());
                 }
             }
         }
         Page::Closed => {}
     }
-    let mut scroll = ScrollView::new().child(column);
-    scroll.set_viewport_height(f32::from(height));
-    scroll.scroll_to(state.detail_scroll);
-    scroll
-}
-trait ValueDisplay {
-    fn display(&self) -> String;
-}
-impl ValueDisplay for serde_json::Value {
-    fn display(&self) -> String {
-        self.to_string()
+    let start = if state.page == Page::Detail {
+        state
+            .detail_scroll
+            .min(rows.len().saturating_sub(available))
+    } else {
+        selected_row.saturating_sub(available.saturating_sub(1))
+    };
+    let mut column = Column::new()
+        .width(Dimension::Percent(100.0))
+        .height(Dimension::Percent(100.0))
+        .padding(1.0)
+        .child(Text::new(title));
+    for row in rows.into_iter().skip(start).take(available) {
+        column = column.child(Text::new(row));
     }
+    column
 }

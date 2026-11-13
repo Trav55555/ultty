@@ -264,8 +264,15 @@ enum Msg {
     OpenWork(work::Page),
     RefreshWork,
     WorkRuns(Result<Vec<work::WorkRun>, String>),
-    WorkApprovals(Result<Vec<approval_client::PendingApproval>, String>),
-    WorkReports(String, Result<Vec<work::Report>, String>),
+    WorkDetail(
+        String,
+        u64,
+        Result<(work::WorkRun, Vec<work::Report>), String>,
+    ),
+    WorkAttention(Result<(Vec<work::WorkRun>, Vec<approval_client::PendingApproval>), String>),
+    PollAttention,
+    AttentionNotice(Result<usize, String>),
+    AttachWork,
     InspectWork,
     ApprovalReceived(ApprovalRequest, bool),
     ApprovalDecision(bool),
@@ -347,6 +354,7 @@ impl Application for PorygonTui {
         let mut subs = vec![
             Sub::every(Duration::from_millis(250), || Msg::FlushDrafts),
             Sub::every(Duration::from_secs(3), || Msg::PollConnection),
+            Sub::every(Duration::from_secs(5), || Msg::PollAttention),
             Sub::every(Duration::from_secs(2), || Msg::PollStatus),
             Sub::every(Duration::from_secs(1), || Msg::ClockTick),
         ];
