@@ -116,6 +116,7 @@ const MAX_HISTORY_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Deserialize)]
 struct HistoryMessage {
+    conversation_id: String,
     role: String,
     content: String,
     created_at: String,
@@ -129,6 +130,13 @@ impl From<HistoryMessage> for ChatMessage {
             timestamp: message.created_at,
         }
     }
+}
+
+fn validate_message_conversations(messages: &[HistoryMessage], id: &str) -> Result<(), String> {
+    if messages.iter().any(|message| message.conversation_id != id) {
+        return Err("Daemon returned a message belonging to another conversation; previous conversation preserved.".into());
+    }
+    Ok(())
 }
 
 async fn decode_history<T: serde::de::DeserializeOwned>(
@@ -190,6 +198,7 @@ pub(crate) async fn fetch_history(
             if detail.id != id {
                 return Err("Daemon returned a different conversation; nothing switched.".into());
             }
+            validate_message_conversations(&detail.messages, id)?;
             if detail.message_count != detail.messages.len() {
                 return Err("Daemon returned partial conversation history. Upgrade the daemon for paginated history; previous conversation preserved.".into());
             }
@@ -205,6 +214,7 @@ pub(crate) async fn fetch_history(
         if page.conversation_id != id {
             return Err("Daemon returned a different conversation; nothing switched.".into());
         }
+        validate_message_conversations(&page.messages, id)?;
         if page.total > MAX_HISTORY_MESSAGES {
             return Err("Conversation history exceeds the 50,000 message loading budget; previous conversation preserved.".into());
         }
@@ -1015,7 +1025,7 @@ mod history_tests {
     }
 
     fn messages(start: usize, count: usize) -> Vec<Value> {
-        (start..start + count).map(|index| json!({"role":"assistant","content":format!("history-marker-{index}"),"created_at":"now"})).collect()
+        (start..start + count).map(|index| json!({"conversation_id":"B","role":"assistant","content":format!("history-marker-{index}"),"created_at":"now"})).collect()
     }
 
     #[tokio::test]
@@ -1100,5 +1110,26 @@ mod history_tests {
         let result: Result<Value, String> = decode_history(response, &mut 16).await;
         assert!(result.unwrap_err().contains("loading budget"));
         task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn test_history_rejects_foreign_messages_in_page_and_legacy_detail() {
+        let mut mixed = messages(0, 2);
+        mixed[1]["conversation_id"] = json!("foreign");
+        let cases = vec![
+            vec![(
+                200,
+                json!({"conversation_id":"B","messages":mixed,"total":2,"next_offset":null}),
+            )],
+            vec![
+                (404, json!({"detail":"Not Found"})),
+                (200, json!({"id":"B","message_count":2,"messages":mixed})),
+            ],
+        ];
+        for responses in cases {
+            let (connection, task) = server(responses).await;
+            let error = fetch_history(&connection, "B").await.unwrap_err();
+            assert!(error.contains("message belonging to another conversation"));
+            task.await.unwrap();
+        }
     }
 }
