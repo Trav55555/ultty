@@ -38,6 +38,7 @@ impl PorygonTui {
             Err(error) => return Cmd::ShowToast(Toast::error(error)),
         };
         let message = self.input.submit_value();
+        self.persist_conversation();
         self.suggestions.clear();
         self.messages.push(ChatMessage {
             role: "user".into(),

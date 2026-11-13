@@ -1072,6 +1072,7 @@ impl PorygonTui {
                     Cmd::none()
                 } else {
                     self.started = true;
+                    self.initialize_drafts();
                     let mut cmds = vec![Cmd::message(Msg::PollConnection)];
                     if self.weather_enabled {
                         cmds.push(Cmd::message(Msg::PollWeather));
@@ -1346,6 +1347,19 @@ impl PorygonTui {
                 Cmd::none()
             }
             Msg::NoApprovalsPending => Cmd::none(),
+            Msg::OpenConversations => self.open_conversations(),
+            Msg::ConversationsListed(result) => {
+                match result {
+                    Ok(rows) => {
+                        self.conversations.rows = rows;
+                        self.conversations.error = None;
+                    }
+                    Err(error) => self.conversations.error = Some(error),
+                }
+                Cmd::none()
+            }
+            Msg::LoadConversation(id) => self.load_conversation(id),
+            Msg::ConversationLoaded(id, result) => self.conversation_loaded(id, result),
             Msg::SessionsFetched(sessions) => {
                 let mut table = String::from("**Saved Sessions:**\n\n");
                 if sessions.is_empty() {
@@ -2042,10 +2056,11 @@ impl PorygonTui {
                 self.auto_scroll_chat();
                 Cmd::none()
             }
-            Msg::DraftExitWarning => Cmd::ShowToast(Toast::warning(
-                "Unsent draft. Press Ctrl+C again to discard it and quit.",
-            )),
+            Msg::DraftExitWarning => {
+                Cmd::ShowToast(Toast::warning("Unsent draft. Press Ctrl+C again to quit."))
+            }
             Msg::ExitRequested => {
+                self.persist_conversation();
                 if self.connected && self.messages.len() > 1 {
                     let daemon_url = self.daemon_url.clone();
                     let client = self.client.clone();

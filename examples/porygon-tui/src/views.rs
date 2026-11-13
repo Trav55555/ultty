@@ -151,6 +151,7 @@ impl PorygonTui {
     }
 
     fn refresh_composer(&mut self) {
+        self.persist_conversation();
         let value = self.input.current_value();
         self.suggestions = if value.starts_with('/') && !value.contains('\n') {
             self.command_registry
@@ -367,6 +368,9 @@ impl PorygonTui {
             }
             return None;
         }
+        if self.conversations.open {
+            return self.conversation_event(event);
+        }
         if self.show_help && !matches!(event, Event::Quit) {
             if matches!(event, Event::Key(ke) if matches!(ke.key, Key::Escape | Key::F(1))) {
                 self.show_help = false;
@@ -424,9 +428,13 @@ impl PorygonTui {
                     }
                     _ => {}
                 }
+                self.persist_conversation();
                 None
             }
             Event::Key(ke) => {
+                if ke.key == Key::F(2) {
+                    return Some(Msg::OpenConversations);
+                }
                 if ke.key == Key::F(1) {
                     self.show_help = true;
                     return None;
@@ -442,6 +450,7 @@ impl PorygonTui {
                         if self.follow_output {
                             self.unread_output = false;
                         }
+                        self.persist_conversation();
                         return None;
                     }
                     Key::End if ke.modifiers.ctrl => {
@@ -449,6 +458,7 @@ impl PorygonTui {
                         self.chat_scroll.scroll_to_bottom();
                         self.follow_output = true;
                         self.unread_output = false;
+                        self.persist_conversation();
                         return None;
                     }
                     _ => {}
@@ -507,6 +517,9 @@ impl PorygonTui {
             dock = dock.dock_right(sidebar_view(self));
         }
         let main_content = dock.center(center_content);
+        if self.conversations.open {
+            return Stack::new().child(self.conversation_view());
+        }
         if self.show_help {
             let mut help = Column::new()
                 .width(Dimension::Percent(100.0))
@@ -514,6 +527,7 @@ impl PorygonTui {
                 .padding(1.0);
             for line in [
                 "Keys and commands",
+                "F2: conversations; search, Enter to open, Ctrl+N new.",
                 "Esc or F1: back to your draft",
                 "",
                 "Enter: send when ready; keep draft while busy.",
@@ -690,6 +704,7 @@ mod tests {
                 .collect();
             for expected in [
                 "Keys and commands",
+                "F2: conversations; search, Enter to open, Ctrl+N new.",
                 "back to your draft",
                 "Ctrl+X then Enter: newline.",
                 "confirm to discard draft.",

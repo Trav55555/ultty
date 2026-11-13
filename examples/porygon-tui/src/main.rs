@@ -17,6 +17,7 @@ mod approval_client;
 mod commands;
 mod connection;
 mod contract_probe;
+mod conversations;
 mod daemon;
 mod native_stream;
 mod session_ui;
@@ -95,6 +96,7 @@ fn porygon_theme() -> Theme {
 }
 
 pub(crate) struct PorygonTui {
+    pub(crate) conversations: conversations::Conversations,
     pub(crate) messages: Vec<ChatMessage>,
     pub(crate) transcript: std::cell::RefCell<transcript::Transcript>,
     pub(crate) input: TextInput,
@@ -168,6 +170,7 @@ impl PorygonTui {
 
         Self {
             transcript: std::cell::RefCell::default(),
+            conversations: conversations::Conversations::default(),
             messages: vec![ChatMessage {
                 role: "system".into(),
                 content: "Type a message to start a conversation.\nUse F1 for keys and commands. Your draft stays here while disconnected.".into(),
@@ -238,6 +241,10 @@ impl PorygonTui {
 
 #[derive(Debug)]
 enum Msg {
+    OpenConversations,
+    ConversationsListed(Result<Vec<conversations::Conversation>, String>),
+    LoadConversation(String),
+    ConversationLoaded(String, Result<Vec<ChatMessage>, String>),
     Init,
     SendMessage,
     PollConnection,
