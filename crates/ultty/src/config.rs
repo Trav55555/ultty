@@ -1046,14 +1046,30 @@ pub struct TerminalConfig {
     /// needs its terminfo entry on every host it reaches, including hosts
     /// reached over ssh.
     pub term: String,
+    /// Whether bash, zsh and fish shells that Ultty starts load the shell
+    /// integration (prompt marks and working-directory reports) by
+    /// themselves. Applies to tabs opened after a config reload.
+    pub shell_integration: ShellIntegration,
 }
 
 impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
             term: crate::grid::DEFAULT_TERMINAL_NAME.to_string(),
+            shell_integration: ShellIntegration::default(),
         }
     }
+}
+
+/// Whether Ultty injects its shell integration into the shells it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShellIntegration {
+    /// Inject into bash, zsh and fish; leave other shells alone.
+    #[default]
+    Auto,
+    /// Start every shell as it is.
+    Off,
 }
 
 impl TerminalConfig {
@@ -1416,16 +1432,29 @@ mod tests {
     }
 
     #[test]
+    fn shell_integration_defaults_to_auto_and_parses_off() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.terminal.shell_integration, ShellIntegration::Auto);
+        let config: Config = toml::from_str("[terminal]\nshell_integration = \"off\"").unwrap();
+        assert_eq!(config.terminal.shell_integration, ShellIntegration::Off);
+        let config: Config = toml::from_str("[terminal]\nshell_integration = \"auto\"").unwrap();
+        assert_eq!(config.terminal.shell_integration, ShellIntegration::Auto);
+        assert!(toml::from_str::<Config>("[terminal]\nshell_integration = \"sometimes\"").is_err());
+    }
+
+    #[test]
     fn invalid_terminal_term_falls_back_to_the_default() {
         for bad in ["", "xterm 256color", "a=b", "x\u{0}y", &"x".repeat(65)] {
             let mut terminal = TerminalConfig {
                 term: bad.to_string(),
+                ..TerminalConfig::default()
             };
             terminal.validate_term();
             assert_eq!(terminal.term, "xterm-256color", "for {bad:?}");
         }
         let mut terminal = TerminalConfig {
             term: "xterm-ultty".to_string(),
+            ..TerminalConfig::default()
         };
         terminal.validate_term();
         assert_eq!(terminal.term, "xterm-ultty");

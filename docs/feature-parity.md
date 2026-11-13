@@ -51,9 +51,11 @@ Ranked by how much a typical user would notice:
    the previous and next prompt, and Ctrl+Shift+O selects the last command's
    output when it fits on screen. Longer output cannot be selected, because
    a selection is made of view rows.
-7. **Shell integration is manual.** `dist/shell-integration` has bash and zsh
-   scripts that the user must source. Ghostty injects its integration into
-   bash, zsh, fish, elvish and nushell automatically.
+7. **Shell integration is automatic for bash, zsh and fish only.** *Mostly
+   fixed.* Ultty injects `dist/shell-integration` into the bash, zsh and fish
+   shells it starts (`terminal.shell_integration`, default `auto`). Login
+   bash, elvish, nushell, and shells reached over ssh still need the scripts
+   sourced by hand. Ghostty also injects into elvish and nushell.
 8. **Only six bundled themes.** Ghostty ships hundreds of themes (1.4 alone
    added 356) and can switch between a light and a dark theme
    automatically.
@@ -216,7 +218,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 
 | Feature | Ultty | Ghostty 1.4 | Alacritty 0.16 | Ultty evidence |
 |---|---|---|---|---|
-| Prompt marks | partial: recorded; scripts for bash and zsh, sourced by hand | yes; auto-injected for bash, zsh, fish, elvish, nushell | no | `dist/shell-integration/`; `tests/command_marks.rs` |
+| Prompt marks | partial: recorded; auto-injected for bash, zsh and fish (not login bash, elvish, nushell or ssh) | yes; auto-injected for bash, zsh, fish, elvish, nushell | no | `dist/shell-integration/`; `pty/shell_integration.rs`; `tests/shell_integration.rs`; `tests/command_marks.rs` |
 | Jump to prompt | yes; `jump_prev_prompt`, `jump_next_prompt` (Ctrl+Shift+PageUp/PageDown); `select_last_output` (Ctrl+Shift+O) | yes | no | `Terminal::jump_to_prompt`; `tests/command_marks.rs` |
 | cwd inheritance for new tabs and splits | yes; OSC 7 (local host), else the foreground process's `/proc` cwd on Linux; `behavior.inherit_working_directory` | yes; separate tab and split options | yes for new windows (unverified in docs) | `inherit_dir.rs`; `terminal_manager.rs` `inherited_directory` |
 | ssh and sudo helpers | partial: in-band native protocol over ssh; `xterm-ultty` terminfo copied by hand | yes; `+ssh` terminfo and env, sudo wrapper | no | `docs/configuration.md` terminal type; ADR 0018 |

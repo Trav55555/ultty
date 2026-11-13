@@ -5,6 +5,7 @@
 
 mod child;
 mod master;
+pub mod shell_integration;
 
 pub use child::Child;
 pub use master::{Pty, PtySize, SlavePty};

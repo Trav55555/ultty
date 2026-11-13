@@ -1,0 +1,11 @@
+# Ultty's stand-in for ~/.bashrc, given to `bash --rcfile` in the shells Ultty
+# starts. It runs the real ~/.bashrc, then loads the integration. Bash still
+# reads /etc/bash.bashrc (where the distribution builds it in) before this.
+
+if [ -r "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+
+if [ -n "${ULTTY_SHELL_INTEGRATION_DIR-}" ] && [ -r "$ULTTY_SHELL_INTEGRATION_DIR/bash/ultty.bash" ]; then
+    . "$ULTTY_SHELL_INTEGRATION_DIR/bash/ultty.bash"
+fi

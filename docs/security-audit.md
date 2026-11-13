@@ -67,6 +67,7 @@ input, as of the changes listed under Unreleased in
 | Unbounded native content (an in-band sender growing memory) | A region keeps at most 4 MiB of text; a session at most 64 MiB, beyond which `SetContent` and `AppendContent` are refused. |
 | A `cat`ed file or remote host opening an in-band session | Sessions are not drawn, given input, or answered beyond the handshake until the app confirms them in a later read, and end after 2 s unconfirmed. See ADR 0018. |
 | Shells inheriting the terminal's file descriptors (GPU buffers) | The child closes every fd above stderr before `exec`. |
+| Another local user planting scripts that a spawned shell would run (shell integration files) | The scripts are built into the binary and written to a fresh 0700 directory (files 0600, `O_NOFOLLOW`), moved into place with one rename under `$XDG_RUNTIME_DIR` (or `<temp>/ultty-<uid>`, which must be a 0700 directory of ours). An existing directory is used only if it is owned by us, 0700, not a symlink, and holds exactly the expected content; otherwise injection is skipped. |
 | A window larger than the GPU texture limit aborting the process | The surface is clamped to `max_texture_dimension_2d`. |
 
 These rules are in the code, not in configuration, except `clipboard_write`.

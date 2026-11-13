@@ -1,0 +1,32 @@
+# Ultty's .zshenv, found because Ultty points ZDOTDIR at the directory that
+# holds it. It puts ZDOTDIR back, runs the user's real .zshenv, and arranges
+# for the integration to load once the user's .zshrc has run.
+
+if [[ -n ${ULTTY_ZSH_ZDOTDIR+x} ]]; then
+    export ZDOTDIR=$ULTTY_ZSH_ZDOTDIR
+else
+    unset ZDOTDIR
+fi
+unset ULTTY_ZSH_ZDOTDIR
+
+if [[ -r ${ZDOTDIR:-$HOME}/.zshenv ]]; then
+    builtin source -- "${ZDOTDIR:-$HOME}/.zshenv"
+fi
+
+# Loading from the first precmd, not here, puts the integration after the
+# user's .zshrc and prompt theme, as the manual instructions ask. A script
+# the user already sourced has set __ultty_integration by then, and the
+# loader does nothing.
+if [[ -o interactive && -n ${ULTTY_SHELL_INTEGRATION_DIR-} ]]; then
+    __ultty_bootstrap() {
+        precmd_functions=(${precmd_functions:#__ultty_bootstrap})
+        unfunction __ultty_bootstrap
+        if [[ -r $ULTTY_SHELL_INTEGRATION_DIR/zsh/ultty.zsh ]]; then
+            builtin source -- "$ULTTY_SHELL_INTEGRATION_DIR/zsh/ultty.zsh"
+            # This prompt is already being drawn; mark it too.
+            (( ${+functions[__ultty_mark_prompt]} )) && __ultty_mark_prompt
+        fi
+    }
+    typeset -ga precmd_functions
+    precmd_functions+=(__ultty_bootstrap)
+fi

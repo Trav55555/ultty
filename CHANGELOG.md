@@ -7,6 +7,14 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ## [Unreleased]
 
+### Added
+
+- Shell integration loads by itself in the bash, zsh and fish shells Ultty
+  starts, with no rc edits (`terminal.shell_integration = "auto" | "off"`,
+  or `ULTTY_SHELL_INTEGRATION=off`). The scripts now also report the working
+  directory (OSC 7), and there is a fish script. Login bash, other shells and
+  ssh are not injected.
+
 ### Changed
 
 - **Breaking, `ulttui-lua`:** while an `input` with an `id` has focus, its

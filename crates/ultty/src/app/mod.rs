@@ -17,7 +17,7 @@ use anyhow::Result;
 use arboard::Clipboard;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use ultty::config::Config;
+use ultty::config::{Config, ShellIntegration, TerminalConfig};
 use ultty::config_watcher::ConfigWatcher;
 use ultty::control::ControlServer;
 use ultty::protocol::ProtocolServer;
@@ -584,7 +584,7 @@ impl App {
             return match command {
                 StartupCommand::Exec { program, args } => {
                     TerminalManager::with_command_tab(cols, rows, program, args, &mut |tab_id| {
-                        tab_shell_env(protocol_server, &config.terminal.term, tab_id)
+                        tab_shell_env(protocol_server, &config.terminal, tab_id)
                     })
                     .map_err(|e| anyhow::anyhow!("Failed to start '{}': {}", program, e))
                 }
@@ -596,7 +596,7 @@ impl App {
                         .ok_or_else(|| anyhow::anyhow!("Unknown launch profile '{name}'"))?;
                     Self::create_manager_from_profile(
                         profile,
-                        &config.terminal.term,
+                        &config.terminal,
                         cols,
                         rows,
                         protocol_server,
@@ -606,7 +606,7 @@ impl App {
                     let session = ultty::session::SessionData::load_named(name)?;
                     Self::create_manager_from_session(
                         &session,
-                        &config.terminal.term,
+                        &config.terminal,
                         cols,
                         rows,
                         protocol_server,
@@ -624,7 +624,7 @@ impl App {
                 );
                 match Self::create_manager_from_session(
                     &session,
-                    &config.terminal.term,
+                    &config.terminal,
                     cols,
                     rows,
                     protocol_server,
@@ -643,7 +643,7 @@ impl App {
                 tracing::info!("Using launch profile: {}", profile_name);
                 return Self::create_manager_from_profile(
                     profile,
-                    &config.terminal.term,
+                    &config.terminal,
                     cols,
                     rows,
                     protocol_server,
@@ -658,7 +658,7 @@ impl App {
 
         // No profile configured, use default shell
         TerminalManager::with_tab_env(cols, rows, &mut |tab_id| {
-            tab_shell_env(protocol_server, &config.terminal.term, tab_id)
+            tab_shell_env(protocol_server, &config.terminal, tab_id)
         })
         .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e))
     }
@@ -666,7 +666,7 @@ impl App {
     /// Create terminal manager from a launch profile.
     fn create_manager_from_profile(
         profile: &ultty::config::LaunchProfile,
-        term: &str,
+        terminal: &TerminalConfig,
         cols: u16,
         rows: u16,
         protocol_server: &mut Option<ProtocolServer>,
@@ -679,7 +679,7 @@ impl App {
         }
         if profile.tabs.is_empty() {
             return TerminalManager::with_tab_env(cols, rows, &mut |tab_id| {
-                tab_shell_env(protocol_server, term, tab_id)
+                tab_shell_env(protocol_server, terminal, tab_id)
             })
             .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e));
         }
@@ -705,7 +705,7 @@ impl App {
                         &tab_config.args,
                         working_dir,
                         title,
-                        &mut |tab_id| tab_shell_env(protocol_server, term, tab_id),
+                        &mut |tab_id| tab_shell_env(protocol_server, terminal, tab_id),
                     )
                     .map_err(|e| anyhow::anyhow!("Failed to create tab: {}", e))?;
 
@@ -740,13 +740,13 @@ impl App {
     /// Create terminal manager from a saved session.
     fn create_manager_from_session(
         session: &ultty::session::SessionData,
-        term: &str,
+        terminal: &TerminalConfig,
         cols: u16,
         rows: u16,
         protocol_server: &mut Option<ProtocolServer>,
     ) -> Result<TerminalManager> {
         TerminalManager::from_session(session, cols, rows, &mut |tab_id| {
-            tab_shell_env(protocol_server, term, tab_id)
+            tab_shell_env(protocol_server, terminal, tab_id)
         })
         .map_err(|e| anyhow::anyhow!("Failed to restore session: {}", e))
     }
@@ -800,11 +800,7 @@ impl App {
     /// Create a new tab whose shell is wired to its own protocol socket.
     fn create_tab(&mut self) -> std::io::Result<TabId> {
         self.runtime.manager.create_tab_with_env(&mut |tab_id| {
-            tab_shell_env(
-                &mut self.runtime.protocol,
-                &self.config.terminal.term,
-                tab_id,
-            )
+            tab_shell_env(&mut self.runtime.protocol, &self.config.terminal, tab_id)
         })
     }
 
@@ -821,13 +817,7 @@ impl App {
             args,
             working_dir,
             title,
-            &mut |tab_id| {
-                tab_shell_env(
-                    &mut self.runtime.protocol,
-                    &self.config.terminal.term,
-                    tab_id,
-                )
-            },
+            &mut |tab_id| tab_shell_env(&mut self.runtime.protocol, &self.config.terminal, tab_id),
         )
     }
 
@@ -1653,7 +1643,8 @@ fn resize_direction_at_window_edge(
     }
 }
 
-/// Shell environment for a new tab: `TERM` (from `terminal.term`) and the
+/// Shell environment for a new tab: `TERM` (from `terminal.term`), the opt-out
+/// for shell integration (from `terminal.shell_integration`) and the
 /// tab's own native protocol socket.
 ///
 /// Opens the tab's listener on `server` before the shell is spawned so the
@@ -1662,10 +1653,13 @@ fn resize_direction_at_window_edge(
 /// protocol support, and apps fall back to ANSI rendering.
 fn tab_shell_env(
     server: &mut Option<ProtocolServer>,
-    term: &str,
+    terminal: &TerminalConfig,
     tab_id: TabId,
 ) -> std::io::Result<ultty::terminal_manager::TabEnv> {
-    let mut env = vec![("TERM".into(), term.into())];
+    let mut env = vec![("TERM".into(), terminal.term.as_str().into())];
+    if terminal.shell_integration == ShellIntegration::Off {
+        env.push((ultty::pty::shell_integration::ENV_MODE.into(), "off".into()));
+    }
     let Some(server) = server.as_mut() else {
         return Ok(env);
     };
@@ -2004,7 +1998,7 @@ mod tests {
 
     #[test]
     fn test_profile_validation_precedes_spawning_and_restoration() {
-        use ultty::config::{Config, LaunchProfile, PaneConfig, TabConfig};
+        use ultty::config::{Config, LaunchProfile, PaneConfig, TabConfig, TerminalConfig};
 
         let mut config = Config::default();
         config.behavior.restore_session = true;
@@ -2026,8 +2020,13 @@ mod tests {
             }],
             ..Default::default()
         };
-        let result =
-            super::App::create_manager_from_profile(&profile, "xterm-256color", 80, 24, &mut None);
+        let result = super::App::create_manager_from_profile(
+            &profile,
+            &TerminalConfig::default(),
+            80,
+            24,
+            &mut None,
+        );
         assert!(result
             .err()
             .unwrap()
