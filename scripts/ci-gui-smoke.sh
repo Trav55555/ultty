@@ -4,7 +4,7 @@
 # same way locally on Linux with xvfb and mesa-vulkan-drivers installed.
 #
 # Usage: scripts/ci-gui-smoke.sh [artifact-dir]
-# Expects debug builds of ultty, ulttyctl, hello-native, counter-app, and
+# Expects debug builds of ultty, ulttyctl, ultty-session, hello-native, counter-app, and
 # agent-transcript.
 set -euo pipefail
 
@@ -82,6 +82,16 @@ fi
 # skips that part, loudly.
 ULTTY="$ROOT/target/debug/ultty" ULTTYCTL="$ULTTYCTL" \
   scripts/e2e/agent-transcript.sh "$OUT/agent-transcript"
+
+# Exercise the installed host and viewer recovery using only the standard
+# library. Each gate owns its processes and private runtime directory.
+ULTTY_DEPLOY_TEST_BIN_DIR="$ROOT/target/debug" \
+  python3 -S -m unittest discover -s scripts/deploy -p 'test_*.py'
+python3 -S scripts/e2e/session-reconnect.py \
+  --ultty "$ROOT/target/debug/ultty" \
+  --session-bin "$ROOT/target/debug/ultty-session" \
+  --counter "$ROOT/target/debug/counter-app" \
+  --output "$OUT/session-reconnect"
 
 # Catch panics that did not take the process down.
 if grep -q "panicked at" "$OUT/ultty.log"; then

@@ -32,7 +32,7 @@ use crate::keys::{self, KeyAction, KeyInput, KeyModes, Mods};
 use crate::renderer::{OverlayState, PaneDraw, PaneInfo, Renderer};
 use crate::scene::view::NativeRenderSource;
 
-use worker::Delivery;
+use worker::{Action, ConnectionState, Delivery, Request};
 
 /// Viewer options; credentials belong to the transport, never window titles.
 pub struct Options {
@@ -72,6 +72,11 @@ pub fn run(options: Options, client: AttachmentClient) -> Result<()> {
         surface: None,
         view,
         controller: false,
+        connection_state: ConnectionState::Reconnecting,
+        generation: 0,
+        mutations_blocked: false,
+        unconfirmed: false,
+        control_unavailable: false,
         modifiers: ModifiersState::default(),
         pointer: (0.0, 0.0),
         dragging: None,
@@ -96,7 +101,7 @@ pub fn run(options: Options, client: AttachmentClient) -> Result<()> {
 
 struct Viewer {
     options: Options,
-    sender: Option<mpsc::SyncSender<Command>>,
+    sender: Option<mpsc::SyncSender<Request>>,
     delivery: Arc<Mutex<Delivery>>,
     closing: Arc<AtomicBool>,
     window: Option<Arc<Window>>,
@@ -104,6 +109,11 @@ struct Viewer {
     surface: Option<wgpu::Surface<'static>>,
     view: SessionView,
     controller: bool,
+    connection_state: ConnectionState,
+    generation: u64,
+    mutations_blocked: bool,
+    unconfirmed: bool,
+    control_unavailable: bool,
     modifiers: ModifiersState,
     pointer: (f32, f32),
     dragging: Option<u64>,
@@ -120,13 +130,93 @@ impl Viewer {
         self.last_error.set(Some(Instant::now()));
         tracing::warn!(%message, "attachment viewer");
         if let Some(window) = &self.window {
-            window.set_title(&format!("{} — {message}", self.options.name));
+            window.set_title(&format!(
+                "{} — {} — {message}",
+                self.options.name,
+                self.connection_label()
+            ));
         }
     }
     fn submit(&self, command: Command) {
+        let Ok(state) = self.delivery.lock() else {
+            self.closing.store(true, Ordering::Release);
+            self.error("connection state unavailable; reopen");
+            return;
+        };
+        if state.state != ConnectionState::Connected || state.generation != self.generation {
+            drop(state);
+            self.error("offline input discarded");
+            return;
+        }
+        if state.mutations_blocked && command.is_mutation() {
+            drop(state);
+            self.error("previous input outcome unknown; reopen to resume control");
+            return;
+        }
+        let generation = state.generation;
+        drop(state);
         if let Some(sender) = &self.sender {
-            if let Err(error) = sender.try_send(command) {
+            if let Err(error) = sender.try_send(Request {
+                generation,
+                action: Action::Command(command),
+            }) {
                 self.error(&format!("request not accepted: {error}"));
+            }
+        }
+    }
+
+    fn queue_recovery(&self, action: Action) {
+        let Ok(state) = self.delivery.lock() else {
+            return;
+        };
+        if self.closing.load(Ordering::Acquire)
+            || matches!(
+                state.state,
+                ConnectionState::Refused | ConnectionState::Reconnecting
+            )
+        {
+            return;
+        }
+        if matches!(action, Action::ClaimControl) && state.controller {
+            return;
+        }
+        if matches!(action, Action::ClaimControl)
+            && (state.state != ConnectionState::Connected || state.mutations_blocked)
+        {
+            drop(state);
+            self.error("reconnect first; previous input may require reopening to resume control");
+            return;
+        }
+        let generation = state.generation;
+        drop(state);
+        if let Some(sender) = &self.sender {
+            if let Err(error) = sender.try_send(Request { generation, action }) {
+                self.error(&format!("retry not accepted: {error}"));
+            }
+        }
+    }
+
+    fn connection_label(&self) -> String {
+        match self.connection_state {
+            ConnectionState::Reconnecting => "reconnecting — input paused".into(),
+            ConnectionState::Disconnected => "disconnected — Ctrl+Shift+R to reconnect".into(),
+            ConnectionState::Refused => "refused — reopen".into(),
+            ConnectionState::Connected if self.mutations_blocked => {
+                "observer — previous input outcome unknown; reopen to resume control".into()
+            }
+            ConnectionState::Connected => {
+                let role = if self.controller {
+                    "controller"
+                } else if self.control_unavailable {
+                    "observer — control unavailable"
+                } else {
+                    "observer"
+                };
+                if self.unconfirmed {
+                    format!("{role} — previous input outcome unknown; not replayed")
+                } else {
+                    role.into()
+                }
             }
         }
     }
@@ -189,63 +279,77 @@ impl Viewer {
         self.window = Some(window);
         self.surface = Some(surface);
         self.renderer = Some(renderer);
-        self.submit(Command::Snapshot {
-            after_sequence: None,
-        });
         Ok(())
     }
     fn receive(&mut self) {
         if self.closing.load(Ordering::Acquire) {
             return;
         }
-        let (snapshot, error, controller) = {
-            let mut state = self
-                .delivery
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (state.snapshot.take(), state.error.take(), state.controller)
+        let publication = match self.delivery.lock() {
+            Ok(mut state) => (
+                state.snapshot.take(),
+                state.error.take(),
+                state.controller,
+                state.state,
+                state.generation,
+                state.mutations_blocked,
+                state.unconfirmed,
+                state.control_unavailable,
+            ),
+            Err(_) => {
+                self.closing.store(true, Ordering::Release);
+                self.sender.take();
+                self.controller = false;
+                self.connection_state = ConnectionState::Refused;
+                self.error("connection state poisoned; reopen");
+                return;
+            }
         };
-        let gained = controller && !self.controller;
-        self.controller = controller;
+        let (snapshot, error, controller, state, generation, blocked, unconfirmed, unavailable) =
+            publication;
         if let Some(snapshot) = snapshot {
-            {
-                match self.view.replace(snapshot) {
-                    Ok(()) => {
-                        if let Some(window) = &self.window {
-                            let role = if self.controller {
-                                "controller"
-                            } else {
-                                "observer"
-                            };
-                            if self
-                                .last_error
-                                .get()
-                                .is_none_or(|time| time.elapsed() > Duration::from_secs(5))
-                            {
-                                window.set_title(&format!(
-                                    "{} — {role} — {}",
-                                    self.options.name,
-                                    self.view.focused().map_or("", |pane| pane.title.as_str())
-                                ));
-                            }
-                            window.request_redraw();
-                        }
-                    }
-                    Err(error) => {
-                        self.closing.store(true, Ordering::Release);
-                        self.sender.take();
-                        self.controller = false;
-                        self.error(&format!("invalid snapshot: {error}; reopen to reconnect"));
-                        return;
-                    }
-                }
+            if let Err(error) = self.view.replace(snapshot) {
+                self.closing.store(true, Ordering::Release);
+                self.sender.take();
+                self.controller = false;
+                self.connection_state = ConnectionState::Refused;
+                self.error(&format!("invalid snapshot: {error}; reopen"));
+                return;
+            }
+            if let Some(window) = &self.window {
+                window.request_redraw();
             }
         }
-        if gained {
+        let gained = controller && !self.controller;
+        if state != self.connection_state || generation != self.generation {
+            self.last_error.set(None);
+            self.held = None;
+            self.dragging = None;
+        }
+        self.connection_state = state;
+        self.generation = generation;
+        self.controller = controller && state == ConnectionState::Connected;
+        self.mutations_blocked = blocked;
+        self.unconfirmed = unconfirmed;
+        self.control_unavailable = unavailable;
+        if gained && self.controller {
             self.resize_owner();
         }
         if let Some(error) = error {
             self.error(&error);
+        } else if self
+            .last_error
+            .get()
+            .is_none_or(|time| time.elapsed() > Duration::from_secs(5))
+        {
+            if let Some(window) = &self.window {
+                window.set_title(&format!(
+                    "{} — {} — {}",
+                    self.options.name,
+                    self.connection_label(),
+                    self.view.focused().map_or("", |pane| pane.title.as_str())
+                ));
+            }
         }
     }
     fn draw(&mut self) -> Result<()> {
@@ -382,7 +486,15 @@ impl Viewer {
                         return;
                     }
                     "t" => {
-                        self.submit(Command::ClaimControl);
+                        if !event.repeat {
+                            self.queue_recovery(Action::ClaimControl);
+                        }
+                        return;
+                    }
+                    "r" => {
+                        if !event.repeat {
+                            self.queue_recovery(Action::Reconnect);
+                        }
                         return;
                     }
                     _ => {}
@@ -903,6 +1015,11 @@ mod tests {
             surface: None,
             view: SessionView::default(),
             controller: false,
+            connection_state: ConnectionState::Reconnecting,
+            generation: 0,
+            mutations_blocked: false,
+            unconfirmed: false,
+            control_unavailable: false,
             modifiers: ModifiersState::default(),
             pointer: (0.0, 0.0),
             dragging: None,
