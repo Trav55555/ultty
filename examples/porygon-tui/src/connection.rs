@@ -36,8 +36,24 @@ pub(crate) struct RunSnapshot {
 
 #[derive(Deserialize)]
 struct StatusPayload {
-    uptime_seconds: f64,
-    subsystems: Value,
+    model: StatusModel,
+    party: StatusParty,
+    context_budget: Value,
+}
+
+#[derive(Deserialize)]
+struct StatusModel {
+    alias: String,
+    name: String,
+    provider: String,
+    context_window: u64,
+}
+
+#[derive(Deserialize)]
+struct StatusParty {
+    #[serde(rename = "thinking")]
+    _thinking: bool,
+    members: Vec<Value>,
 }
 
 impl Connection {
@@ -92,7 +108,7 @@ impl Connection {
     }
 
     pub(crate) async fn check(&self) -> Result<(), String> {
-        let url = self.endpoint(&["status"])?;
+        let url = self.endpoint(&["status", "tui"])?;
         let response = self
             .client
             .get(url)
@@ -104,11 +120,18 @@ impl Connection {
             .json()
             .await
             .map_err(|err| format!("daemon returned an invalid status payload: {err}"))?;
-        if !status.uptime_seconds.is_finite() || status.uptime_seconds < 0.0 {
-            return Err("daemon returned an invalid status payload: uptime_seconds".into());
-        }
-        if !status.subsystems.is_object() {
-            return Err("daemon returned an invalid status payload: subsystems".into());
+        if status.model.alias.trim().is_empty()
+            || status.model.name.trim().is_empty()
+            || status.model.provider.trim().is_empty()
+            || status.model.context_window == 0
+            || status
+                .party
+                .members
+                .iter()
+                .any(|member| !member.is_object())
+            || !(status.context_budget.is_null() || status.context_budget.is_object())
+        {
+            return Err("daemon returned an invalid compact TUI status envelope".into());
         }
         Ok(())
     }
@@ -244,11 +267,12 @@ mod tests {
 
     async fn mock_response(
         status: StatusCode,
-        body: &'static str,
+        body: &str,
         location: Option<String>,
     ) -> (String, JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let body = body.to_owned();
         let task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (request, mut stream) = read_request(stream).await;
@@ -260,7 +284,7 @@ mod tests {
                 response.push_str(&format!("Location: {location}\r\n"));
             }
             response.push_str("\r\n");
-            response.push_str(body);
+            response.push_str(&body);
             stream.write_all(response.as_bytes()).await.unwrap();
             request
         });
@@ -315,7 +339,7 @@ mod tests {
     async fn test_status_sends_bearer_and_parses_daemon_payload() {
         let (base_url, server) = mock_response(
             StatusCode::OK,
-            r#"{"uptime_seconds":12.5,"subsystems":{"healthy":true}}"#,
+            r#"{"model":{"alias":"default","name":"fixture","provider":"unknown","context_window":32768},"party":{"thinking":false,"members":[]},"context_budget":null}"#,
             None,
         )
         .await;
@@ -323,7 +347,7 @@ mod tests {
 
         connection.check().await.unwrap();
         let request = server.await.unwrap();
-        assert!(request.starts_with("GET /status HTTP/1.1\r\n"));
+        assert!(request.starts_with("GET /status/tui HTTP/1.1\r\n"));
         assert!(request
             .to_ascii_lowercase()
             .contains("\r\nauthorization: bearer wire-secret\r\n"));
@@ -355,7 +379,7 @@ mod tests {
         let error = connection.check().await.unwrap_err();
         assert!(error.contains("returned 302"));
         let request = server.await.unwrap();
-        assert!(request.starts_with("GET /status HTTP/1.1\r\n"));
+        assert!(request.starts_with("GET /status/tui HTTP/1.1\r\n"));
     }
 
     #[tokio::test]
@@ -396,5 +420,43 @@ mod tests {
             connection.stream_url().unwrap().as_str(),
             "wss://example.test/root/agent/stream"
         );
+    }
+    #[tokio::test]
+    async fn test_compact_status_rejects_malformed_or_legacy_envelopes() {
+        let valid = serde_json::json!({"model":{"alias":"default","name":"fixture","provider":"unknown","context_window":32768},"party":{"thinking":false,"members":[]},"context_budget":null});
+        let mut bodies = vec![
+            serde_json::json!({"uptime_seconds":1,"subsystems":{}}),
+            serde_json::json!({}),
+        ];
+        for (pointer, replacement) in [
+            ("/model/alias", serde_json::json!("")),
+            ("/model/context_window", serde_json::json!(0)),
+            ("/model/context_window", serde_json::json!(-1)),
+            ("/party/thinking", serde_json::json!("false")),
+            ("/party/members", serde_json::json!(["invalid member"])),
+            ("/context_budget", serde_json::json!([])),
+        ] {
+            let mut invalid = valid.clone();
+            *invalid.pointer_mut(pointer).unwrap() = replacement;
+            bodies.push(invalid);
+        }
+        for body in bodies {
+            let (base_url, server) = mock_response(StatusCode::OK, &body.to_string(), None).await;
+            let connection = Connection::from_values(&base_url, "token").unwrap();
+            assert!(connection.check().await.is_err());
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compact_status_preserves_daemon_prefix_and_accepts_warm_budget() {
+        let body = serde_json::json!({"model":{"alias":"default","name":"fixture","provider":"unknown","context_window":32768},"party":{"thinking":true,"members":[{"name":"working"}]},"context_budget":{"total_used":42}});
+        let (base_url, server) = mock_response(StatusCode::OK, &body.to_string(), None).await;
+        let connection = Connection::from_values(&format!("{base_url}prefix"), "token").unwrap();
+        connection.check().await.unwrap();
+        assert!(server
+            .await
+            .unwrap()
+            .starts_with("GET /prefix/status/tui HTTP/1.1"));
     }
 }
