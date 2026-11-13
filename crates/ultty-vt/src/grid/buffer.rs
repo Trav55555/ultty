@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 use super::history::{History, RowPacker};
 use super::{
-    AnchorTag, Cell, CellFlags, Dimensions, Grid, ImageStore, Row, RowMarks, RowView, ScrollRegion,
+    AnchorTag, Cell, CellFlags, Dimensions, Grid, ImageIds, ImageStore, Row, RowMarks, RowView,
+    ScrollRegion,
 };
 
 mod images;
@@ -89,6 +90,8 @@ pub struct Buffer {
     /// Inline images (Sixel) placed on this screen. Each screen keeps its
     /// own, as foot does (`normal.sixel_images`, `alt.sixel_images`).
     images: ImageStore,
+    /// Where the ids of images split off by overwriting come from.
+    image_ids: ImageIds,
     /// Rows looked at for anchor bookkeeping, so tests can bound its cost.
     #[cfg(test)]
     anchor_visits: std::cell::Cell<usize>,
@@ -172,15 +175,25 @@ impl Rewrap {
 
     /// Place the images watched in logical line `index`, whose rows are
     /// `start..self.total`, on the row their corner wrapped to.
-    fn place_images(&mut self, index: usize, start: usize) {
+    ///
+    /// `row_ends` holds, for each row made from the line, the index in the
+    /// line of the cell after its last: an image is on the row whose cells
+    /// hold its corner. Wide characters make rows shorter than `cols` and
+    /// leave spacer cells that take no column, so counting columns would
+    /// miss. Without `row_ends` (a line laid out as one blank row) the
+    /// corner is placed by column count.
+    fn place_images(&mut self, index: usize, start: usize, row_ends: &[usize]) {
         let rows = (self.total - start).max(1);
         let cols = usize::from(self.cols).max(1);
         while self.watched.front().is_some_and(|w| w.0 == index) {
             let Some((_, offset, slot)) = self.watched.pop_front() else {
                 break;
             };
-            self.placed
-                .push((slot, start + (offset / cols).min(rows - 1)));
+            let row = match row_ends.partition_point(|&end| end <= offset) {
+                row if row < row_ends.len() => row,
+                _ => (offset / cols).min(rows - 1),
+            };
+            self.placed.push((slot, start + row));
         }
     }
 
@@ -261,7 +274,7 @@ impl Rewrap {
         }
         let made = self.total;
         self.push_row(new_row);
-        self.place_images(index, made);
+        self.place_images(index, made, &[]);
         made
     }
 
@@ -269,11 +282,21 @@ impl Rewrap {
     /// is in this line.
     fn lay_out(&mut self, index: usize, line: &[ReflowCell], marks: RowMarks) {
         let start = self.total;
-        self.lay_out_rows(index, line, marks);
-        self.place_images(index, start);
+        let mut row_ends = Vec::new();
+        self.lay_out_rows(index, line, marks, &mut row_ends);
+        self.place_images(index, start, &row_ends);
     }
 
-    fn lay_out_rows(&mut self, index: usize, line: &[ReflowCell], marks: RowMarks) {
+    /// Wrap `line`; with an image's corner in it, `row_ends` collects where
+    /// each row ends (see [`Rewrap::place_images`]).
+    fn lay_out_rows(
+        &mut self,
+        index: usize,
+        line: &[ReflowCell],
+        marks: RowMarks,
+        row_ends: &mut Vec<usize>,
+    ) {
+        let holds_image = self.watched.front().is_some_and(|w| w.0 == index);
         let cursor_col = match self.cursor {
             // Allow the cursor at len(): one past the last character.
             Some((cursor_line, col)) if cursor_line == index => Some(col.min(line.len())),
@@ -354,6 +377,9 @@ impl Rewrap {
             }
             if row_start == 0 {
                 new_row.set_marks(marks);
+            }
+            if holds_image {
+                row_ends.push(pos);
             }
             self.push_row(new_row);
         }
@@ -525,6 +551,7 @@ impl Buffer {
             rewrites: 0,
             rewritten_lines: BTreeMap::new(),
             images: ImageStore::new(),
+            image_ids: ImageIds::default(),
             #[cfg(test)]
             anchor_visits: std::cell::Cell::new(0),
         }
@@ -533,6 +560,12 @@ impl Buffer {
     /// This screen's inline images.
     pub fn images(&self) -> &ImageStore {
         &self.images
+    }
+
+    /// Draw the ids of images split off by overwriting from `ids`, which
+    /// the terminal's other screen shares.
+    pub fn set_image_ids(&mut self, ids: ImageIds) {
+        self.image_ids = ids;
     }
 
     /// Mutable access to this screen's inline images.
@@ -1397,6 +1430,9 @@ impl Buffer {
         if let Err(width) = self.grid.print_in_row(c) {
             self.write_char_slow(c, width);
         }
+        if !self.images.is_empty() {
+            self.overwrite_images_under_print(None);
+        }
     }
 
     /// [`Buffer::write_char`] for what [`Grid::print_in_row`] left, `width`
@@ -1481,6 +1517,9 @@ impl Buffer {
                 (cols.saturating_sub(col).max(1) as usize).min(remaining.len())
             };
             self.grid.write_ascii_span(&remaining[..chunk_len]);
+            if !self.images.is_empty() {
+                self.overwrite_images_under_print(Some(chunk_len as u16));
+            }
             remaining = &remaining[chunk_len..];
         }
     }
@@ -1535,6 +1574,76 @@ impl Buffer {
             self.shift_images_up(row, region.bottom, n);
         }
         self.grid.delete_lines(n);
+    }
+
+    /// Erase from the cursor to the end of the display (ED 0), and the
+    /// images on the erased cells.
+    pub fn erase_below(&mut self) {
+        let (rows, cols) = (self.grid.dimensions().rows, self.grid.dimensions().cols);
+        let position = self.grid.cursor().position;
+        self.overwrite_images(position.row..=position.row, position.col..cols);
+        if position.row + 1 < rows {
+            self.overwrite_images(position.row + 1..=rows - 1, 0..cols);
+        }
+        self.grid.erase_below();
+    }
+
+    /// Erase from the start of the display to the cursor (ED 1), and the
+    /// images on the erased cells.
+    pub fn erase_above(&mut self) {
+        let cols = self.grid.dimensions().cols;
+        let position = self.grid.cursor().position;
+        if position.row > 0 {
+            self.overwrite_images(0..=position.row - 1, 0..cols);
+        }
+        self.overwrite_images(
+            position.row..=position.row,
+            0..position.col.saturating_add(1).min(cols),
+        );
+        self.grid.erase_above();
+    }
+
+    /// Erase from the cursor to the end of the line (EL 0), and the images
+    /// on the erased cells.
+    pub fn erase_line_right(&mut self) {
+        let cols = self.grid.dimensions().cols;
+        let position = self.grid.cursor().position;
+        self.overwrite_images(position.row..=position.row, position.col..cols);
+        self.grid.erase_line_right();
+    }
+
+    /// Erase from the start of the line to the cursor (EL 1), and the
+    /// images on the erased cells.
+    pub fn erase_line_left(&mut self) {
+        let cols = self.grid.dimensions().cols;
+        let position = self.grid.cursor().position;
+        self.overwrite_images(
+            position.row..=position.row,
+            0..position.col.saturating_add(1).min(cols),
+        );
+        self.grid.erase_line_left();
+    }
+
+    /// Erase the cursor's line (EL 2), and the images on it.
+    pub fn erase_line(&mut self) {
+        let cols = self.grid.dimensions().cols;
+        let row = self.grid.cursor().position.row;
+        self.overwrite_images(row..=row, 0..cols);
+        self.grid.erase_line();
+    }
+
+    /// Erase `count` cells from the cursor (ECH), and the images on them.
+    pub fn erase_characters(&mut self, count: u16) {
+        let position = self.grid.cursor().position;
+        self.overwrite_images(
+            position.row..=position.row,
+            position.col..position.col.saturating_add(count),
+        );
+        self.grid.erase_cells(
+            position.row,
+            position.col,
+            position.col.saturating_add(count),
+        );
     }
 
     /// Newline - scroll to history if at bottom.

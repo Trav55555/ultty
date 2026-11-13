@@ -147,11 +147,34 @@ the same placement model.
 | #132 | One image store per screen; ED 2, leaving the alternate screen and RIS clear images (following foot) |
 | #133 | Images pinned to text lines: scroll, scrollback, eviction, ED 3, reflow, clipping |
 | #134 | Images drawn in split panes and pane screenshots |
+| `img-erase` | Erases and text split or remove the images under them; tall sixels scroll; DECSDM; reflow row; mode 47 checked |
 
-Left over from slice 0: ED 0/1 and EL do not delete images; an image taller
-than the space below the cursor is not scrolled into view; reflow places an
-image by cell offset, so wide-character spacing can move it by a row; mode
-47 clears like 1047/1049, which was not checked against foot.
+A follow-up (`img-erase`) closed the rest, following foot
+(`codeberg.org/dnkl/foot`, `sixel.c`, `csi.c`, `terminal.c`):
+
+- **Erases and text.** ED 0/1, EL 0/1/2, ECH and printed text remove the
+  cells they touch from the images under them. An image that is only partly
+  covered is split into the cell rectangles that remain (up to four), each
+  cropped from the picture and given a fresh id, as foot's
+  `sixel_overwrite_by_row` / `sixel_overwrite_at_cursor` do. This costs one
+  `is_empty` test on the print path when there are no images. DECALN and
+  DECCOLM, which clear the screen, delete the screen's images like ED 2.
+  Not done: ICH, DCH and REP leave images alone (foot's `csi.c` calls the
+  overwrite only for DECCRA, DECFRA and DECERA); DECERA and the other
+  rectangular operations are not implemented by the parser at all.
+- **Tall images.** With sixel scrolling on (DECSDM reset, the default) the
+  screen scrolls as for line feeds until the image fits, and the cursor ends
+  on the image's last row, first column, as foot does. On the alternate
+  screen, which has no scrollback, rows that would leave above the screen are
+  cut from the image. With mode 80 set the image goes to the top-left of
+  the screen, cut to the screen's rows, and neither cursor nor screen move.
+  Mode 80 answers DECRQM. The mode is not carried in terminal snapshots.
+- **Reflow.** The row of an image's corner is read from where reflow laid
+  that cell, so wide characters no longer shift it by a row.
+- **Mode 47.** foot clears the alternate screen's cells on entry for 47,
+  1047 and 1049 alike. Ultty keeps xterm's rule that 47 does not clear
+  them. Images are the same either way: the alternate screen's images are
+  deleted on leaving, so it is bare on entry in every mode.
 
 The list as planned:
 

@@ -479,6 +479,8 @@ pub enum Mode {
     AutoWrap,
     /// Reverse video mode (CSI ?5h/l) - swap fg/bg
     ReverseVideo,
+    /// Sixel display mode (CSI ?80h/l): set, sixels do not scroll the screen
+    SixelDisplay,
     /// Alternate screen buffer (CSI ?47h/l)
     AlternateScreen,
     /// Alternate screen buffer with clear (CSI ?1047h/l)

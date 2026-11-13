@@ -45,7 +45,7 @@ mod terminal;
 
 pub use buffer::{Anchor, AnchorRefusal, Buffer, DEFAULT_SCROLLBACK, MAX_ANCHORS};
 pub use cell::{Cell, CellFlags, Color, UnderlineStyle};
-pub use image::{decode_sixel, ImageId, ImageStore, TerminalImage};
+pub use image::{decode_sixel, ImageId, ImageIds, ImageStore, TerminalImage};
 pub use palette::{format_color_spec, Palette, Rgb, ThemeColors};
 pub use row::{AnchorTag, Row, RowMarks};
 pub use row_view::{RowMut, RowView};
