@@ -359,6 +359,9 @@ mod tests {
         let mut app = crate::PorygonTui::new();
         app.handle_update(crate::Msg::ApprovalReceived(
             crate::types::ApprovalRequest {
+                scope: Some("tool_call".into()),
+                decision_version: Some("fixture-version".into()),
+                decision_stale: false,
                 id: "stream".into(),
                 tool_name: "shell".into(),
                 params: serde_json::json!({}),

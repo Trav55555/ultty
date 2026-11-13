@@ -191,6 +191,12 @@ pub struct WeatherData {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApprovalRequest {
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub decision_version: Option<String>,
+    #[serde(default)]
+    pub decision_stale: bool,
     pub id: String,
     pub tool_name: String,
     pub params: serde_json::Value,

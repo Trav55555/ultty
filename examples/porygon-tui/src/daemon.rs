@@ -1134,18 +1134,32 @@ impl PorygonTui {
                             .pending_approval
                             .as_ref()
                             .filter(|_| self.approval_is_stream)
-                            .map(|r| r.id.as_str());
-                        let selected = crate::work::attention(&self.work, stream)
+                            .map(|r| r.id.clone());
+                        let selected = crate::work::attention(&self.work, stream.as_deref())
                             .get(self.work.selected)
-                            .map(|item| crate::work::attention_key(&self.work, item, stream));
+                            .map(|item| {
+                                crate::work::attention_key(&self.work, item, stream.as_deref())
+                            });
+                        if let Some(item) = self
+                            .pending_approval
+                            .as_ref()
+                            .and_then(|request| approvals.iter().find(|item| item.id == request.id))
+                            .cloned()
+                        {
+                            self.notice_durable_approval(&item);
+                        }
                         self.work.runs = runs;
                         self.work.approvals = approvals;
                         self.work.selected = selected
                             .and_then(|key| {
-                                crate::work::attention(&self.work, stream)
+                                crate::work::attention(&self.work, stream.as_deref())
                                     .iter()
                                     .position(|item| {
-                                        crate::work::attention_key(&self.work, item, stream) == key
+                                        crate::work::attention_key(
+                                            &self.work,
+                                            item,
+                                            stream.as_deref(),
+                                        ) == key
                                     })
                             })
                             .unwrap_or(0);
@@ -1189,37 +1203,8 @@ impl PorygonTui {
                                 Cmd::message(Msg::RefreshWork)
                             }
                             Some(AttentionItem::Approval(index)) => {
-                                let item = &self.work.approvals[index];
-                                if let Some(pending) = &self.pending_approval {
-                                    if pending.id == item.id {
-                                        self.show_approval_modal = true;
-                                    } else {
-                                        self.work.error = Some(
-                                            "Resolve or refresh the current approval first".into(),
-                                        );
-                                    }
-                                    return Cmd::none();
-                                }
-                                if self.approval_in_flight {
-                                    self.work.error = Some("Decision is unconfirmed".into());
-                                    return Cmd::none();
-                                }
-                                self.pending_approval = Some(ApprovalRequest {
-                                    id: item.id.clone(),
-                                    tool_name: item
-                                        .context
-                                        .tool_name
-                                        .clone()
-                                        .unwrap_or_else(|| item.source.clone()),
-                                    params: serde_json::to_value(&item.context).unwrap_or_default(),
-                                    risk_score: -1.0,
-                                    reasoning: item.objective.clone(),
-                                    blast_radius: "unknown".into(),
-                                    reversible: None,
-                                });
-                                self.approval_is_stream = false;
-                                self.show_approval_modal = true;
-                                Cmd::none()
+                                let item = self.work.approvals[index].clone();
+                                self.inspect_durable_approval(&item)
                             }
                             None => Cmd::none(),
                         }
@@ -1406,7 +1391,15 @@ impl PorygonTui {
                 if !is_stream && self.waiting_response {
                     return Cmd::none();
                 }
-                if self.pending_approval.is_some() {
+                if let Some(inspected) = self.pending_approval.as_mut() {
+                    if !is_stream
+                        && !self.approval_is_stream
+                        && inspected.id == request.id
+                        && (inspected.decision_version != request.decision_version
+                            || inspected.scope != request.scope)
+                    {
+                        inspected.decision_stale = true;
+                    }
                     if is_stream {
                         self.queued_stream_approvals.push_back(request);
                     }
@@ -1418,13 +1411,36 @@ impl PorygonTui {
                 Cmd::none()
             }
             Msg::ApprovalDecision(approved) => self.decide_approval(approved),
-            Msg::ApprovalSubmitted(id, result) => {
-                if self.pending_approval.as_ref().is_none_or(|r| r.id != id) {
+            Msg::ApprovalBecameStale(id, version, error) => {
+                if self.approval_is_stream {
+                    return Cmd::none();
+                }
+                if let Some(request) = self.pending_approval.as_mut().filter(|request| {
+                    request.id == id && request.decision_version.as_deref() == Some(&version)
+                }) {
+                    request.decision_stale = true;
+                    self.approval_in_flight = true;
+                    self.error = Some(error);
+                    return Cmd::ShowToast(Toast::warning("Approval changed or was consumed. Close, refresh Attention, and inspect its replacement."));
+                }
+                Cmd::none()
+            }
+            Msg::ApprovalSubmitted(id, version, result) => {
+                if self.approval_is_stream {
+                    return Cmd::none();
+                }
+                if self
+                    .pending_approval
+                    .as_ref()
+                    .is_none_or(|r| r.id != id || r.decision_version.as_deref() != Some(&version))
+                {
                     return Cmd::none();
                 }
                 match result {
                     Ok(()) => {
-                        self.work.approvals.retain(|item| item.id != id);
+                        self.work.approvals.retain(|item| {
+                            item.id != id || item.decision_version.as_deref() != Some(&version)
+                        });
                         self.work.selected = self
                             .work
                             .selected
@@ -1463,6 +1479,8 @@ impl PorygonTui {
                     return Cmd::message(Msg::InspectRun);
                 }
                 let id = request.id.clone();
+                let version = request.decision_version.clone();
+                let scope = request.scope.clone();
                 Cmd::spawn(async move {
                     let result = crate::approval_client::fetch_pending(
                         &connection.client,
@@ -1471,29 +1489,41 @@ impl PorygonTui {
                     )
                     .await
                     .map(|queue| {
-                        queue.items.iter().any(|item| item.id == id)
-                            || queue.count > queue.items.len() as u64
+                        crate::approval_client::reconcile_pending(
+                            &queue,
+                            &id,
+                            version.as_deref(),
+                            scope.as_deref(),
+                        )
                     })
-                    .map_err(|e| e.to_string());
-                    Msg::ApprovalReconciled(id, result)
+                    .map_err(|error| error.to_string());
+                    Msg::ApprovalReconciled(id, version, result)
                 })
             }
-            Msg::ApprovalReconciled(id, result) => {
-                if self.pending_approval.as_ref().is_none_or(|r| r.id != id) {
+            Msg::ApprovalReconciled(id, version, result) => {
+                if self.approval_is_stream {
                     return Cmd::none();
                 }
+                if self
+                    .pending_approval
+                    .as_ref()
+                    .is_none_or(|request| request.id != id || request.decision_version != version)
+                {
+                    return Cmd::none();
+                }
+                use crate::approval_client::ApprovalRefresh;
                 match result {
-                    Ok(false) => {
+                    Ok(ApprovalRefresh::Missing) => {
                         self.pending_approval = None;
                         self.show_approval_modal = false;
                         self.approval_in_flight = false;
-                        Cmd::ShowToast(Toast::warning(
-                            "No longer pending. Inspect the run for its outcome.",
-                        ))
+                        Cmd::ShowToast(Toast::warning("No longer pending. Inspect the run for its outcome."))
                     }
-                    Ok(true) => Cmd::ShowToast(Toast::warning(
-                        "Still pending; an unconfirmed decision cannot be retried safely.",
-                    )),
+                    Ok(ApprovalRefresh::Changed) => {
+                        if let Some(request) = self.pending_approval.as_mut() { request.decision_stale = true; }
+                        Cmd::ShowToast(Toast::warning("Approval changed. Close, refresh Attention (r), then inspect its replacement."))
+                    }
+                    Ok(ApprovalRefresh::Same | ApprovalRefresh::Unknown) => Cmd::ShowToast(Toast::warning("Still pending or not fully listed; an unconfirmed decision cannot be retried safely.")),
                     Err(error) => Cmd::ShowToast(Toast::error(error)),
                 }
             }

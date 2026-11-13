@@ -208,11 +208,15 @@ impl PorygonTui {
             .height(Dimension::Percent(100.0))
             .padding(1.0)
             .child(RichText::new().text("Approval details | Esc back"))
-            .child(RichText::new().text(if self.approval_in_flight {
-                "Decision unconfirmed | r refresh"
-            } else {
-                "y approve once | n deny | r refresh"
-            }))
+            .child(RichText::new().text(
+                if let Some(reason) = self.approval_decision_blocker() {
+                    reason
+                } else if self.approval_in_flight {
+                    "Decision unconfirmed | r refresh"
+                } else {
+                    "y approve once | n deny | r refresh"
+                },
+            ))
             .child(RichText::new().text(format!(
                 "Up/Down PgUp/PgDn | rows {}-{} of {}",
                 start + 1,
@@ -730,6 +734,9 @@ mod tests {
         app.terminal_width = 40;
         app.terminal_height = 12;
         app.pending_approval = Some(ApprovalRequest {
+            scope: Some("tool_call".into()),
+            decision_version: Some("fixture-version".into()),
+            decision_stale: false,
             id: "approval-scoped-1".into(),
             tool_name: "write_file".into(),
             params: serde_json::json!({"content": format!("{}TAIL-ARGUMENT", "long value ".repeat(80))}),

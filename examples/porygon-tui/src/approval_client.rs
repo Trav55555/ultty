@@ -2,8 +2,8 @@
 //!
 //! The caller supplies a client with authentication headers. Reading requires
 //! `read` scope; decisions require `write` scope. A decision is sent once. A
-//! transport failure can leave its outcome unknown, so refresh before deciding
-//! whether to submit another decision.
+//! transport failure can leave its outcome unknown. Never retry the same
+//! incarnation; a replacement requires a fresh explicit inspection.
 
 use std::time::Duration;
 
@@ -30,6 +30,8 @@ pub struct PendingApprovals {
 pub struct PendingApproval {
     /// Identifier to use when submitting a decision.
     pub id: String,
+    /// Server-issued immutable incarnation bound to the inspected action.
+    pub decision_version: Option<String>,
     /// Durable approval scope; older heartbeat records omit it.
     pub scope: Option<String>,
     /// Origin of the proposed action, such as `tool:write_file`.
@@ -183,20 +185,64 @@ pub async fn fetch_pending(
     Ok(pending)
 }
 
+/// The server rejected a decision because its inspected incarnation changed.
+#[derive(Debug)]
+pub struct StaleApproval(String);
+
+impl std::fmt::Display for StaleApproval {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+impl std::error::Error for StaleApproval {}
+
+/// Read-only reconciliation of the previously inspected incarnation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalRefresh {
+    Same,
+    Changed,
+    Missing,
+    Unknown,
+}
+
+pub fn reconcile_pending(
+    queue: &PendingApprovals,
+    id: &str,
+    version: Option<&str>,
+    scope: Option<&str>,
+) -> ApprovalRefresh {
+    if let Some(item) = queue.items.iter().find(|item| item.id == id) {
+        if item.decision_version.as_deref() == version && item.scope.as_deref() == scope {
+            ApprovalRefresh::Same
+        } else {
+            ApprovalRefresh::Changed
+        }
+    } else if queue.count > queue.items.len() as u64 {
+        ApprovalRefresh::Unknown
+    } else {
+        ApprovalRefresh::Missing
+    }
+}
+
 /// Submit one decision to the daemon's `pending/{id}/approve` or `deny` route.
 ///
 /// The caller supplies the daemon base URL and an authenticated
 /// client. Only a matching identifier and terminal decision count as success.
 /// This function never retries. If confirmation cannot be read, the action may
-/// already have happened; refresh pending state before any manual resubmission.
+/// already have happened. Do not retry that incarnation; inspect a replacement
+/// explicitly before submitting a new decision.
 pub async fn submit_decision(
     client: &Client,
     base_url: &Url,
     approval_id: &str,
+    expected_version: &str,
     decision: ApprovalDecision,
 ) -> Result<ApprovalDecisionResult> {
     if approval_id.trim().is_empty() || matches!(approval_id, "." | "..") {
         bail!("A nonempty approval identifier is required");
+    }
+    if expected_version.trim().is_empty() {
+        bail!("A decision version from the inspected tool approval is required; upgrade the daemon and reinspect");
     }
     let mut url = pending_url(base_url)?;
     url.path_segments_mut()
@@ -205,6 +251,7 @@ pub async fn submit_decision(
         .push(decision.route());
     let response = client
         .post(url)
+        .json(&serde_json::json!({"expected_version": expected_version}))
         .timeout(Duration::from_secs(30))
         .send()
         .await
@@ -226,8 +273,10 @@ pub async fn submit_decision(
             "Invalid confirmation for approval {approval_id}; outcome may be unknown, refresh before resubmitting"
         )
     })?;
-    reject_application_error(&payload)
-        .map_err(|error| anyhow::anyhow!("Decision failed for approval {approval_id}: {error}"))?;
+    if let Err(error) = reject_application_error(&payload) {
+        let message = format!("Decision failed for approval {approval_id}: {error}");
+        return Err(error.context(message));
+    }
     let result: ApprovalDecisionResult = serde_json::from_value(payload).with_context(|| {
         format!(
             "Daemon did not confirm {} of approval {approval_id}",
@@ -258,6 +307,22 @@ fn pending_url(base_url: &Url) -> Result<Url> {
 }
 
 fn reject_application_error(payload: &Value) -> Result<()> {
+    if payload.get("consumed").and_then(Value::as_bool) == Some(true) {
+        bail!(
+            "Approval consumed; execution outcome may be unknown. Do not retry this decision: {}",
+            payload.get("error").unwrap_or(&Value::Null)
+        );
+    }
+    if payload.get("status").and_then(Value::as_str) == Some("stale") {
+        return Err(StaleApproval(
+            payload
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Approval changed or was already consumed; refresh before deciding")
+                .to_owned(),
+        )
+        .into());
+    }
     if let Some(error) = payload.get("error").filter(|error| !error.is_null()) {
         bail!("Daemon approval error: {error}");
     }
@@ -292,6 +357,22 @@ mod tests {
                 assert_ne!(count, 0, "client closed before finishing request headers");
                 request.extend_from_slice(&buffer[..count]);
             }
+            let headers_end = request
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            let headers = String::from_utf8_lossy(&request[..headers_end]).to_lowercase();
+            let length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .and_then(|length| length.parse::<usize>().ok())
+                .unwrap_or(0);
+            while request.len() < headers_end + length {
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buffer[..count]);
+            }
             let response = format!(
                 "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -320,7 +401,7 @@ mod tests {
         let body = serde_json::json!({
             "count": 3, "limit": 2, "updated_at": "2026-11-12T10:00:00Z",
             "items": [{
-                "id": "approval-1", "scope": "tool_call", "source": "tool:write_file",
+                "id": "approval-1", "scope": "tool_call", "decision_version":"inspected-version", "source": "tool:write_file",
                 "objective": "Write a file", "priority": "HIGH",
                 "created_at": "2026-11-12T09:00:00Z", "updated_at": null,
                 "context": {
@@ -341,6 +422,10 @@ mod tests {
             .unwrap();
         assert_eq!(pending.count, 3);
         assert_eq!(pending.items.len(), 2);
+        assert_eq!(
+            pending.items[0].decision_version.as_deref(),
+            Some("inspected-version")
+        );
         let context = &pending.items[0].context;
         assert_eq!(context.run_id.as_deref(), Some("run-1"));
         assert_eq!(context.request_id.as_deref(), Some("req-1"));
@@ -401,6 +486,7 @@ mod tests {
             &authenticated_client(),
             &url,
             "approval/one?",
+            "inspected-version",
             ApprovalDecision::Approve,
         )
         .await
@@ -415,7 +501,10 @@ mod tests {
             request.starts_with("post /approvals/pending/approval%2fone%3f/approve http/1.1\r\n")
         );
         assert!(request.contains("authorization: bearer mock-approval-token\r\n"));
-        assert!(request.ends_with("\r\n\r\n"));
+        assert_eq!(
+            serde_json::from_str::<Value>(request.split_once("\r\n\r\n").unwrap().1).unwrap(),
+            serde_json::json!({"expected_version":"inspected-version"})
+        );
     }
 
     #[tokio::test]
@@ -426,6 +515,7 @@ mod tests {
             &authenticated_client(),
             &url,
             "approval-1",
+            "inspected-version",
             ApprovalDecision::Deny,
         )
         .await
@@ -464,6 +554,7 @@ mod tests {
                 &authenticated_client(),
                 &url,
                 "approval-1",
+                "inspected-version",
                 ApprovalDecision::Approve,
             )
             .await;
@@ -492,11 +583,59 @@ mod tests {
             &authenticated_client(),
             &url,
             "approval-1",
+            "inspected-version",
             ApprovalDecision::Approve,
         )
         .await
         .unwrap_err();
         assert!(error.to_string().contains("outcome may be unknown"));
         server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn test_submit_binds_exact_inspected_version_and_rejects_reused_id_stale() {
+        let version = "Version-A/\"\n?=";
+        let (url, server) = mock_response(200, r#"{"status":"stale","approval_id":"same-id","error":"Approval changed or was already consumed; refresh before deciding"}"#).await;
+        let error = submit_decision(
+            &authenticated_client(),
+            &url,
+            "same-id",
+            version,
+            ApprovalDecision::Approve,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Approval changed"));
+        assert!(error.is::<StaleApproval>());
+        let request = server.await.unwrap();
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body, serde_json::json!({"expected_version":version}));
+    }
+
+    #[tokio::test]
+    async fn test_consumed_failure_is_explicit_and_missing_version_never_posts() {
+        let (url, server) = mock_response(200, r#"{"status":"error","approval_id":"same-id","error":"claimed execution failed","consumed":true}"#).await;
+        let error = submit_decision(
+            &authenticated_client(),
+            &url,
+            "same-id",
+            "inspected",
+            ApprovalDecision::Approve,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("consumed"));
+        assert!(error.to_string().contains("Do not retry"));
+        server.await.unwrap();
+        let unused = Url::parse("http://127.0.0.1:1").unwrap();
+        let error = submit_decision(
+            &authenticated_client(),
+            &unused,
+            "same-id",
+            "",
+            ApprovalDecision::Deny,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("decision version"));
     }
 }

@@ -14,6 +14,7 @@ use ulttui::prelude::*;
 use ulttui::theme::{ButtonTheme, ControlTheme, DesignTokens, InputTheme, SelectionTheme, Theme};
 
 mod approval_client;
+mod approval_ui;
 mod attachment;
 mod commands;
 mod connection;
@@ -289,10 +290,15 @@ enum Msg {
     InspectWork,
     ApprovalReceived(ApprovalRequest, bool),
     ApprovalDecision(bool),
-    ApprovalSubmitted(String, Result<(), String>),
+    ApprovalSubmitted(String, String, Result<(), String>),
+    ApprovalBecameStale(String, String, String),
     DismissApproval,
     RefreshApproval,
-    ApprovalReconciled(String, Result<bool, String>),
+    ApprovalReconciled(
+        String,
+        Option<String>,
+        Result<approval_client::ApprovalRefresh, String>,
+    ),
     StreamToken(String),
     AbortStream,
     NativeEvent(String, u64, native_stream::Event),
