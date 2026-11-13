@@ -1067,6 +1067,151 @@ impl PorygonTui {
 
     pub(crate) fn handle_update(&mut self, msg: Msg) -> Cmd<Msg> {
         match msg {
+            Msg::OpenWork(page) => {
+                self.work.page = page;
+                self.work.selected = 0;
+                Cmd::message(Msg::RefreshWork)
+            }
+            Msg::RefreshWork => {
+                let Some(connection) = self.connection.clone() else {
+                    self.work.error = Some("Daemon connection is not configured".into());
+                    return Cmd::none();
+                };
+                self.work.loading = true;
+                self.work.error = None;
+                match self.work.page {
+                    crate::work::Page::Work => {
+                        Cmd::spawn(
+                            async move { Msg::WorkRuns(crate::work::runs(connection).await) },
+                        )
+                    }
+                    crate::work::Page::Attention => Cmd::spawn(async move {
+                        let result = crate::approval_client::fetch_pending(
+                            &connection.client,
+                            &connection.base_url,
+                            200,
+                        )
+                        .await
+                        .map(|list| list.items)
+                        .map_err(|e| e.to_string());
+                        Msg::WorkApprovals(result)
+                    }),
+                    _ => {
+                        self.work.loading = false;
+                        Cmd::none()
+                    }
+                }
+            }
+            Msg::WorkRuns(result) => {
+                if self.work.page != crate::work::Page::Work {
+                    return Cmd::none();
+                }
+                self.work.loading = false;
+                match result {
+                    Ok(runs) => {
+                        let selected_id = self
+                            .work
+                            .runs
+                            .get(self.work.selected)
+                            .map(|run| run.id.clone());
+                        self.work.selected = selected_id
+                            .and_then(|id| runs.iter().position(|run| run.id == id))
+                            .unwrap_or(0);
+                        self.work.runs = runs;
+                    }
+                    Err(error) => self.work.error = Some(error),
+                }
+                Cmd::none()
+            }
+            Msg::WorkApprovals(result) => {
+                if self.work.page != crate::work::Page::Attention {
+                    return Cmd::none();
+                }
+                self.work.loading = false;
+                match result {
+                    Ok(items) => {
+                        let selected_id = self
+                            .work
+                            .approvals
+                            .get(self.work.selected)
+                            .map(|item| item.id.clone());
+                        self.work.selected = selected_id
+                            .and_then(|id| items.iter().position(|item| item.id == id))
+                            .unwrap_or(0);
+                        self.work.approvals = items;
+                    }
+                    Err(error) => self.work.error = Some(error),
+                }
+                Cmd::none()
+            }
+            Msg::InspectWork => match self.work.page {
+                crate::work::Page::Work => {
+                    let Some(run) = self.work.runs.get(self.work.selected) else {
+                        return Cmd::none();
+                    };
+                    let id = run.id.clone();
+                    self.work.detail_id = Some(id.clone());
+                    self.work.reports.clear();
+                    self.work.detail_scroll = 0.0;
+                    self.work.error = None;
+                    self.work.page = crate::work::Page::Detail;
+                    let Some(connection) = self.connection.clone() else {
+                        self.work.error = Some("Daemon connection is not configured".into());
+                        return Cmd::none();
+                    };
+                    self.work.loading = true;
+                    Cmd::spawn(async move {
+                        let result = crate::work::reports(connection, id.clone()).await;
+                        Msg::WorkReports(id, result)
+                    })
+                }
+                crate::work::Page::Attention => {
+                    let Some(item) = self.work.approvals.get(self.work.selected) else {
+                        return Cmd::none();
+                    };
+                    if let Some(pending) = &self.pending_approval {
+                        if pending.id == item.id {
+                            self.show_approval_modal = true;
+                        } else {
+                            self.work.error =
+                                Some("Resolve or refresh the current approval first".into());
+                        }
+                        return Cmd::none();
+                    }
+                    if self.approval_in_flight {
+                        self.work.error = Some("Decision is unconfirmed".into());
+                        return Cmd::none();
+                    }
+                    let request = ApprovalRequest {
+                        id: item.id.clone(),
+                        tool_name: item
+                            .context
+                            .tool_name
+                            .clone()
+                            .unwrap_or_else(|| item.source.clone()),
+                        params: serde_json::to_value(&item.context).unwrap_or_default(),
+                        risk_score: -1.0,
+                        reasoning: item.objective.clone(),
+                        blast_radius: "unknown".into(),
+                        reversible: None,
+                    };
+                    self.pending_approval = Some(request);
+                    self.approval_is_stream = false;
+                    self.show_approval_modal = true;
+                    Cmd::none()
+                }
+                _ => Cmd::none(),
+            },
+            Msg::WorkReports(id, result) => {
+                if self.work.detail_id.as_deref() == Some(&id) {
+                    self.work.loading = false;
+                    match result {
+                        Ok(reports) => self.work.reports = reports,
+                        Err(error) => self.work.error = Some(error),
+                    }
+                }
+                Cmd::none()
+            }
             Msg::Init => {
                 if self.started {
                     Cmd::none()
@@ -1118,44 +1263,6 @@ impl PorygonTui {
                                 ..AgentStatus::default()
                             })
                         }
-                    }
-                })
-            }
-            Msg::PollApprovals => {
-                if !self.connected || self.waiting_response || self.pending_approval.is_some() {
-                    return Cmd::none();
-                }
-                let Some(connection) = self.connection.clone() else {
-                    return Cmd::none();
-                };
-                Cmd::spawn(async move {
-                    match crate::approval_client::fetch_pending(
-                        &connection.client,
-                        &connection.base_url,
-                        20,
-                    )
-                    .await
-                    {
-                        Ok(list) => match list.items.into_iter().next() {
-                            Some(item) => Msg::ApprovalReceived(
-                                ApprovalRequest {
-                                    id: item.id,
-                                    tool_name: item
-                                        .context
-                                        .tool_name
-                                        .clone()
-                                        .unwrap_or(item.source),
-                                    params: serde_json::to_value(&item.context).unwrap_or_default(),
-                                    risk_score: -1.0,
-                                    reasoning: item.objective,
-                                    blast_radius: "unknown".into(),
-                                    reversible: None,
-                                },
-                                false,
-                            ),
-                            None => Msg::NoApprovalsPending,
-                        },
-                        Err(error) => Msg::ApprovalLoadFailed(error.to_string()),
                     }
                 })
             }
@@ -1267,7 +1374,7 @@ impl PorygonTui {
                 }
                 self.approval_is_stream = is_stream;
                 self.pending_approval = Some(request);
-                self.show_approval_modal = true;
+                self.show_approval_modal = is_stream;
                 Cmd::none()
             }
             Msg::ApprovalDecision(approved) => self.decide_approval(approved),
@@ -1277,6 +1384,11 @@ impl PorygonTui {
                 }
                 match result {
                     Ok(()) => {
+                        self.work.approvals.retain(|item| item.id != id);
+                        self.work.selected = self
+                            .work
+                            .selected
+                            .min(self.work.approvals.len().saturating_sub(1));
                         self.approval_in_flight = false;
                         self.pending_approval = None;
                         self.show_approval_modal = false;
@@ -1342,11 +1454,6 @@ impl PorygonTui {
                     Err(error) => Cmd::ShowToast(Toast::error(error)),
                 }
             }
-            Msg::ApprovalLoadFailed(error) => {
-                self.error = Some(error);
-                Cmd::none()
-            }
-            Msg::NoApprovalsPending => Cmd::none(),
             Msg::FlushDrafts => {
                 self.flush_drafts();
                 Cmd::none()
@@ -2476,12 +2583,7 @@ impl PorygonTui {
                 Cmd::message(Msg::InspectRun),
             ]),
             CommandAction::ShowApprovals => {
-                if self.pending_approval.is_some() {
-                    self.show_approval_modal = true;
-                    Cmd::none()
-                } else {
-                    Cmd::message(Msg::PollApprovals)
-                }
+                Cmd::message(Msg::OpenWork(crate::work::Page::Attention))
             }
             CommandAction::AttachRun { id } => {
                 if self.pending_approval.is_some() || self.approval_in_flight {

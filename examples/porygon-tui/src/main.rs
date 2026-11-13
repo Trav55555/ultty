@@ -25,6 +25,8 @@ mod sidebar;
 mod transcript;
 mod types;
 mod views;
+mod work;
+mod work_views;
 
 use commands::CommandRegistry;
 use types::*;
@@ -97,6 +99,7 @@ fn porygon_theme() -> Theme {
 
 pub(crate) struct PorygonTui {
     pub(crate) conversations: conversations::Conversations,
+    pub(crate) work: work::WorkState,
     pub(crate) messages: Vec<ChatMessage>,
     pub(crate) transcript: std::cell::RefCell<transcript::Transcript>,
     pub(crate) input: TextInput,
@@ -171,6 +174,7 @@ impl PorygonTui {
         Self {
             transcript: std::cell::RefCell::default(),
             conversations: conversations::Conversations::default(),
+            work: work::WorkState::default(),
             messages: vec![ChatMessage {
                 role: "system".into(),
                 content: "Type a message to start a conversation.\nUse F1 for keys and commands. Your draft stays here while disconnected.".into(),
@@ -257,15 +261,18 @@ enum Msg {
     PollWeather,
     WeatherFetched(WeatherData),
     WeatherFailed,
-    PollApprovals,
+    OpenWork(work::Page),
+    RefreshWork,
+    WorkRuns(Result<Vec<work::WorkRun>, String>),
+    WorkApprovals(Result<Vec<approval_client::PendingApproval>, String>),
+    WorkReports(String, Result<Vec<work::Report>, String>),
+    InspectWork,
     ApprovalReceived(ApprovalRequest, bool),
     ApprovalDecision(bool),
     ApprovalSubmitted(String, Result<(), String>),
-    ApprovalLoadFailed(String),
     DismissApproval,
     RefreshApproval,
     ApprovalReconciled(String, Result<bool, String>),
-    NoApprovalsPending,
     StreamToken(String),
     AbortStream,
     NativeEvent(String, u64, native_stream::Event),
@@ -341,7 +348,6 @@ impl Application for PorygonTui {
             Sub::every(Duration::from_millis(250), || Msg::FlushDrafts),
             Sub::every(Duration::from_secs(3), || Msg::PollConnection),
             Sub::every(Duration::from_secs(2), || Msg::PollStatus),
-            Sub::every(Duration::from_millis(500), || Msg::PollApprovals),
             Sub::every(Duration::from_secs(1), || Msg::ClockTick),
         ];
         if self.weather_enabled {

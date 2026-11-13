@@ -392,6 +392,38 @@ impl PorygonTui {
                 _ => None,
             };
         }
+        if self.work.page != crate::work::Page::Closed && !matches!(event, Event::Quit) {
+            if let Event::Key(ke) = event {
+                match ke.key {
+                    Key::Escape => {
+                        self.work.page = if self.work.page == crate::work::Page::Detail {
+                            crate::work::Page::Work
+                        } else {
+                            crate::work::Page::Closed
+                        };
+                    }
+                    Key::Up if self.work.page == crate::work::Page::Detail => {
+                        self.work.detail_scroll = (self.work.detail_scroll - 1.0).max(0.0)
+                    }
+                    Key::Down if self.work.page == crate::work::Page::Detail => {
+                        self.work.detail_scroll += 1.0
+                    }
+                    Key::Up => self.work.selected = self.work.selected.saturating_sub(1),
+                    Key::Down => {
+                        let len = if self.work.page == crate::work::Page::Work {
+                            self.work.runs.len()
+                        } else {
+                            self.work.approvals.len()
+                        };
+                        self.work.selected = (self.work.selected + 1).min(len.saturating_sub(1));
+                    }
+                    Key::Enter => return Some(Msg::InspectWork),
+                    Key::Char('r') => return Some(Msg::RefreshWork),
+                    _ => {}
+                }
+            }
+            return None;
+        }
         match event {
             Event::Quit if self.waiting_response => Some(Msg::AbortStream),
             Event::Quit if !self.input.current_value().is_empty() && !self.quit_armed => {
@@ -434,6 +466,12 @@ impl PorygonTui {
             Event::Key(ke) => {
                 if ke.key == Key::F(2) {
                     return Some(Msg::OpenConversations);
+                }
+                if ke.key == Key::F(3) {
+                    return Some(Msg::OpenWork(crate::work::Page::Work));
+                }
+                if ke.key == Key::F(4) {
+                    return Some(Msg::OpenWork(crate::work::Page::Attention));
                 }
                 if ke.key == Key::F(1) {
                     self.show_help = true;
@@ -528,6 +566,7 @@ impl PorygonTui {
             for line in [
                 "Keys and commands",
                 "F2: conversations; search, Enter to open, Ctrl+N new.",
+                "F3: work and run review. F4: attention.",
                 "Esc or F1: back to your draft",
                 "",
                 "Enter: send when ready; keep draft while busy.",
@@ -543,6 +582,9 @@ impl PorygonTui {
                 help = help.child(Text::new(line));
             }
             return Stack::new().child(help);
+        }
+        if self.work.page != crate::work::Page::Closed && !self.show_approval_modal {
+            return Stack::new().child(crate::work_views::view(&self.work, self.terminal_height));
         }
         if self.show_approval_modal {
             if let Some(req) = &self.pending_approval {
