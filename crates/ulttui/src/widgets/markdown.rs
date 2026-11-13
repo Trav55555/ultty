@@ -31,6 +31,72 @@ pub struct MarkdownView {
     accessible: super::Accessible,
 }
 
+/// A wrapped Markdown row with its native accessibility metadata.
+#[derive(Debug, Clone)]
+pub struct PreparedMarkdownRow {
+    /// Rendered text and inline styles.
+    pub content: RichText,
+    /// Native semantics for the first row of a completed task item.
+    pub semantics: Semantics,
+    final_block: bool,
+    final_row: bool,
+    defer_while_streaming: bool,
+}
+
+impl PreparedMarkdownRow {
+    /// Construct a plain row for a virtualized view.
+    pub fn new(content: RichText) -> Self {
+        Self {
+            content,
+            semantics: Semantics::default(),
+            final_block: false,
+            final_row: false,
+            defer_while_streaming: false,
+        }
+    }
+
+    /// Apply live metadata to this visible row of the active response.
+    pub fn streaming(mut self) -> Self {
+        if self.final_block {
+            self.semantics = Semantics::default();
+            if self.defer_while_streaming {
+                self.content = RichText::new();
+            }
+            if self.final_row {
+                self.semantics = Semantics {
+                    role: Role::Log,
+                    live: Live::Polite,
+                    busy: true,
+                    ..Semantics::default()
+                };
+            }
+        }
+        self
+    }
+    fn widget(&self) -> super::RichText {
+        let mut widget = super::RichText::new().fill_width();
+        for span in &self.content.spans {
+            widget = widget.span(&span.text, span.style.clone());
+        }
+        widget
+    }
+}
+
+impl View for PreparedMarkdownRow {
+    fn constraints(&self) -> Constraints {
+        self.widget().constraints()
+    }
+    fn content(&self) -> Content {
+        Content::RichText(self.content.clone())
+    }
+    fn semantics(&self) -> Semantics {
+        self.semantics.clone()
+    }
+    fn render_ansi(&self, frame: &mut Frame, area: Rect) {
+        self.widget().render_ansi(frame, area);
+    }
+}
+
 /// The start of the line the last top-level block of a source starts on,
 /// or the last item of a top-level list, and how many blocks come before
 /// it. Markdown appended after it cannot change the blocks before it (but
@@ -204,31 +270,50 @@ impl MarkdownView {
         self
     }
 
+    /// Show link destinations alongside their labels for a text-only transcript.
+    ///
+    /// This creates a new view and leaves ordinary Markdown rendering unchanged.
+    pub fn with_visible_link_targets(self) -> Self {
+        let mut insertions = Vec::new();
+        for (event, range) in Parser::new(&self.source).into_offset_iter() {
+            if let Event::Start(Tag::Link { dest_url, .. }) = event {
+                insertions.push((range.end, format!(" ({dest_url})")));
+            }
+        }
+        let mut source = self.source.clone();
+        for (offset, suffix) in insertions.into_iter().rev() {
+            source.insert_str(offset, &suffix);
+        }
+        Self::new(source).streaming(self.streaming)
+    }
+
     /// Prepare styled, cell-wrapped rows for a virtualized transcript.
     ///
     /// Call when the source or width changes, then retain the rows and render
     /// only the visible range. Code and quotes wrap too, so narrow terminals
     /// can read their complete contents. Wrapping preserves grapheme clusters.
     pub fn wrapped_rows(&self, width: usize) -> Vec<RichText> {
+        self.prepared_rows(width)
+            .into_iter()
+            .map(|row| row.content)
+            .collect()
+    }
+
+    /// Prepare rows while retaining task semantics for virtualized views.
+    pub fn prepared_rows(&self, width: usize) -> Vec<PreparedMarkdownRow> {
         let width = width.max(1);
         let mut rows = Vec::new();
-        for block in &self.blocks {
-            let mut rich = match block_content(block) {
+        for (index, block) in self.blocks.iter().enumerate() {
+            let final_block = index + 1 == self.blocks.len();
+            let first_row = rows.len();
+            let content = block_content(block);
+            let mut rich = match content {
                 Content::RichText(rich) => rich,
                 Content::Text(text) => RichText::new().span(text.text, Style::default()),
                 _ => continue,
             };
             if matches!(block, Block::HorizontalRule) {
                 rich = RichText::new().span("─".repeat(width), Style::default());
-            }
-            if matches!(block, Block::CodeBlock { .. }) {
-                rich.spans.insert(
-                    0,
-                    ultty_protocol::Span {
-                        text: "│ ".into(),
-                        style: Style::default(),
-                    },
-                );
             }
             let dim = matches!(block, Block::CodeBlock { .. } | Block::BlockQuote { .. });
             let mut row = RichText::new();
@@ -238,7 +323,10 @@ impl MarkdownView {
                 style.dim |= dim;
                 for cluster in span.text.graphemes(true) {
                     if cluster == "\n" || cluster == "\r\n" {
-                        rows.push(std::mem::replace(&mut row, RichText::new()));
+                        rows.push(PreparedMarkdownRow::new(std::mem::replace(
+                            &mut row,
+                            RichText::new(),
+                        )));
                         column = 0;
                         continue;
                     }
@@ -253,7 +341,10 @@ impl MarkdownView {
                     for grapheme in cluster.graphemes(true) {
                         let cells = grapheme.width();
                         if column > 0 && column + cells > width {
-                            rows.push(std::mem::replace(&mut row, RichText::new()));
+                            rows.push(PreparedMarkdownRow::new(std::mem::replace(
+                                &mut row,
+                                RichText::new(),
+                            )));
                             column = 0;
                         }
                         if let Some(last) = row.spans.last_mut().filter(|last| last.style == style)
@@ -269,10 +360,45 @@ impl MarkdownView {
                     }
                 }
             }
-            rows.push(row);
+            rows.push(PreparedMarkdownRow::new(row));
+            if final_block {
+                let defer = matches!(block, Block::ListItem { spans, task: None, .. } if may_become_task(spans));
+                for row in &mut rows[first_row..] {
+                    row.final_block = true;
+                    row.defer_while_streaming = defer;
+                }
+                if let Some(last) = rows.last_mut() {
+                    last.final_row = true;
+                }
+            }
+            if let Block::ListItem {
+                prefix,
+                spans,
+                task: Some(checked),
+                ..
+            } = block
+            {
+                {
+                    rows[first_row].semantics = Semantics {
+                        role: Role::Checkbox,
+                        label: Some(format!(
+                            "{}{}",
+                            &prefix[..prefix.len() - TASK_MARKER_LEN],
+                            spans_to_plain_text(spans).trim()
+                        )),
+                        toggled: if *checked {
+                            Toggled::True
+                        } else {
+                            Toggled::False
+                        },
+                        read_only: true,
+                        ..Semantics::default()
+                    };
+                }
+            }
         }
         if rows.is_empty() {
-            rows.push(RichText::new());
+            rows.push(PreparedMarkdownRow::new(RichText::new()));
         }
         rows
     }
@@ -1308,6 +1434,54 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    #[test]
+    fn prepared_task_row_sends_native_checkbox_semantics_and_clean_code() {
+        let rows = MarkdownView::new("- [x] done\n\n```\ncode\n```").prepared_rows(80);
+        let row = rows
+            .iter()
+            .find(|row| row.semantics.role == Role::Checkbox)
+            .unwrap();
+        let mut messages = Vec::new();
+        super::super::render_view_to_native(
+            row,
+            &mut |message| {
+                messages.push(message.clone());
+                Ok(())
+            },
+            RegionId::new(0),
+            &mut 1,
+            None,
+        )
+        .unwrap();
+        assert!(messages.iter().any(|message| matches!(message, AppMessage::SetSemantics { semantics, .. } if semantics.role == Role::Checkbox && semantics.read_only && semantics.toggled == Toggled::True)));
+        let live = rows.last().unwrap().clone().streaming();
+        let mut live_messages = Vec::new();
+        super::super::render_view_to_native(
+            &live,
+            &mut |message| {
+                live_messages.push(message.clone());
+                Ok(())
+            },
+            RegionId::new(0),
+            &mut 1,
+            None,
+        )
+        .unwrap();
+        assert!(live_messages.iter().any(|message| matches!(message, AppMessage::SetSemantics { semantics, .. } if semantics.role == Role::Log && semantics.live == Live::Polite && semantics.busy)));
+        let code = rows
+            .iter()
+            .find(|row| row.content.spans.iter().any(|s| s.text.contains("code")))
+            .unwrap();
+        assert_eq!(
+            code.content
+                .spans
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>(),
+            "code"
+        );
+    }
 
     fn collect_native_messages(view: &MarkdownView, index: usize) -> Vec<AppMessage> {
         let mut messages = Vec::new();

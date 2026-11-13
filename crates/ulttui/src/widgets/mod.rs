@@ -43,7 +43,7 @@ pub use divider::Divider;
 pub use dock::DockLayout;
 pub use image::Image;
 pub use list::List;
-pub use markdown::{wrapped_line_count, MarkdownView};
+pub use markdown::{wrapped_line_count, MarkdownView, PreparedMarkdownRow};
 pub use modal::Modal;
 pub use primitives::{Card, Inset, Section, Spacer};
 pub use progress::ProgressBar;
