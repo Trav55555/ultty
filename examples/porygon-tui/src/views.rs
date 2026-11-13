@@ -208,15 +208,15 @@ impl PorygonTui {
             .height(Dimension::Percent(100.0))
             .padding(1.0)
             .child(RichText::new().text("Approval details | Esc back"))
-            .child(RichText::new().text(
-                if let Some(reason) = self.approval_decision_blocker() {
+            .child(
+                RichText::new().text(if let Some(reason) = self.approval_decision_blocker() {
                     reason
                 } else if self.approval_in_flight {
                     "Decision unconfirmed | r refresh"
                 } else {
                     "y approve once | n deny | r refresh"
-                },
-            ))
+                }),
+            )
             .child(RichText::new().text(format!(
                 "Up/Down PgUp/PgDn | rows {}-{} of {}",
                 start + 1,
