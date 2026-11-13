@@ -1,0 +1,14 @@
+test_activation_rechecks_installed_bytes (test_session_bundle.BundleTests.test_activation_rechecks_installed_bytes) ... ok
+test_build_command_profiles_and_dirty_checkout (test_session_bundle.BundleTests.test_build_command_profiles_and_dirty_checkout) ... ok
+test_headless_profile_and_existing_current_file (test_session_bundle.BundleTests.test_headless_profile_and_existing_current_file) ... ok
+test_install_activate_and_rollback (test_session_bundle.BundleTests.test_install_activate_and_rollback) ... ok
+test_real_host_lifecycle_in_disposable_runtime (test_session_bundle.BundleTests.test_real_host_lifecycle_in_disposable_runtime) ... ok
+test_reject_tampering_and_untrusted_paths (test_session_bundle.BundleTests.test_reject_tampering_and_untrusted_paths) ... ok
+test_rejects_non_executable_binary (test_session_bundle.BundleTests.test_rejects_non_executable_binary) ... ok
+test_rejects_symlinked_versions_directory (test_session_bundle.BundleTests.test_rejects_symlinked_versions_directory) ... ok
+test_service_template_uses_user_runtime_and_does_not_restart (test_session_bundle.BundleTests.test_service_template_uses_user_runtime_and_does_not_restart) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 2.688s
+
+OK

@@ -1,0 +1,10 @@
+ultty-install: downloading Ultty v0.0.0-test for x86_64-unknown-linux-gnu
+ultty-install: installed ultty ulttyctl ultty-session to /home/travers/projects/tui-terminal/target/rex-tmp/tmp.n1BIPPYwEE/odd dir|a&b\c"d$e`f%g/bin
+ultty-install: added Ultty to the application menu
+ultty-install: installed the xterm-ultty terminfo entry to /home/travers/projects/tui-terminal/target/rex-tmp/tmp.n1BIPPYwEE/home/.terminfo
+ultty-install: installed shell integration to /home/travers/projects/tui-terminal/target/rex-tmp/tmp.n1BIPPYwEE/data/ultty/shell-integration; to use it, add to ~/.bashrc or ~/.zshrc:
+ultty-install:   source /home/travers/projects/tui-terminal/target/rex-tmp/tmp.n1BIPPYwEE/data/ultty/shell-integration/ultty.bash   (or ultty.zsh)
+ultty-install: add /home/travers/projects/tui-terminal/target/rex-tmp/tmp.n1BIPPYwEE/odd dir|a&b\c"d$e`f%g/bin to your PATH to run ultty from a shell
+ultty-install: done: run ultty
+Exec= decodes to the installed binary
+install.sh test passed

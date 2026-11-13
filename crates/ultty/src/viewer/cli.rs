@@ -11,7 +11,7 @@ use crate::attach::remote::{connect_ssh, ssh_command};
 use crate::attach::transport::{read_admin_token, AttachmentClient};
 use crate::attach::wire::valid_session_name;
 
-const HELP: &str = "Usage: ultty --attach SESSION [--observe] [--token-file PATH] [--ssh HOST]\n\nClose the window to detach; terminate the host explicitly with ultty-session.\nAlt+1..9 selects a tab. Ctrl+Shift+T claims a vacant controller lease.\nCtrl+Shift+C/V copies/pastes through the viewer clipboard. Shift-drag selects text.\nSSH requires an explicit scoped token file and an installed remote ultty-session.\n";
+const HELP: &str = "Usage: ultty --attach SESSION [--observe] [--token-file PATH] [--ssh HOST]\n\nClose the window to detach; terminate the host explicitly with ultty-session.\nAlt+1..9 selects a tab. Ctrl+Shift+T claims a vacant controller lease.\nCtrl+Shift+R reconnects to the same owner and grant; queued input is discarded.\nUnconfirmed input is never replayed; some failures require reopening to resume control.\nCtrl+Shift+C/V copies/pastes through the viewer clipboard. Shift-drag selects text.\nSSH requires an explicit scoped token file and an installed remote ultty-session.\n";
 
 /// Parse attachment options, authenticate once, then run the replica viewer.
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<()> {

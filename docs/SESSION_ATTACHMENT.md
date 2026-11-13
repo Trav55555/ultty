@@ -4,6 +4,17 @@
 
 This is optional. `ultty` and `ultty -e PROGRAM` continue to own their processes in the window process.
 
+## Installation
+
+Release archives, Debian/RPM packages and the Homebrew formula include
+`ultty-session` with the viewer and control client. `ultty-session --version`
+reports its package version without starting a host. A package version alone
+is not proof that separately built host and viewer binaries use the same source.
+
+For versioned full or headless builds, systemd user-service setup, matching
+source checks and explicit upgrade/rollback instructions, see
+[session host deployment](deployment/session-host.md).
+
 ## Local use
 
 Build the host without graphics dependencies on a machine that only runs applications:
@@ -118,7 +129,25 @@ operating-system privileges or the SSH server's own authentication policy.
 Splitting launches a process, so it requires both spawn and layout capabilities,
 including when the split uses the default shell.
 
-The viewer retains its last complete screen after connection failure and reports the failure in its title. A snapshot that fails validation or hydration also disconnects the viewer and discards queued input. Reopen it to reconnect. It does not silently replay input or replace a pinned owner with a restarted one. A fresh explicit invocation authenticates the named owner again.
+The viewer retains its last complete screen after a transport failure and reports
+its disconnected state in the title. Press `Ctrl+Shift+R` to retry. Retry uses
+the original destination and credential, verifies the same owner, grant and
+capabilities, then obtains a fresh snapshot. It never reads a replacement token
+file or adopts a restarted host. A revoked/expired grant, changed owner or
+invalid snapshot requires a fresh explicit invocation.
+
+Input typed while disconnected and work queued for the old connection are
+discarded. A request whose reply was lost is never automatically replayed. If
+the owner has already reserved its mutation ID, new input can use later IDs,
+while the title continues to report the unconfirmed outcome. If the owner has
+not reserved that ID, this viewer remains read-only even after reconnecting;
+reopen explicitly to resume control. Inspect the retained state before deciding
+whether to repeat an action.
+
+Reconnection cannot steal another viewer's controller lease. A viewer that
+cannot regain control stays an observer; `Ctrl+Shift+T` requests a vacant lease.
+Snapshot validation or hydration failures disable retry in that window so a
+bad replacement cannot silently restore input.
 
 ## Local automation inside a persistent host
 
@@ -164,6 +193,6 @@ Wire frames allow at most 1 MiB per request and 16 MiB per response. Snapshots h
 
 The transport allows at most 32 clients, 32 MiB queued output per client and 64 MiB globally. Slow clients are disconnected. Partial requests and ordinary RPCs have five-second deadlines; SSH startup has a thirty-second limit. Mutation receipts are bounded by count, bytes and age.
 
-Host crash recovery, process migration, simultaneous typing by multiple controllers, automatic reconnect, browser clients and public listeners are outside this mode. Real SSH/Tailscale deployment and screen-reader behavior require environment-specific qualification; local transport and tree tests do not establish those results.
+Host crash recovery, process migration, simultaneous typing by multiple controllers, automatic background reconnect, browser clients and public listeners are outside this mode. Real SSH/Tailscale deployment and screen-reader behavior require environment-specific qualification; local transport and tree tests do not establish those results.
 
 See [native snapshots](NATIVE_SNAPSHOTS.md), [semantic actions](SEMANTIC_ACTIONS.md), and the [implementation receipts](research/rex-implementation-progress.md).

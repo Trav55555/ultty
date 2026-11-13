@@ -25,6 +25,7 @@ class Ultty < Formula
   def install
     bin.install "ultty"
     bin.install "ulttyctl"
+    bin.install "ultty-session"
 
     (share/"terminfo").mkpath
     system "tic", "-x", "-o", share/"terminfo", "dist/terminfo/ultty.terminfo"
@@ -39,5 +40,6 @@ class Ultty < Formula
   test do
     assert_match "ultty", shell_output("#{bin}/ultty --version")
     assert_match "ulttyctl", shell_output("#{bin}/ulttyctl --version")
+    assert_match "ultty-session", shell_output("#{bin}/ultty-session --version")
   end
 end

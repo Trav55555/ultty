@@ -1,0 +1,96 @@
+{
+  "passed": true,
+  "phases": [
+    "after-ACK unknown reply not replayed; offline input discarded; busy lease preserved; explicit retry regains control",
+    "before-forward unknown ID remains read-only; explicit claim cannot bypass unresolved input; identity retained",
+    "replacement accepted test credential still refused by exact owner pin before any claim or snapshot; old scene retained"
+  ],
+  "screenshots": [
+    {
+      "file": "before-ack-loss.png",
+      "sha256": "a1ad3432646239219020c364a7f445f0ef1394beeab298dc6506278898bc5203",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "file": "after-ack-offline.png",
+      "sha256": "a1ad3432646239219020c364a7f445f0ef1394beeab298dc6506278898bc5203",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "file": "controller-restored.png",
+      "sha256": "4f3300b22e856cb7f46fdaa8f7ad4907a3e27a74d3379bc0ff63af98a06fc236",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "file": "before-forward-loss.png",
+      "sha256": "785fb55a8e3979e113c5996b611e97a1c05ae2c209085f83e4c15883ba799141",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "file": "before-forward-offline.png",
+      "sha256": "785fb55a8e3979e113c5996b611e97a1c05ae2c209085f83e4c15883ba799141",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "file": "unreserved-read-only.png",
+      "sha256": "785fb55a8e3979e113c5996b611e97a1c05ae2c209085f83e4c15883ba799141",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "file": "before-owner-replacement.png",
+      "sha256": "785fb55a8e3979e113c5996b611e97a1c05ae2c209085f83e4c15883ba799141",
+      "width": 1000,
+      "height": 700
+    },
+    {
+      "file": "replacement-refused.png",
+      "sha256": "785fb55a8e3979e113c5996b611e97a1c05ae2c209085f83e4c15883ba799141",
+      "width": 1000,
+      "height": 700
+    }
+  ],
+  "binary_sha256": {
+    "/home/travers/projects/tui-terminal/target/session-daily-use/bin-d7fafef/ultty": "a9acbd00a76687578b662498ccc71854cca2ed8f062ccd5a373ff43bb6dd292c",
+    "/home/travers/projects/tui-terminal/target/session-daily-use/bin-d7fafef/ultty-session": "e6d4359049ba11adec1e974e4183ac4728b05bfebc887c3f6042785e242e2c45",
+    "/home/travers/projects/tui-terminal/target/session-daily-use/bin-d7fafef/counter-app": "efade8e423e942bcf6692f5867a8ffe729c70032125fd02390a860621414074f",
+    "/home/travers/projects/tui-terminal/.worktrees/session-daily-use/scripts/e2e/session-reconnect.py": "3db27bc23325e759a1ca5ce32dc406204f99816131bcdbfd27b2542069f79004",
+    "/home/travers/projects/tui-terminal/.worktrees/session-daily-use/scripts/e2e/session-host.py": "f2ce3b0c4aae17ae8cebee729aa1e35da1f587f21f412dcd0d8ec27cacc23b64",
+    "/home/travers/projects/tui-terminal/.worktrees/session-daily-use/scripts/e2e/native_split_check.py": "5b22e29b1baf25826bf93d8fdb783de1c1079755a56b058caf5a17a16ae79892",
+    "/home/travers/projects/tui-terminal/.worktrees/session-daily-use/scripts/analyze-inline-surface-screenshots.py": "a27a3f1d01f01c6053667701003980f211cd3902bae30a39bab65cfe181f69fa"
+  },
+  "original_identity": {
+    "owner": {
+      "pid": 3286241,
+      "epoch": "adec12889e25f94830f599cda9372e31d6fa305985cfade9cd367456ae5abac7"
+    },
+    "pane": 0,
+    "pid": 3286261,
+    "native": 1,
+    "count": 0
+  },
+  "replacement_identity": {
+    "owner": {
+      "pid": 3288502,
+      "epoch": "7d38f06a16ac61c4a870e7b3b0be00f77ecc149abd5952b11820586bad71f027"
+    },
+    "pane": 0,
+    "pid": 3288505,
+    "native": 1,
+    "count": 0
+  },
+  "cleanup": {
+    "viewers_stopped": true,
+    "hosts_stopped": true,
+    "helpers_stopped": true,
+    "counter_children_stopped": true,
+    "xvfb_stopped": true,
+    "private_tokens_and_runtime_removed": true
+  },
+  "seconds": 13.357298505026847
+}

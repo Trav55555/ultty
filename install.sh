@@ -3,7 +3,8 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Trav55555/ultty/main/install.sh | sh
 #
-# Installs ultty and ulttyctl into ~/.local/bin, the desktop entry, icons and
+# Installs ultty, ulttyctl and, when shipped, ultty-session into ~/.local/bin,
+# the desktop entry, icons and
 # shell integration scripts into ~/.local/share, and the xterm-ultty terminfo
 # entry into ~/.terminfo when tic is available. No root needed. The download is checked against the
 # release's SHA256SUMS before anything is installed. Releases are built for
@@ -154,14 +155,20 @@ main() {
     [ -f "$tmp/x/$bin" ] || die "$archive is missing $bin"
   done
 
+  binaries="ultty ulttyctl"
+  if [ -f "$tmp/x/ultty-session" ]; then
+    binaries="$binaries ultty-session"
+  else
+    say "this older release has no session host; any existing ultty-session is unchanged"
+  fi
   mkdir -p "$INSTALL_DIR"
-  for bin in ultty ulttyctl; do
+  for bin in $binaries; do
     # Write beside the target, then rename, so a running ultty is not disturbed.
     cp "$tmp/x/$bin" "$INSTALL_DIR/.$bin.new"
     chmod 755 "$INSTALL_DIR/.$bin.new"
     mv -f "$INSTALL_DIR/.$bin.new" "$INSTALL_DIR/$bin"
   done
-  say "installed ultty and ulttyctl to $INSTALL_DIR"
+  say "installed $binaries to $INSTALL_DIR"
 
   install_desktop_entry "$tmp/x"
   install_terminfo "$tmp/x"

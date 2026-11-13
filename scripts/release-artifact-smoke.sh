@@ -25,7 +25,7 @@ OPTIONS:
   --homebrew-rendered <path>   Verify a rendered formula: metadata plus no
                                leftover VERSION/SHA256_ placeholders and
                                64-hex-character sha256 values
-  --run-binaries               Run extracted ultty and ulttyctl --version checks
+  --run-binaries               Run all three extracted executables with --version
   -h, --help                   Show this help
 USAGE
 }
@@ -105,31 +105,18 @@ run_version_checks() {
   local bin_dir="$1"
   local label="$2"
 
-  local ultty="$bin_dir/ultty"
-  local ulttyctl="$bin_dir/ulttyctl"
-
-  if [[ ! -x "$ultty" ]]; then
-    echo "$label missing executable ultty at $ultty" >&2
-    exit 1
-  fi
-  if [[ ! -x "$ulttyctl" ]]; then
-    echo "$label missing executable ulttyctl at $ulttyctl" >&2
-    exit 1
-  fi
-
-  local ultty_version
-  ultty_version="$("$ultty" --version)"
-  if [[ "$ultty_version" != "ultty $EXPECTED_VERSION" ]]; then
-    echo "$label unexpected ultty --version output: $ultty_version" >&2
-    exit 1
-  fi
-
-  local ulttyctl_version
-  ulttyctl_version="$("$ulttyctl" --version)"
-  if [[ "$ulttyctl_version" != "ulttyctl $EXPECTED_VERSION" ]]; then
-    echo "$label unexpected ulttyctl --version output: $ulttyctl_version" >&2
-    exit 1
-  fi
+  local binary actual
+  for binary in ultty ulttyctl ultty-session; do
+    if [[ ! -x "$bin_dir/$binary" ]]; then
+      echo "$label missing executable $binary at $bin_dir/$binary" >&2
+      exit 1
+    fi
+    actual="$("$bin_dir/$binary" --version)"
+    if [[ "$actual" != "$binary $EXPECTED_VERSION" ]]; then
+      echo "$label unexpected $binary --version output: $actual" >&2
+      exit 1
+    fi
+  done
 }
 
 verify_tarball() {
@@ -147,6 +134,7 @@ verify_tarball() {
 
   require_list_entry "$list" "ultty" "$label"
   require_list_entry "$list" "ulttyctl" "$label"
+  require_list_entry "$list" "ultty-session" "$label"
   require_list_entry "$list" "dist/ultty.desktop" "$label"
   require_list_entry "$list" "dist/icons/hicolor/scalable/apps/ultty.svg" "$label"
   require_list_entry "$list" "dist/icons/hicolor/256x256/apps/ultty.png" "$label"
@@ -181,6 +169,7 @@ verify_deb() {
 
   require_list_entry "$list" "usr/bin/ultty" "$label"
   require_list_entry "$list" "usr/bin/ulttyctl" "$label"
+  require_list_entry "$list" "usr/bin/ultty-session" "$label"
   require_list_entry "$list" "usr/share/applications/ultty.desktop" "$label"
   require_list_entry "$list" "usr/share/icons/hicolor/scalable/apps/ultty.svg" "$label"
   require_list_entry "$list" "usr/share/icons/hicolor/256x256/apps/ultty.png" "$label"
@@ -213,6 +202,7 @@ verify_rpm() {
 
   require_list_entry "$list" "/usr/bin/ultty" "$label"
   require_list_entry "$list" "/usr/bin/ulttyctl" "$label"
+  require_list_entry "$list" "/usr/bin/ultty-session" "$label"
   require_list_entry "$list" "/usr/share/applications/ultty.desktop" "$label"
   require_list_entry "$list" "/usr/share/icons/hicolor/scalable/apps/ultty.svg" "$label"
   require_list_entry "$list" "/usr/share/icons/hicolor/256x256/apps/ultty.png" "$label"
@@ -236,6 +226,14 @@ verify_homebrew_formula() {
   }
   grep -Fq 'shell_output("#{bin}/ulttyctl --version")' "$formula" || {
     echo "$label must test ulttyctl --version" >&2
+    exit 1
+  }
+  grep -Fq 'bin.install "ultty-session"' "$formula" || {
+    echo "$label must install ultty-session" >&2
+    exit 1
+  }
+  grep -Fq 'shell_output("#{bin}/ultty-session --version")' "$formula" || {
+    echo "$label must test ultty-session --version" >&2
     exit 1
   }
   grep -Fq '(share/"applications").install "dist/ultty.desktop"' "$formula" || {

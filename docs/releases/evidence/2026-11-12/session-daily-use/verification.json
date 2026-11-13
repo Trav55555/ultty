@@ -1,0 +1,15 @@
+{
+  "source": "d7fafef735a231414d7d19b62d47995967033b1d",
+  "workspace_command": "cargo test --workspace --locked --offline -- --test-threads=1",
+  "workspace_log_sha256": "47fd828736581172bd62d8c4c0e0f7031a921dfb568c2fef96ac580d552ec0fb",
+  "environment": {
+    "RUSTFLAGS": "-Dwarnings",
+    "CARGO_INCREMENTAL": "0"
+  },
+  "merged_base_ci": {
+    "run": 1734,
+    "source": "153cacc66daf71e5cb0ad2622ab5a1e81c4fd7d1",
+    "conclusion": "success"
+  },
+  "new_branch_ci": "pending"
+}
