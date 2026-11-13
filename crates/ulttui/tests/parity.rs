@@ -223,8 +223,8 @@ fn a_focused_input_sends_its_typed_text_and_a_name_natively() {
     let field = TextInput::new().id("msg").value("hello").label("Message");
     let rendered = render_both(&field, 30, 3, Some("msg"));
 
-    // ANSI draws the mode marker and the value inside a focus border.
-    assert!(row_text(&rendered.ansi, 1).contains("hello"));
+    // The left focus border leaves the first row available for text.
+    assert!(row_text(&rendered.ansi, 0).contains("[N] hello"));
 
     // Native: the content is the typed text alone (focus and mode are the
     // region's style and the semantics description); the semantics carry

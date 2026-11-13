@@ -3,10 +3,29 @@
 /// Application event.
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// Quit the application.
+    /// A user request to quit, which an application may handle.
     Quit,
+    /// The terminal connection closed. The runner terminates without dispatching it.
+    TransportClosed,
     /// Key press.
     Key(KeyEvent),
+    /// Bulk text input, delivered without interpreting its contents as keys.
+    ///
+    /// Handle this separately from [`Event::Key`], inserting `text` into the
+    /// input identified by `focused_id` in one edit. It may contain newlines
+    /// and control characters; it must not be treated as a command.
+    ///
+    /// For example, an app owning a `TextInput` can handle it with:
+    ///
+    /// ```ignore
+    /// Event::Paste { text, focused_id } if focused_id.as_deref() == Some("input") => {
+    ///     input.insert_text(text);
+    /// }
+    /// ```
+    Paste {
+        text: String,
+        focused_id: Option<String>,
+    },
     /// Mouse event.
     Mouse(MouseEvent),
     /// A widget was clicked/activated (Enter on focused Button).

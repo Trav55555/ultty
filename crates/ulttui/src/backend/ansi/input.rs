@@ -14,19 +14,25 @@
 use std::collections::VecDeque;
 use std::io;
 use std::os::fd::RawFd;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 
 const ESC: u8 = 0x1b;
 /// An unfinished sequence longer than this is garbage: drop a byte and go on.
 const MAX_PENDING: usize = 256;
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+/// Maximum accepted bracketed paste in bytes. Oversized pastes are discarded
+/// through their closing marker so their contents cannot become key commands.
+const MAX_PASTE: usize = 1024 * 1024;
 
 /// Reads a terminal's input and turns it into events.
 #[derive(Default)]
 pub(super) struct InputReader {
     decoder: Decoder,
     events: VecDeque<Event>,
+    escape_deadline: Option<Instant>,
 }
 
 impl InputReader {
@@ -59,8 +65,22 @@ impl InputReader {
         }
         // Nothing more has arrived: a lone ESC is the Escape key, not the
         // start of a sequence.
-        self.decoder.finish_escape(&mut self.events);
+        if self.decoder.pending == [ESC] && self.decoder.paste.is_none() {
+            let deadline = *self
+                .escape_deadline
+                .get_or_insert_with(|| Instant::now() + Duration::from_millis(30));
+            if Instant::now() >= deadline {
+                self.decoder.finish_escape(&mut self.events);
+                self.escape_deadline = None;
+            }
+        } else {
+            self.escape_deadline = None;
+        }
         Ok(open)
+    }
+
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        self.escape_deadline
     }
 
     pub(super) fn next_event(&mut self) -> Option<Event> {
@@ -76,6 +96,8 @@ impl InputReader {
 #[derive(Default)]
 pub(super) struct Decoder {
     pending: Vec<u8>,
+    paste: Option<Vec<u8>>,
+    paste_overflow: bool,
 }
 
 /// One step of decoding the front of the buffer.
@@ -91,12 +113,57 @@ impl Decoder {
         self.pending.extend_from_slice(bytes);
         let mut start = 0;
         while start < self.pending.len() {
-            match parse(&self.pending[start..]) {
+            let remaining = &self.pending[start..];
+            if self.paste.is_some() {
+                let end = remaining
+                    .windows(PASTE_END.len())
+                    .position(|w| w == PASTE_END);
+                let take = end.unwrap_or_else(|| {
+                    // Retain a possible partial end marker across reads.
+                    let keep = (1..PASTE_END.len())
+                        .rev()
+                        .find(|&n| remaining.ends_with(&PASTE_END[..n]))
+                        .unwrap_or(0);
+                    remaining.len() - keep
+                });
+                if let Some(paste) = &mut self.paste {
+                    if !self.paste_overflow && paste.len().saturating_add(take) <= MAX_PASTE {
+                        paste.extend_from_slice(&remaining[..take]);
+                    } else {
+                        paste.clear();
+                        self.paste_overflow = true;
+                    }
+                }
+                start += take;
+                if end.is_some() {
+                    start += PASTE_END.len();
+                    if let Some(paste) = self.paste.take() {
+                        if !self.paste_overflow {
+                            out.push_back(Event::Paste {
+                                text: String::from_utf8_lossy(&paste).into_owned(),
+                                focused_id: None,
+                            });
+                        }
+                    }
+                    self.paste_overflow = false;
+                    continue;
+                }
+                break;
+            }
+            if remaining.starts_with(PASTE_START) {
+                self.paste = Some(Vec::new());
+                start += PASTE_START.len();
+                continue;
+            }
+            if PASTE_START.starts_with(remaining) {
+                break;
+            }
+            match parse(remaining) {
                 Step::Done(len, event) => {
                     out.extend(event);
                     start += len;
                 }
-                Step::Incomplete if self.pending.len() - start > MAX_PENDING => start += 1,
+                Step::Incomplete if remaining.len() > MAX_PENDING => start += 1,
                 Step::Incomplete => break,
             }
         }
@@ -105,7 +172,7 @@ impl Decoder {
 
     /// No more input is waiting: resolve a lone ESC as the Escape key.
     pub(super) fn finish_escape(&mut self, out: &mut VecDeque<Event>) {
-        if self.pending == [ESC] {
+        if self.paste.is_none() && self.pending == [ESC] {
             self.pending.clear();
             out.push_back(key(Key::Escape, Modifiers::default()));
         }
@@ -387,6 +454,49 @@ mod tests {
             ctrl,
             meta: false,
         }
+    }
+
+    #[test]
+    fn bracketed_paste_preserves_split_markers_utf8_and_controls() {
+        let bytes = "\x1b[200~hé\r\n\x03\x1b[A\x1b[201~q".as_bytes();
+        for split in 0..=bytes.len() {
+            let mut decoder = Decoder::default();
+            let mut events = VecDeque::new();
+            decoder.feed(&bytes[..split], &mut events);
+            decoder.feed(&bytes[split..], &mut events);
+            assert!(
+                matches!(events.pop_front(), Some(Event::Paste { text, .. }) if text == "hé\r\n\x03\x1b[A"),
+                "split {split}"
+            );
+            assert!(matches!(
+                events.pop_front(),
+                Some(Event::Key(KeyEvent {
+                    key: Key::Char('q'),
+                    ..
+                }))
+            ));
+            assert!(events.is_empty());
+        }
+    }
+
+    #[test]
+    fn oversized_and_unclosed_pastes_never_emit_keys() {
+        let mut decoder = Decoder::default();
+        let mut events = VecDeque::new();
+        decoder.feed(PASTE_START, &mut events);
+        decoder.feed(&vec![b'x'; MAX_PASTE + 1], &mut events);
+        decoder.feed(b"\x03\r\x1b[20", &mut events);
+        decoder.finish_escape(&mut events);
+        assert!(events.is_empty());
+        decoder.feed(b"1~q", &mut events);
+        assert!(matches!(
+            events.pop_front(),
+            Some(Event::Key(KeyEvent {
+                key: Key::Char('q'),
+                ..
+            }))
+        ));
+        assert!(events.is_empty());
     }
 
     #[test]

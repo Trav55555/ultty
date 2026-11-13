@@ -12,6 +12,93 @@ use crate::vim::{KeyParser, VimConfig, VimHandler, VimResult};
 use crate::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimState};
 use crate::{impl_vim_ext, impl_vim_handler_accessors};
 
+/// Cell-based wrapping shared by the input's height and ANSI viewport.
+fn single_line(
+    text: &str,
+    width: usize,
+    cursor: Option<usize>,
+) -> (Vec<String>, Option<(usize, usize)>) {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+    let width = width.max(1);
+    let clusters: Vec<&str> = text.graphemes(true).collect();
+    let cells = |g: &str| UnicodeWidthStr::width(g).max(1).min(width);
+    let at = cursor.unwrap_or(0).min(clusters.len());
+    let mut start = at;
+    let mut col = 0;
+    while start > 0 && col + cells(clusters[start - 1]) < width {
+        start -= 1;
+        col += cells(clusters[start]);
+    }
+    if cursor.is_none() {
+        start = 0;
+    }
+    let mut row = String::new();
+    let mut used = 0;
+    for g in &clusters[start..] {
+        let n = cells(g);
+        if used + n > width {
+            break;
+        }
+        row.push_str(
+            if *g == "\t" || *g == "\n" || UnicodeWidthStr::width(*g) > width {
+                " "
+            } else {
+                g
+            },
+        );
+        used += n;
+    }
+    (vec![row], cursor.map(|_| (col, 0)))
+}
+
+fn input_rows(
+    text: &str,
+    width: usize,
+    cursor: Option<usize>,
+) -> (Vec<String>, Option<(usize, usize)>) {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+    let width = width.max(1);
+    let mut rows = vec![String::new()];
+    let mut col = 0;
+    let mut caret = None;
+    let clusters: Vec<&str> = text.graphemes(true).collect();
+    for (index, cluster) in clusters.iter().copied().enumerate() {
+        let shown = if cluster == "\t" { " " } else { cluster };
+        let shown = if UnicodeWidthStr::width(shown) > width {
+            " "
+        } else {
+            shown
+        };
+        let cells = UnicodeWidthStr::width(shown).max(1);
+        if cluster != "\n" && col + cells > width {
+            rows.push(String::new());
+            col = 0;
+        }
+        if cursor == Some(index) {
+            caret = Some((col, rows.len() - 1));
+        }
+        if cluster == "\n" {
+            rows.push(String::new());
+            col = 0;
+        } else {
+            if let Some(row) = rows.last_mut() {
+                row.push_str(shown);
+            }
+            col += cells;
+            if col == width && clusters.get(index + 1) != Some(&"\n") {
+                rows.push(String::new());
+                col = 0;
+            }
+        }
+    }
+    if cursor.is_some() && caret.is_none() {
+        caret = Some((col, rows.len() - 1));
+    }
+    (rows, caret)
+}
+
 /// Plain text widget.
 #[derive(Debug, Clone)]
 pub struct Text {
@@ -316,6 +403,29 @@ impl TextInput {
     pub fn multiline(mut self) -> Self {
         self.multiline = true;
         self
+    }
+
+    /// Insert literal text at the grapheme cursor, without dispatching shortcuts.
+    /// CRLF and CR become LF; single-line inputs discard newlines. Tabs are
+    /// retained and displayed as one space; other control characters are dropped.
+    pub fn insert_text(&mut self, text: &str) {
+        self.edit(&EditOp::Insert(Self::normalize_paste(text, self.multiline)));
+    }
+
+    /// Normalize literal paste text for a single-line or multiline input.
+    /// Tabs remain literal; controls other than multiline LF are removed.
+    pub fn normalize_paste(text: &str, multiline: bool) -> String {
+        text.replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .chars()
+            .filter(|c| *c == '\t' || (*c == '\n' && multiline) || !c.is_control())
+            .collect()
+    }
+
+    /// Number of display rows at the given content width, including the caret
+    /// row after an exactly full line. The left focus bar takes one extra cell.
+    pub fn visual_line_count(&self, content_width: usize) -> usize {
+        input_rows(&self.value, content_width.max(1), None).0.len()
     }
 
     /// Mask the value on screen and keep it from assistive technology.
@@ -654,19 +764,6 @@ impl TextInput {
         }
     }
 
-    fn mode_indicator(&self) -> &'static str {
-        if !self.show_mode {
-            return "";
-        }
-        match self.vim_state.mode {
-            VimMode::Normal => "[N] ",
-            VimMode::Insert => "[I] ",
-            VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock => "[V] ",
-            VimMode::Command => "[:] ",
-            VimMode::Search => "[/] ",
-        }
-    }
-
     fn is_cursor_on_first_line(&self) -> bool {
         let chars: Vec<char> = self.value.chars().collect();
         self.find_line_start(&chars, self.cursor) == 0
@@ -772,8 +869,8 @@ impl View for TextInput {
     /// cannot take one.
     fn content(&self) -> ultty_protocol::Content {
         let is_focused = super::is_widget_focused(self.widget_id());
-        let cursor = (is_focused && !self.multiline)
-            .then(|| edit::cursor_from_char_index(&self.value, self.cursor) as u32);
+        let cursor =
+            is_focused.then(|| edit::cursor_from_char_index(&self.value, self.cursor) as u32);
         ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(
             ultty_protocol::InputWidget {
                 value: self.value.clone(),
@@ -808,44 +905,62 @@ impl View for TextInput {
             )
         };
 
-        let mode_indicator = self.mode_indicator();
-
-        let mode_span = Span::styled(
-            mode_indicator,
-            RStyle::default().add_modifier(Modifier::BOLD),
-        );
-        let mut spans = vec![mode_span];
-        if is_focused && !self.multiline {
-            // The cursor is the cell under it drawn reversed (a space past
-            // the end of the text).
-            let cursor = edit::cursor_from_char_index(&self.value, self.cursor);
-            let shown = masked.as_deref().unwrap_or(self.value.as_str());
-            let (before, under, after) = edit::split_at_cursor(shown, cursor);
-            let under = if under.is_empty() { " " } else { under };
-            spans.push(Span::styled(before.to_string(), style));
-            spans.push(Span::styled(
-                under.to_string(),
-                style.add_modifier(Modifier::REVERSED),
-            ));
-            spans.push(Span::styled(after.to_string(), style));
-            if self.value.is_empty() {
-                spans.push(Span::styled(self.placeholder.clone(), style));
-            }
+        let border_color = if is_focused {
+            theme.input.focused_border
         } else {
-            spans.push(Span::styled(display_text.to_string(), style));
+            theme.input.bg
+        };
+        let block = Block::default()
+            .borders(Borders::LEFT)
+            .border_style(RStyle::default().fg(to_ratatui_color(border_color)));
+        let mut inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
         }
-        let line = Line::from(spans);
-
-        let mut paragraph = Paragraph::new(line);
-        if is_focused {
-            let border_style = RStyle::default().fg(to_ratatui_color(theme.input.focused_border));
-            paragraph = paragraph.block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border_style),
+        if self.show_mode {
+            let mode = match self.vim_state.mode {
+                VimMode::Normal => "[N] ",
+                VimMode::Insert => "[I] ",
+                VimMode::Visual | VimMode::VisualLine | VimMode::VisualBlock => "[V] ",
+                VimMode::Command => "[:] ",
+                VimMode::Search => "[/] ",
+            };
+            let count = inner.width.min(4);
+            frame.render_widget(
+                Paragraph::new(mode),
+                Rect {
+                    width: count,
+                    ..inner
+                },
             );
+            inner.x += count;
+            inner.width -= count;
+            if inner.width == 0 {
+                return;
+            }
         }
-        frame.render_widget(paragraph, area);
+        let cursor = is_focused.then(|| edit::cursor_from_char_index(&self.value, self.cursor));
+        let (rows, caret) = if self.multiline {
+            input_rows(display_text, inner.width as usize, cursor)
+        } else {
+            single_line(display_text, inner.width as usize, cursor)
+        };
+        let first = caret.map_or(0, |(_, row)| row.saturating_sub(inner.height as usize - 1));
+        let lines: Vec<Line<'_>> = rows
+            .iter()
+            .skip(first)
+            .take(inner.height as usize)
+            .map(|row| Line::from(Span::styled(row.as_str(), style)))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), inner);
+        if let Some((col, row)) = caret {
+            let x = inner.x + col as u16;
+            let y = inner.y + (row - first) as u16;
+            if x < inner.right() && y < inner.bottom() {
+                frame.buffer_mut()[(x, y)].set_style(style.add_modifier(Modifier::REVERSED));
+            }
+        }
     }
 
     fn is_focusable(&self) -> bool {
@@ -866,6 +981,47 @@ impl View for TextInput {
         }
 
         if self.vim_state.mode == VimMode::Insert {
+            if self.multiline {
+                use unicode_segmentation::UnicodeSegmentation;
+                let clusters: Vec<&str> = self.value.graphemes(true).collect();
+                let at = edit::cursor_from_char_index(&self.value, self.cursor).min(clusters.len());
+                let start = clusters[..at]
+                    .iter()
+                    .rposition(|g| *g == "\n")
+                    .map_or(0, |i| i + 1);
+                let end = clusters[at..]
+                    .iter()
+                    .position(|g| *g == "\n")
+                    .map_or(clusters.len(), |i| at + i);
+                let target = match key.key {
+                    Key::Home => Some(if key.modifiers.ctrl { 0 } else { start }),
+                    Key::End => Some(if key.modifiers.ctrl {
+                        clusters.len()
+                    } else {
+                        end
+                    }),
+                    Key::Up if start > 0 => {
+                        let previous = clusters[..start - 1]
+                            .iter()
+                            .rposition(|g| *g == "\n")
+                            .map_or(0, |i| i + 1);
+                        Some(previous + (at - start).min(start - 1 - previous))
+                    }
+                    Key::Down if end < clusters.len() => {
+                        let next = end + 1;
+                        let next_end = clusters[next..]
+                            .iter()
+                            .position(|g| *g == "\n")
+                            .map_or(clusters.len(), |i| next + i);
+                        Some(next + (at - start).min(next_end - next))
+                    }
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    self.cursor = edit::char_index_from_cursor(&self.value, target);
+                    return Some(super::FocusAction::Consumed);
+                }
+            }
             if let Some(op) = crate::edit::op_for_key(key) {
                 // Home, End and the word and line deletions mean the whole
                 // value, which a multi-line input leaves to vim.
@@ -1082,6 +1238,60 @@ mod tests {
             modifiers: Modifiers::default(),
             focused_id: None,
         }
+    }
+
+    #[test]
+    fn test_multiline_insert_navigation_preserves_graphemes() {
+        let mut input = TextInput::new()
+            .multiline()
+            .value("ae\u{301}z\n你x")
+            .cursor(2);
+        input.on_key(&key_event(Key::Down));
+        input.insert_text("!");
+        assert_eq!(input.current_value(), "ae\u{301}z\n你x!");
+        input.on_key(&key_event(Key::Home));
+        input.insert_text("^");
+        input.on_key(&key_event(Key::Up));
+        input.on_key(&key_event(Key::End));
+        input.insert_text("$");
+        assert_eq!(input.current_value(), "ae\u{301}z$\n^你x!");
+    }
+
+    #[test]
+    fn test_literal_insertion_normalizes_and_keeps_graphemes() {
+        let mut input = TextInput::new().multiline().value("ae\u{301}z").cursor(2);
+        input.insert_text("你\r\nline\r\u{1b}\t");
+        assert_eq!(input.current_value(), "ae\u{301}你\nline\n\tz");
+        input.insert_text("!");
+        assert_eq!(input.current_value(), "ae\u{301}你\nline\n\t!z");
+        let mut single = TextInput::new();
+        single.insert_text("a\r\nb\u{3}c");
+        assert_eq!(single.current_value(), "abc");
+    }
+
+    #[test]
+    fn test_multiline_wrap_keeps_focused_caret_visible() {
+        use ratatui::style::Modifier;
+        let old = FocusManager::set_current(FocusManager::new());
+        FocusManager::with_current_mut(|fm| {
+            fm.register("compose".into());
+            fm.focus("compose");
+        });
+        let input = TextInput::new()
+            .id("compose")
+            .without_vim_mode()
+            .multiline()
+            .value("abcd\n你e\u{301}z");
+        assert_eq!(input.visual_line_count(4), 3);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(5, 2)).unwrap();
+        terminal
+            .draw(|frame| input.render_ansi(frame, frame.area()))
+            .unwrap();
+        FocusManager::set_current(old);
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(1, 0)].symbol(), "你");
+        assert!(buffer[(1, 1)].modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
@@ -1453,7 +1663,7 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         let reversed: Vec<&str> = (0..20)
-            .map(|x| &buffer[(x, 1)])
+            .map(|x| &buffer[(x, 0)])
             .filter(|cell| cell.modifier.contains(Modifier::REVERSED))
             .map(|cell| cell.symbol())
             .collect();

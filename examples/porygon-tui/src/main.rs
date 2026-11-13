@@ -96,6 +96,11 @@ fn porygon_theme() -> Theme {
 pub(crate) struct PorygonTui {
     pub(crate) messages: Vec<ChatMessage>,
     pub(crate) input: TextInput,
+    pub(crate) newline_prefix: bool,
+    pub(crate) show_help: bool,
+    pub(crate) quit_armed: bool,
+    pub(crate) follow_output: bool,
+    pub(crate) unread_output: bool,
     pub(crate) chat_scroll: ScrollView,
     pub(crate) status: AgentStatus,
     pub(crate) daemon_url: String,
@@ -162,30 +167,20 @@ impl PorygonTui {
         Self {
             messages: vec![ChatMessage {
                 role: "system".into(),
-                content: {
-                    let cwd = std::env::current_dir()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|_| "unknown".into());
-                    let dna = if std::path::Path::new("AGENTS.md").exists() {
-                        format!("AGENTS.md found at {cwd}/AGENTS.md")
-                    } else {
-                        "No AGENTS.md detected".to_string()
-                    };
-                    format!(
-                        "Welcome to Porygon OS v1.4.2\n\n\
-                        - **CWD:** `{cwd}`\n\
-                        - **Project DNA:** {dna}\n\
-                        - **Mode:** Standalone TUI\n\n\
-                        Type a message below to get started."
-                    )
-                },
+                content: "Type a message to start a conversation.\nUse F1 for keys and commands. Your draft stays here while disconnected.".into(),
                 timestamp: format_timestamp(),
             }],
             input: TextInput::new()
+                .without_vim_mode()
                 .id("chat-input")
+                .multiline()
                 .height(3)
-                .placeholder("Type a message...")
-                .vim(),
+                .placeholder("Message Porygon"),
+            newline_prefix: false,
+            show_help: false,
+            quit_armed: false,
+            follow_output: true,
+            unread_output: false,
             chat_scroll: ScrollView::new(),
             status: AgentStatus::default(),
             daemon_url,
@@ -320,6 +315,7 @@ enum Msg {
     VirtualScrollBenchReady(String),
     DiffBenchReady(String),
     ExitRequested,
+    DraftExitWarning,
 }
 
 impl Application for PorygonTui {

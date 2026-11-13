@@ -363,10 +363,22 @@ impl Canvas {
                     .value
                     .is_empty()
                     .then_some(ProtoColor::Named(NamedColor::BrightBlack));
-                let text = super::caret::shown_text(input);
-                self.put_text(cx, cy, &text, template(fg.as_ref(), &plain), clip);
-                if let Some(col) = super::caret::caret_column(input) {
-                    self.put_caret(cx.saturating_add(col as i32), cy, clip);
+                let (rows, caret) = super::caret::viewport(
+                    input,
+                    rect.max_cols,
+                    (h - (cy - rect.y)).max(1) as usize,
+                );
+                for (row, text) in rows.iter().enumerate() {
+                    self.put_text(
+                        cx,
+                        cy + row as i32,
+                        text,
+                        template(fg.as_ref(), &plain),
+                        clip,
+                    );
+                }
+                if let Some((col, row)) = caret {
+                    self.put_caret(cx.saturating_add(col as i32), cy + row as i32, clip);
                 }
             }
             WidgetContent::Markdown(markdown) => self.put_lines(cx, cy, &markdown.source, clip),

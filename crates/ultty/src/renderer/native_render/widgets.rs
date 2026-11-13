@@ -277,7 +277,11 @@ impl Renderer {
                     base_idx + 3,
                 ]);
 
-                let display_text = crate::scene::caret::shown_text(input);
+                let (rows, caret) = crate::scene::caret::viewport(
+                    input,
+                    (w / self.cell_width) as usize,
+                    (h / self.cell_height) as usize,
+                );
 
                 let text_color = if input.value.is_empty() {
                     self.color_scheme.named[8]
@@ -285,24 +289,26 @@ impl Renderer {
                     self.color_scheme.foreground
                 };
 
-                let (verts, idxs, _) = self.text_renderer.build_cell_text_vertices(
-                    &display_text,
-                    x,
-                    y,
-                    text_color,
-                    false,
-                    false,
-                );
-                let base_idx = text_vertices.len() as u32;
-                text_vertices.extend(verts);
-                text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                for (row, text) in rows.iter().enumerate() {
+                    let (verts, idxs, _) = self.text_renderer.build_cell_text_vertices(
+                        text,
+                        x,
+                        y + row as f32 * self.cell_height,
+                        text_color,
+                        false,
+                        false,
+                    );
+                    let base_idx = text_vertices.len() as u32;
+                    text_vertices.extend(verts);
+                    text_indices.extend(idxs.iter().map(|i| i + base_idx));
+                }
 
                 // The caret is a bar at the left edge of the cell it is
                 // before, in the text colour.
-                if let Some(col) = crate::scene::caret::caret_column(input) {
+                if let Some((col, row)) = caret {
                     let bar_w = (self.cell_width * 0.15).round().max(1.0);
                     let bar_x = x + col as f32 * self.cell_width;
-                    let bar_y = y;
+                    let bar_y = y + row as f32 * self.cell_height;
                     let color = self.color_scheme.foreground;
                     let base_idx = bg_vertices.len() as u32;
                     for (px, py) in [

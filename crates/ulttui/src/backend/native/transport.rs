@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_becomes_quit_event_instead_of_busy_loop() {
+    fn disconnect_becomes_transport_closed_instead_of_busy_loop() {
         let (mut writer, reader) = UnixStream::pair().unwrap();
         reader.set_nonblocking(true).unwrap();
         let mut backend = NativeBackend::new();
@@ -335,8 +335,11 @@ mod tests {
         drop(writer);
 
         // Bytes written before the close are still processed, then the
-        // disconnect surfaces as a single Quit and the stream is released.
-        assert!(matches!(backend.poll_event().unwrap(), Some(Event::Quit)));
+        // disconnect surfaces as a single TransportClosed and the stream is released.
+        assert!(matches!(
+            backend.poll_event().unwrap(),
+            Some(Event::TransportClosed)
+        ));
         assert!(backend.stream.is_none());
         assert!(backend.poll_event().unwrap().is_none());
         assert!(backend.shutdown().is_ok());

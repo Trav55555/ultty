@@ -7,7 +7,7 @@ use ulttui::widgets::{parse_unified_diff, DiffKind};
 
 use crate::commands::CommandAction;
 use crate::types::*;
-use crate::views::{format_clock, format_file_tree, format_timestamp, SplashScreen};
+use crate::views::{format_clock, format_file_tree, format_timestamp};
 use crate::{Msg, PorygonTui};
 
 pub async fn fetch_status(
@@ -1072,7 +1072,7 @@ impl PorygonTui {
                     Cmd::none()
                 } else {
                     self.started = true;
-                    let mut cmds = vec![Cmd::PushScreen(Box::new(SplashScreen::new()))];
+                    let mut cmds = vec![Cmd::message(Msg::PollConnection)];
                     if self.weather_enabled {
                         cmds.push(Cmd::message(Msg::PollWeather));
                     }
@@ -2042,6 +2042,9 @@ impl PorygonTui {
                 self.auto_scroll_chat();
                 Cmd::none()
             }
+            Msg::DraftExitWarning => Cmd::ShowToast(Toast::warning(
+                "Unsent draft. Press Ctrl+C again to discard it and quit.",
+            )),
             Msg::ExitRequested => {
                 if self.connected && self.messages.len() > 1 {
                     let daemon_url = self.daemon_url.clone();
@@ -2944,23 +2947,23 @@ mod tests {
     }
 
     #[test]
-    fn status_key_hint_omits_abort_when_idle() {
+    fn composer_hint_omits_abort_when_idle() {
         let app = PorygonTui::new();
 
         assert_eq!(
-            app.status_key_hint(),
-            " Enter:send PgUp/Dn:scroll Ctrl+C:quit "
+            app.composer_hint(),
+            "Disconnected | draft kept here | /reconnect"
         );
     }
 
     #[test]
-    fn status_key_hint_shows_abort_when_streaming() {
+    fn composer_hint_shows_abort_when_streaming() {
         let mut app = PorygonTui::new();
         app.waiting_response = true;
 
         assert_eq!(
-            app.status_key_hint(),
-            " Draft preserved Esc/Ctrl+C:stop PgUp/Dn:scroll "
+            app.composer_hint(),
+            "Working | draft kept here | Ctrl+C: stop"
         );
     }
 
