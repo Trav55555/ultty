@@ -197,17 +197,8 @@ for pane in "$first" "$second"; do
     "$ULTTYCTL" --pane "$pane" text --scrollback | grep -q 'INLINE CARD' || fail "pane $pane has no inline copy text"
 done
 shot split-live
-python3 - "$out/split-live.png" <<'PYPIXEL' || fail "both split cards must be visible"
-from PIL import Image
-import sys
-image = Image.open(sys.argv[1]).convert("RGB")
-w, h = image.size
-for left, right in ((w // 2, 3 * w // 4), (3 * w // 4, w)):
-    pixels = image.crop((left, 0, right, h)).getdata()
-    magenta = sum(r > 130 and b > 100 and r > g * 1.5 and b > g * 1.4 for r, g, b in pixels)
-    if magenta < 30:
-        raise SystemExit(f"only {magenta} card pixels in pane at x={left}")
-PYPIXEL
+python3 scripts/e2e/native_split_check.py split-inline "$out/split-live.png" ||
+    fail "both split cards must be visible"
 touch "$out/split-close-1"
 for _ in $(seq 100); do
     "$ULTTYCTL" --pane "$second" regions 2>/dev/null | grep -q '^surface #9000 .*placed at line' && break

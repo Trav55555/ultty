@@ -61,6 +61,8 @@ def parse_png(path: Path) -> tuple[int, int, Rows]:
 
     raw = zlib.decompress(compressed)
     stride = width * 4
+    if len(raw) != height * (stride + 1):
+        raise ValueError(f"{path} has incomplete or extra PNG scanline data")
     rows: Rows = []
     previous = bytearray(stride)
     cursor = 0

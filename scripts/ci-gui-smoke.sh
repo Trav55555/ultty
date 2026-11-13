@@ -13,6 +13,9 @@ mkdir -p "$OUT"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Exercise the screenshot oracles without optional Python site-packages.
+python3 -S -m unittest discover -s scripts/e2e -p test_native_split_check.py
+
 DISPLAY_NUM="${GUI_SMOKE_DISPLAY:-:99}"
 LVP_ICD="${GUI_SMOKE_VK_ICD:-$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1)}"
 [ -n "$LVP_ICD" ] || { echo "no lavapipe ICD found (install mesa-vulkan-drivers)" >&2; exit 2; }
