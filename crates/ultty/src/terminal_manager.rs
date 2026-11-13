@@ -941,6 +941,15 @@ impl TerminalManager {
         Ok(Some(terminal_id))
     }
 
+    /// [`Terminal::uid`] of every open pane, in every tab. Per-terminal GPU
+    /// caches keep only these.
+    pub fn terminal_uids(&self) -> std::collections::HashSet<u64> {
+        self.terminals
+            .iter()
+            .map(|t| t.event_loop.terminal_uid())
+            .collect()
+    }
+
     pub fn pane_count(&self) -> usize {
         self.active_tab().map(|t| t.terminals.len()).unwrap_or(0)
     }

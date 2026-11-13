@@ -1039,7 +1039,6 @@ impl App {
                     let tab_id = tab.id;
                     self.freeze_tab_width_after_close();
                     self.terminal_manager.close_tab(tab_id);
-                    self.renderer.clear_image_cache();
                     tracing::info!("Closed tab {:?}", tab_id);
                     self.update_tab_bar();
                     self.needs_redraw = true;

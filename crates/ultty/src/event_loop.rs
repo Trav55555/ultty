@@ -316,6 +316,9 @@ pub struct EventLoop {
     exit_seen_at: Option<Instant>,
     /// Whether `ChildExited` has gone out. It goes out once.
     exit_reported: bool,
+    /// [`Terminal::uid`] of the terminal this loop drives; readable without
+    /// taking the terminal lock.
+    terminal_uid: u64,
 }
 
 impl EventLoop {
@@ -346,6 +349,7 @@ impl EventLoop {
     /// constructors do not take, such as per-child environment variables.
     pub fn from_child(child: Child, cols: u16, rows: u16) -> io::Result<Self> {
         let mut terminal = Terminal::new(Dimensions::new(cols, rows));
+        let terminal_uid = terminal.uid();
         terminal.set_terminal_name(child.term());
         // The UI thread pairs these anchors with native sessions' inline
         // surfaces (ADR 0020); see `ProtocolServer::pair_inline_surfaces`.
@@ -397,7 +401,13 @@ impl EventLoop {
             last_drain_bytes: 0,
             exit_seen_at: None,
             exit_reported: false,
+            terminal_uid,
         })
+    }
+
+    /// [`Terminal::uid`] of the driven terminal, without locking it.
+    pub fn terminal_uid(&self) -> u64 {
+        self.terminal_uid
     }
 
     /// Register the callback the I/O thread uses to wake the UI.
