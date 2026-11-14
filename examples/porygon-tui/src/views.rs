@@ -134,11 +134,11 @@ impl PorygonTui {
     }
 
     fn bottom_height(&self) -> u16 {
-        if self.show_approval_modal && !self.approval_details {
-            self.terminal_height.saturating_sub(2).clamp(1, 9)
-        } else {
-            self.composer_rows() + self.suggestion_rows() + 4
-        }
+        self.composer_rows() + self.suggestion_rows() + 4
+    }
+
+    fn approval_panel_height(&self) -> u16 {
+        self.terminal_height.saturating_sub(2).clamp(1, 9)
     }
 
     pub(crate) fn update_scroll_dimensions(&mut self) {
@@ -185,6 +185,13 @@ impl PorygonTui {
     fn approval_rows(&self, request: &ApprovalRequest) -> Vec<String> {
         let width = usize::from(self.terminal_width.saturating_sub(2).max(1));
         if self.approval_stage == 1 {
+            let width = usize::from(
+                self.terminal_width
+                    .saturating_sub(4)
+                    .min(80)
+                    .saturating_sub(2)
+                    .max(1),
+            );
             let scope = &request.params["session_scope"];
             let content = format!("This exact command may run again in this session until the daemon restarts.\nConversation: {}\nProject: {}\nExact argv: {}", scope["conversation_id"].as_str().unwrap_or(""), scope["project_root"].as_str().unwrap_or(""), scope["argv"]);
             return crate::work_views::wrap(&content, width);
@@ -235,7 +242,11 @@ impl PorygonTui {
             .as_ref()
             .map(|request| self.approval_rows(request).len())
             .unwrap_or(0)
-            .saturating_sub(usize::from(self.terminal_height.saturating_sub(5).max(1)))
+            .saturating_sub(if self.approval_stage == 1 {
+                usize::from(self.approval_panel_height().saturating_sub(4).max(1))
+            } else {
+                usize::from(self.terminal_height.saturating_sub(5).max(1))
+            })
     }
 
     fn approval_page_view(&self, request: &ApprovalRequest) -> Column {
@@ -276,6 +287,28 @@ impl PorygonTui {
         page
     }
 
+    fn approval_session_view(&self, request: &ApprovalRequest) -> Column {
+        let rows = self.approval_rows(request);
+        let available = usize::from(self.approval_panel_height().saturating_sub(4).max(1));
+        let start = self
+            .approval_scroll
+            .min(rows.len().saturating_sub(available));
+        let mut panel = Column::new()
+            .height(Dimension::Cells(f32::from(self.approval_panel_height())))
+            .border(BorderStyle::rounded())
+            .border_color(Theme::current().primary)
+            .bg(Theme::current().background)
+            .child(Text::new("Confirm session permission"));
+        for row in rows.iter().skip(start).take(available) {
+            panel = panel.child(Text::new(row.clone()));
+        }
+        panel.child(Text::new(if start + available >= rows.len() {
+            "Enter confirms | Esc back"
+        } else {
+            "Scroll to read scope | Esc back"
+        }))
+    }
+
     fn approval_menu_view(&self, request: &ApprovalRequest) -> Column {
         let arguments = request.params.get("params").unwrap_or(&request.params);
         let preview = arguments
@@ -288,7 +321,13 @@ impl PorygonTui {
                     .join(" ")
             })
             .unwrap_or_else(|| arguments.to_string());
-        let width = usize::from(self.terminal_width.saturating_sub(6).max(1));
+        let width = usize::from(
+            self.terminal_width
+                .saturating_sub(4)
+                .min(80)
+                .saturating_sub(2)
+                .max(1),
+        );
         let preview = format!("{}: {preview}", request.tool_name);
         let mut lines = crate::work_views::wrap(&preview, width).into_iter();
         let first = lines.next().unwrap_or_default();
@@ -298,10 +337,11 @@ impl PorygonTui {
             first
         };
         let mut panel = Column::new()
-            .height(Dimension::Cells(f32::from(self.bottom_height())))
+            .height(Dimension::Cells(f32::from(self.approval_panel_height())))
             .flex_shrink(0.0)
             .border(BorderStyle::rounded())
             .border_color(Theme::current().primary)
+            .bg(Theme::current().background)
             .child(Text::new("Permission required"))
             .child(Text::new(preview));
         if self.approval_stage == 2 {
@@ -974,24 +1014,10 @@ impl PorygonTui {
             .child(self.input_view())
             .child(self.status_bar_view());
         let chat_area = self.messages_view();
-        let center_content = if self.show_approval_modal && !self.approval_details {
-            if let Some(request) = &self.pending_approval {
-                Column::new()
-                    .overflow_y_hidden()
-                    .child(chat_area)
-                    .child(self.approval_menu_view(request))
-            } else {
-                Column::new()
-                    .overflow_y_hidden()
-                    .child(chat_area)
-                    .child(bottom_bar)
-            }
-        } else {
-            Column::new()
-                .overflow_y_hidden()
-                .child(chat_area)
-                .child(bottom_bar)
-        };
+        let center_content = Column::new()
+            .overflow_y_hidden()
+            .child(chat_area)
+            .child(bottom_bar);
         let mut dock = DockLayout::new().dock_top(self.header_view());
         if self.should_show_sidebar() {
             dock = dock.dock_right(sidebar_view(self));
@@ -1076,9 +1102,23 @@ impl PorygonTui {
         if self.work.page != crate::work::Page::Closed && !self.show_approval_modal {
             return Stack::new().child(crate::work_views::view(self));
         }
-        if self.show_approval_modal && self.approval_details {
+        if self.show_approval_modal && self.approval_details && self.approval_stage != 1 {
             if let Some(req) = &self.pending_approval {
                 return Stack::new().child(self.approval_page_view(req));
+            }
+        }
+        if self.show_approval_modal {
+            if let Some(request) = &self.pending_approval {
+                let width = self.terminal_width.saturating_sub(4).clamp(1, 80);
+                let height = self.approval_panel_height();
+                let panel = if self.approval_stage == 1 {
+                    self.approval_session_view(request)
+                } else {
+                    self.approval_menu_view(request)
+                };
+                return Stack::new()
+                    .child(main_content)
+                    .overlay(panel, width, height);
             }
         }
         Stack::new().child(main_content)
@@ -1221,6 +1261,15 @@ mod tests {
         assert!(screen.contains("Permission required"), "{screen}");
         assert!(screen.contains("Allow once"), "{screen}");
         assert!(screen.contains("Reject"), "{screen}");
+        let native = ulttui::widgets::render_view_messages(&app.render_view()).unwrap();
+        assert!(native.iter().any(|message| matches!(message, ultty_protocol::AppMessage::SetSemantics { semantics, .. } if semantics.modal && semantics.role == ultty_protocol::Role::Dialog)));
+        assert!(native.iter().any(|message| matches!(
+            message,
+            ultty_protocol::AppMessage::SetContent {
+                content: ultty_protocol::Content::Widget(ultty_protocol::WidgetContent::Input(_)),
+                ..
+            }
+        )));
         app.handle_event(&composer_key(Key::Down, false));
         assert!(matches!(
             app.handle_event(&composer_key(Key::Enter, false)),

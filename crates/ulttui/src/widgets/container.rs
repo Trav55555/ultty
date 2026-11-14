@@ -7,7 +7,7 @@ use super::{render_view_to_native, View};
 use crate::theme::to_ratatui_color;
 use ultty_protocol::{
     AppMessage, BorderStyle, BorderType, Color, Constraints, Dimension, Display, Edges,
-    FlexDirection, RegionId, Style as ProtoStyle,
+    FlexDirection, GridLine, GridPlacement, RegionId, Style as ProtoStyle, TrackSizingFunction,
 };
 
 /// Extract padding values as (top, right, bottom, left) in cell units.
@@ -548,6 +548,7 @@ impl View for Row {
 
 /// Z-ordered stack container.
 pub struct Stack {
+    overlay_size: Option<(u16, u16)>,
     id: Option<String>,
     constraints: Constraints,
     children: Vec<Box<dyn View>>,
@@ -578,6 +579,7 @@ impl Stack {
 
     pub fn new() -> Self {
         Self {
+            overlay_size: None,
             id: None,
             constraints: Constraints {
                 display: Display::Flex,
@@ -591,6 +593,18 @@ impl Stack {
     }
 
     pub fn child<V: View + 'static>(mut self, child: V) -> Self {
+        self.children.push(Box::new(child));
+        self
+    }
+
+    /// Overlay a bottom-centred opaque dialog over the existing child.
+    pub fn overlay<V: View + 'static>(mut self, child: V, width: u16, height: u16) -> Self {
+        self.constraints.display = Display::Grid;
+        self.constraints.grid_template_columns =
+            vec![TrackSizingFunction::Single(Dimension::Percent(100.0))];
+        self.constraints.grid_template_rows =
+            vec![TrackSizingFunction::Single(Dimension::Percent(100.0))];
+        self.overlay_size = Some((width, height));
         self.children.push(Box::new(child));
         self
     }
@@ -621,13 +635,40 @@ impl View for Stack {
         next_id: &mut u32,
     ) -> crate::Result<Option<RegionId>> {
         if let Some(child) = self.children.get(index) {
-            Ok(Some(render_view_to_native(
-                child.as_ref(),
-                send_message,
-                parent,
-                next_id,
-                None,
-            )?))
+            let overrides = self.overlay_size.map(|(width, height)| {
+                let mut c = child.constraints();
+                c.grid_column = GridPlacement {
+                    start: GridLine::Line(1),
+                    end: GridLine::Line(2),
+                };
+                c.grid_row = GridPlacement {
+                    start: GridLine::Line(1),
+                    end: GridLine::Line(2),
+                };
+                if index + 1 == self.children.len() {
+                    c.width = Dimension::Cells(f32::from(width));
+                    c.height = Dimension::Cells(f32::from(height));
+                    c.margin.top = Dimension::Auto;
+                    c.margin.left = Dimension::Auto;
+                    c.margin.right = Dimension::Auto;
+                }
+                c
+            });
+            let id =
+                render_view_to_native(child.as_ref(), send_message, parent, next_id, overrides)?;
+            if self.overlay_size.is_some() && index + 1 == self.children.len() {
+                super::send_semantics(
+                    send_message,
+                    id,
+                    ultty_protocol::Semantics {
+                        role: ultty_protocol::Role::Dialog,
+                        modal: true,
+                        ..Default::default()
+                    },
+                    &ultty_protocol::Content::None,
+                )?;
+            }
+            Ok(Some(id))
         } else {
             Ok(None)
         }
@@ -640,8 +681,25 @@ impl View for Stack {
     }
 
     fn render_ansi(&self, frame: &mut Frame, area: Rect) {
-        for child in &self.children {
-            super::render_view_ansi(child.as_ref(), frame, area);
+        for (index, child) in self.children.iter().enumerate() {
+            let target = if let Some((width, height)) = self
+                .overlay_size
+                .filter(|_| index + 1 == self.children.len())
+            {
+                let width = width.min(area.width);
+                let height = height.min(area.height);
+                let rect = Rect::new(
+                    area.x + (area.width - width) / 2,
+                    area.y + area.height - height,
+                    width,
+                    height,
+                );
+                frame.render_widget(ratatui::widgets::Clear, rect);
+                rect
+            } else {
+                area
+            };
+            super::render_view_ansi(child.as_ref(), frame, target);
         }
     }
 }
@@ -650,6 +708,44 @@ impl View for Stack {
 mod tests {
     use super::*;
     use crate::widgets::Text;
+
+    #[test]
+    fn stack_overlay_uses_same_grid_cell_and_modal_semantics() {
+        let stack = Stack::new()
+            .child(Text::new("underlay"))
+            .overlay(Text::new("dialog"), 20, 4);
+        let messages = super::super::render_view_messages(&stack).unwrap();
+        let regions: Vec<_> = messages
+            .iter()
+            .filter_map(|message| match message {
+                AppMessage::CreateRegion { constraints, .. } => Some(constraints),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(regions[0].display, Display::Grid);
+        assert_eq!(regions[1].grid_column.start, GridLine::Line(1));
+        assert_eq!(regions[2].grid_column.start, GridLine::Line(1));
+        assert_eq!(regions[2].grid_row.start, GridLine::Line(1));
+        assert_eq!(regions[2].margin.top, Dimension::Auto);
+        assert!(messages.iter().any(|message| matches!(message,
+            AppMessage::SetSemantics { semantics, .. } if semantics.modal && semantics.role == ultty_protocol::Role::Dialog)));
+    }
+
+    #[test]
+    fn stack_overlay_clears_only_dialog_rectangle_in_ansi() {
+        let underlay = Column::new()
+            .child(Text::new("top row"))
+            .child(Text::new("abcdefghijklmnopqrst"));
+        let stack = Stack::new().child(underlay).overlay(Text::new("box"), 6, 1);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 2)).unwrap();
+        terminal
+            .draw(|frame| stack.render_ansi(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = (0..20).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+        assert_eq!(row, "abcdefgbox   nopqrst");
+    }
 
     #[test]
     fn column_children_count() {
