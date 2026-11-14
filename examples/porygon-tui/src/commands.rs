@@ -621,16 +621,30 @@ impl CommandRegistry {
         }
     }
 
-    /// Get command completions for a partial input.
-    ///
-    /// Returns all commands whose names start with the given partial string.
-    #[allow(dead_code)]
+    /// Rank commands by case-insensitive name, alias, or description match.
     pub fn completions(&self, partial: &str) -> Vec<&Command> {
-        let partial = partial.trim_start_matches('/');
-        self.commands
+        let query = partial.trim_start_matches('/').trim().to_lowercase();
+        let mut matches: Vec<_> = self
+            .commands
             .iter()
-            .filter(|cmd| cmd.name.starts_with(partial))
-            .collect()
+            .enumerate()
+            .filter_map(|(index, cmd)| {
+                let alias = match cmd.name {
+                    "sessions" => "conversations history resume",
+                    "approvals" => "attention decisions permission",
+                    "models" => "model provider",
+                    "project" => "workspace directory cwd",
+                    _ => "",
+                };
+                let score = [cmd.name, alias, cmd.description]
+                    .iter()
+                    .filter_map(|text| fuzzy_score(&text.to_lowercase(), &query))
+                    .min()?;
+                Some((score, index, cmd))
+            })
+            .collect();
+        matches.sort_by_key(|(score, index, _)| (*score, *index));
+        matches.into_iter().map(|(_, _, cmd)| cmd).collect()
     }
 
     /// Handle the /help command.
@@ -650,6 +664,35 @@ impl CommandRegistry {
     }
 }
 
+fn fuzzy_score(text: &str, query: &str) -> Option<usize> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    if text == query {
+        return Some(0);
+    }
+    if text.starts_with(query) {
+        return Some(1);
+    }
+    if text.contains(query) {
+        return Some(10);
+    }
+    let mut chars = query.chars();
+    let mut next = chars.next()?;
+    let mut first = None;
+    for (index, ch) in text.chars().enumerate() {
+        if ch == next {
+            first.get_or_insert(index);
+            if let Some(ch) = chars.next() {
+                next = ch;
+            } else {
+                return Some(20 + index.saturating_sub(first.unwrap_or(0)));
+            }
+        }
+    }
+    None
+}
+
 impl Default for CommandRegistry {
     fn default() -> Self {
         Self::new()
@@ -659,6 +702,21 @@ impl Default for CommandRegistry {
 #[cfg(test)]
 mod tests {
     use super::{CommandAction, CommandRegistry};
+
+    #[test]
+    fn command_search_ranks_names_and_supports_case_and_aliases() {
+        let registry = CommandRegistry::new();
+        assert_eq!(registry.completions("MoD")[0].name, "model");
+        assert!(registry
+            .completions("mdl")
+            .iter()
+            .any(|c| c.name == "model"));
+        assert!(registry
+            .completions("permission")
+            .iter()
+            .any(|c| c.name == "approvals"));
+        assert!(registry.completions("zzzxq").is_empty());
+    }
 
     #[test]
     fn parse_perf_command_returns_show_perf_action() {
