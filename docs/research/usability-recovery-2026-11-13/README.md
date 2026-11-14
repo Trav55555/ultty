@@ -141,3 +141,33 @@ native tests, excluding the separate grid/tmux test.
 The private Xvfb captures use a different font environment from the user's
 live desktop. These checks establish interaction behavior and layout geometry,
 not font appearance or rendering performance parity.
+
+## Integration refresh
+
+The client now includes main `ec7cbfc` through merge `e5f928e073873978ec05cf12f7dc1f6d9759761c`:
+searchable command palette, draft behavior, and typed unknown telemetry are
+preserved. Native tests: 131 passed; native all-targets Clippy and formatting
+passed. Both graphical workflows passed together in 20.09 seconds on the
+integrated binary, SHA-256
+`55e1d7dc7e19f6ae64172c354350c5c02bb35f74d67a264e0a1838020168a3ba`.
+Full receipts are in `target/verification-integrated`, with compact logs here.
+The installed `0ededa1-menu-ergonomics` terminal and control binaries have the
+same hashes as the earlier terminal pair; only the candidate client changed.
+
+Daemon draft review: https://git.traversannan.com/trav/porygon-ai/pulls/701,
+head `2fc48b7ff48a8ed48bef43e7cf257a7c6ae3a689` (implementation c67b591 plus
+release plan). This has not been merged or deployed. The daemon repository
+requires operator review of the high-risk tool-authorization change.
+
+The latest installed launcher targets `0ededa1-menu-ergonomics`, not the earlier
+6263867 bundle used by the still-running window. A later authorized deployment
+will save the exact launcher and replace only its client binary path atomically;
+it will preserve terminal symlinks and existing windows. Current launcher SHA-256:
+`9085037d2ae4902fe2829687f6162db06cf68849feca1580a5bab2dcacc89bd4`.
+Rollback restores that saved launcher and the daemon's recorded previous checkout,
+subject to the service/work inventory checks in the paired release plan.
+
+Old `/tmp/porygon-usability-baseline` and `/tmp/porygon-usability-native-v1`
+receipts were moved intact to this worktree's `target/preserved-tmp` after
+per-user temporary-storage quota exhaustion. They remain historical failures;
+no failed evidence was deleted.
