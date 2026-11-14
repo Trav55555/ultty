@@ -304,18 +304,25 @@ pub struct Renderer {
     adapter_info: wgpu::AdapterInfo,
 }
 
-/// Uploaded native vertices: vertex buffer, index buffer, index count, and
+/// Uploaded native vertices: vertex buffer, index buffer, index range, and
 /// the scissor rectangle they are drawn within (a pane of a split tab).
 type NativeBufferSet = (
     wgpu::Buffer,
     wgpu::Buffer,
-    u32,
+    std::ops::Range<u32>,
     Option<native_render::Scissor>,
 );
 
 struct NativeBufferCache<T> {
     bg: Vec<T>,
     text: Vec<T>,
+    order: Vec<NativeBufferDraw>,
+}
+
+enum NativeBufferDraw {
+    Background(usize),
+    Text(usize),
+    Image(DeferredImageRender, Option<native_render::Scissor>),
 }
 
 impl<T> Default for NativeBufferCache<T> {
@@ -323,30 +330,35 @@ impl<T> Default for NativeBufferCache<T> {
         Self {
             bg: Vec::new(),
             text: Vec::new(),
+            order: Vec::new(),
         }
     }
 }
 
 impl<T> NativeBufferCache<T> {
     fn is_empty(&self) -> bool {
-        self.bg.is_empty() && self.text.is_empty()
+        self.order.is_empty()
     }
 
     fn clear(&mut self) {
         self.bg.clear();
         self.text.clear();
+        self.order.clear();
     }
 
     fn push_bg(&mut self, buffer_set: T) {
+        self.order.push(NativeBufferDraw::Background(self.bg.len()));
         self.bg.push(buffer_set);
     }
 
     fn push_text(&mut self, buffer_set: T) {
+        self.order.push(NativeBufferDraw::Text(self.text.len()));
         self.text.push(buffer_set);
     }
 }
 
 /// Deferred native image render request (collected during widget content rendering).
+#[derive(Clone)]
 pub(super) struct DeferredImageRender {
     resource: NativeResourceKey,
     x: f32,
@@ -2196,6 +2208,15 @@ mod tests {
 
         assert_eq!(cache.bg, vec!["session-1-bg", "session-2-bg"]);
         assert_eq!(cache.text, vec!["session-1-text", "session-2-text"]);
+        assert!(matches!(
+            cache.order.as_slice(),
+            [
+                NativeBufferDraw::Background(0),
+                NativeBufferDraw::Text(0),
+                NativeBufferDraw::Background(1),
+                NativeBufferDraw::Text(1),
+            ]
+        ));
         assert!(!cache.is_empty());
     }
 
