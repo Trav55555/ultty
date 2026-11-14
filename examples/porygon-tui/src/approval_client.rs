@@ -231,12 +231,34 @@ pub fn reconcile_pending(
 /// This function never retries. If confirmation cannot be read, the action may
 /// already have happened. Do not retry that incarnation; inspect a replacement
 /// explicitly before submitting a new decision.
+#[cfg(test)]
 pub async fn submit_decision(
     client: &Client,
     base_url: &Url,
     approval_id: &str,
     expected_version: &str,
     decision: ApprovalDecision,
+) -> Result<ApprovalDecisionResult> {
+    submit_decision_with_options(
+        client,
+        base_url,
+        approval_id,
+        expected_version,
+        decision,
+        false,
+        None,
+    )
+    .await
+}
+
+pub async fn submit_decision_with_options(
+    client: &Client,
+    base_url: &Url,
+    approval_id: &str,
+    expected_version: &str,
+    decision: ApprovalDecision,
+    session: bool,
+    feedback: Option<String>,
 ) -> Result<ApprovalDecisionResult> {
     if approval_id.trim().is_empty() || matches!(approval_id, "." | "..") {
         bail!("A nonempty approval identifier is required");
@@ -249,9 +271,16 @@ pub async fn submit_decision(
         .map_err(|()| anyhow::anyhow!("Daemon URL cannot contain path segments"))?
         .push(approval_id)
         .push(decision.route());
+    let mut body = serde_json::json!({"expected_version": expected_version});
+    if session {
+        body["scope"] = serde_json::json!("session");
+    }
+    if let Some(text) = feedback.as_ref().filter(|s| !s.trim().is_empty()) {
+        body["feedback"] = serde_json::json!(text.trim());
+    }
     let response = client
         .post(url)
-        .json(&serde_json::json!({"expected_version": expected_version}))
+        .json(&body)
         .timeout(Duration::from_secs(30))
         .send()
         .await
@@ -288,6 +317,18 @@ pub async fn submit_decision(
             "Daemon confirmation does not match {} of approval {approval_id}",
             decision.route()
         );
+    }
+    if session && result.additional.get("scope").and_then(Value::as_str) != Some("session") {
+        bail!("Daemon did not confirm session scope; inspect the run before retrying");
+    }
+    if feedback.as_ref().is_some_and(|s| !s.trim().is_empty())
+        && result
+            .additional
+            .get("feedback_delivered")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        bail!("Daemon did not confirm feedback delivery; inspect the run before retrying");
     }
     Ok(result)
 }
@@ -472,6 +513,60 @@ mod tests {
                 .await
                 .is_err());
             server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_extended_decisions_require_explicit_server_confirmation() {
+        for (decision, session, feedback, response, expected) in [
+            (
+                ApprovalDecision::Approve,
+                true,
+                None,
+                r#"{"status":"approved","approval_id":"a","scope":"session"}"#,
+                true,
+            ),
+            (
+                ApprovalDecision::Approve,
+                true,
+                None,
+                r#"{"status":"approved","approval_id":"a"}"#,
+                false,
+            ),
+            (
+                ApprovalDecision::Deny,
+                false,
+                Some("change it".to_string()),
+                r#"{"status":"denied","approval_id":"a","feedback_delivered":true}"#,
+                true,
+            ),
+            (
+                ApprovalDecision::Deny,
+                false,
+                Some("change it".to_string()),
+                r#"{"status":"denied","approval_id":"a"}"#,
+                false,
+            ),
+        ] {
+            let (url, server) = mock_response(200, response).await;
+            let result = submit_decision_with_options(
+                &authenticated_client(),
+                &url,
+                "a",
+                "v1",
+                decision,
+                session,
+                feedback.clone(),
+            )
+            .await;
+            assert_eq!(result.is_ok(), expected);
+            let request = server.await.unwrap();
+            if session {
+                assert!(request.contains("\"scope\":\"session\""));
+            }
+            if feedback.is_some() {
+                assert!(request.contains("\"feedback\":\"change it\""));
+            }
         }
     }
 

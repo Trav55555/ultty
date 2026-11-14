@@ -134,7 +134,11 @@ impl PorygonTui {
     }
 
     fn bottom_height(&self) -> u16 {
-        self.composer_rows() + self.suggestion_rows() + 4
+        if self.show_approval_modal && !self.approval_details {
+            self.terminal_height.saturating_sub(2).clamp(1, 9)
+        } else {
+            self.composer_rows() + self.suggestion_rows() + 4
+        }
     }
 
     pub(crate) fn update_scroll_dimensions(&mut self) {
@@ -180,6 +184,11 @@ impl PorygonTui {
 
     fn approval_rows(&self, request: &ApprovalRequest) -> Vec<String> {
         let width = usize::from(self.terminal_width.saturating_sub(2).max(1));
+        if self.approval_stage == 1 {
+            let scope = &request.params["session_scope"];
+            let content = format!("This exact command may run again in this session until the daemon restarts.\nConversation: {}\nProject: {}\nExact argv: {}", scope["conversation_id"].as_str().unwrap_or(""), scope["project_root"].as_str().unwrap_or(""), scope["argv"]);
+            return crate::work_views::wrap(&content, width);
+        }
         let risk = if request.risk_score < 0.0 {
             "unknown".into()
         } else {
@@ -239,12 +248,18 @@ impl PorygonTui {
             .width(Dimension::Percent(100.0))
             .height(Dimension::Percent(100.0))
             .padding(1.0)
-            .child(RichText::new().text("Approval details | Esc back"))
+            .child(RichText::new().text(if self.approval_stage == 1 {
+                "Confirm session permission | Esc back"
+            } else {
+                "Approval details | Esc back"
+            }))
             .child(
                 RichText::new().text(if let Some(reason) = self.approval_decision_blocker() {
                     reason
                 } else if self.approval_in_flight {
                     "Decision unconfirmed | r refresh"
+                } else if self.approval_stage == 1 {
+                    "Read scope; scroll to end, Enter confirms | Esc back"
                 } else {
                     "y approve once | n deny | r refresh"
                 }),
@@ -259,6 +274,71 @@ impl PorygonTui {
             page = page.child(RichText::new().text(row));
         }
         page
+    }
+
+    fn approval_menu_view(&self, request: &ApprovalRequest) -> Column {
+        let arguments = request.params.get("params").unwrap_or(&request.params);
+        let preview = arguments
+            .get("argv")
+            .and_then(serde_json::Value::as_array)
+            .map(|args| {
+                args.iter()
+                    .map(serde_json::Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_else(|| arguments.to_string());
+        let width = usize::from(self.terminal_width.saturating_sub(6).max(1));
+        let preview = format!("{}: {preview}", request.tool_name);
+        let mut lines = crate::work_views::wrap(&preview, width).into_iter();
+        let first = lines.next().unwrap_or_default();
+        let preview = if lines.next().is_some() {
+            format!("{first} ...")
+        } else {
+            first
+        };
+        let mut panel = Column::new()
+            .height(Dimension::Cells(f32::from(self.bottom_height())))
+            .flex_shrink(0.0)
+            .border(BorderStyle::rounded())
+            .border_color(Theme::current().primary)
+            .child(Text::new("Permission required"))
+            .child(Text::new(preview));
+        if self.approval_stage == 2 {
+            return panel
+                .child(Text::new("Reject this command. Optional instructions:"))
+                .child(self.approval_feedback.clone())
+                .child(Text::new("Enter: reject and send | Esc: back"));
+        }
+        let labels = if self.approval_session_available() {
+            vec![
+                "Allow once",
+                "Allow this command for this session",
+                "Reject",
+            ]
+        } else {
+            vec!["Allow once", "Reject"]
+        };
+        for (index, label) in labels.iter().enumerate() {
+            let selected = self.approval_choice == index;
+            let style = if selected {
+                Style::new().fg(Theme::current().primary).bold()
+            } else {
+                Style::default()
+            };
+            panel = panel.child(RichText::new().span(
+                format!("{} {label}", if selected { ">" } else { " " }),
+                style,
+            ));
+        }
+        let hint = if let Some(reason) = self.approval_decision_blocker() {
+            reason
+        } else if self.approval_in_flight {
+            "Decision unconfirmed | r refresh"
+        } else {
+            "Up/Down Enter | d details | Esc back"
+        };
+        panel.child(Text::new(hint))
     }
 
     pub(crate) fn hex_gauge(&self) -> String {
@@ -564,8 +644,69 @@ impl PorygonTui {
                 Event::Quit => Some(Msg::AbortStream),
                 Event::Key(ke) => match ke.key {
                     Key::Escape => {
+                        if self.approval_stage != 0 {
+                            self.approval_stage = 0;
+                            self.approval_details = false;
+                            self.approval_scroll = 0;
+                            return None;
+                        }
+                        if self.approval_details {
+                            self.approval_details = false;
+                            return None;
+                        }
                         self.approval_scroll = 0;
                         Some(Msg::DismissApproval)
+                    }
+                    Key::Enter if self.approval_stage == 2 && !self.approval_in_flight => {
+                        return Some(Msg::ApprovalRejectFeedback(
+                            self.approval_feedback.current_value().to_string(),
+                        ));
+                    }
+                    _ if self.approval_stage == 2 => {
+                        let _ = self.approval_feedback.on_key(ke);
+                        return None;
+                    }
+                    Key::Enter
+                        if self.approval_stage == 1
+                            && !self.approval_in_flight
+                            && self.approval_scroll >= self.approval_max_scroll() =>
+                    {
+                        return Some(Msg::ApprovalSession);
+                    }
+                    Key::Char('d') if !self.approval_details => {
+                        self.approval_details = true;
+                        None
+                    }
+                    Key::Up if !self.approval_details => {
+                        self.approval_choice = self.approval_choice.saturating_sub(1);
+                        None
+                    }
+                    Key::Down | Key::Tab if !self.approval_details => {
+                        self.approval_choice =
+                            (self.approval_choice + 1).min(if self.approval_session_available() {
+                                2
+                            } else {
+                                1
+                            });
+                        None
+                    }
+                    Key::Enter if !self.approval_details && !self.approval_in_flight => {
+                        match self.approval_choice {
+                            0 => Some(Msg::ApprovalDecision(true)),
+                            1 if self.approval_session_available() => {
+                                self.approval_stage = 1;
+                                self.approval_details = true;
+                                self.approval_scroll = 0;
+                                None
+                            }
+                            _ if self.approval_supports("reject_feedback")
+                                && !self.approval_is_stream =>
+                            {
+                                self.approval_stage = 2;
+                                None
+                            }
+                            _ => Some(Msg::ApprovalDecision(false)),
+                        }
                     }
                     Key::Up | Key::PageUp => {
                         self.approval_scroll =
@@ -595,12 +736,18 @@ impl PorygonTui {
                         None
                     }
                     Key::Char('r') => Some(Msg::RefreshApproval),
-                    Key::Char('y') if !self.approval_in_flight => Some(Msg::ApprovalDecision(true)),
-                    Key::Char('n') if !self.approval_in_flight => {
+                    Key::Char('y') if self.approval_stage == 0 && !self.approval_in_flight => {
+                        Some(Msg::ApprovalDecision(true))
+                    }
+                    Key::Char('n') if self.approval_stage == 0 && !self.approval_in_flight => {
                         Some(Msg::ApprovalDecision(false))
                     }
                     _ => None,
                 },
+                Event::Paste { text, .. } if self.approval_stage == 2 => {
+                    self.approval_feedback.insert_text(text);
+                    None
+                }
                 _ => None,
             };
         }
@@ -827,10 +974,24 @@ impl PorygonTui {
             .child(self.input_view())
             .child(self.status_bar_view());
         let chat_area = self.messages_view();
-        let center_content = Column::new()
-            .overflow_y_hidden()
-            .child(chat_area)
-            .child(bottom_bar);
+        let center_content = if self.show_approval_modal && !self.approval_details {
+            if let Some(request) = &self.pending_approval {
+                Column::new()
+                    .overflow_y_hidden()
+                    .child(chat_area)
+                    .child(self.approval_menu_view(request))
+            } else {
+                Column::new()
+                    .overflow_y_hidden()
+                    .child(chat_area)
+                    .child(bottom_bar)
+            }
+        } else {
+            Column::new()
+                .overflow_y_hidden()
+                .child(chat_area)
+                .child(bottom_bar)
+        };
         let mut dock = DockLayout::new().dock_top(self.header_view());
         if self.should_show_sidebar() {
             dock = dock.dock_right(sidebar_view(self));
@@ -915,7 +1076,7 @@ impl PorygonTui {
         if self.work.page != crate::work::Page::Closed && !self.show_approval_modal {
             return Stack::new().child(crate::work_views::view(self));
         }
-        if self.show_approval_modal {
+        if self.show_approval_modal && self.approval_details {
             if let Some(req) = &self.pending_approval {
                 return Stack::new().child(self.approval_page_view(req));
             }
@@ -1018,6 +1179,107 @@ mod tests {
     }
 
     #[test]
+    fn approval_menu_keeps_transcript_and_draft_and_selects_no() {
+        use crate::types::ChatMessage;
+
+        let mut app = PorygonTui::new();
+        app.terminal_width = 80;
+        app.terminal_height = 24;
+        app.input.set_value("unsent draft");
+        app.messages.push(ChatMessage {
+            role: "user".into(),
+            content: "Visible conversation".into(),
+            timestamp: "12:00".into(),
+        });
+        app.pending_approval = Some(ApprovalRequest {
+            scope: Some("tool_call".into()),
+            decision_version: Some("v1".into()),
+            decision_stale: false,
+            id: "one".into(),
+            tool_name: "run_argv".into(),
+            params: serde_json::json!({"params": {"argv": ["printf", "hello"]}}),
+            risk_score: -1.0,
+            reasoning: "review".into(),
+            blast_radius: "unknown".into(),
+            reversible: None,
+        });
+        app.show_approval_modal = true;
+        app.update_scroll_dimensions();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| app.render_view().render_ansi(frame, frame.area()))
+            .unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Visible conversation"), "{screen}");
+        assert!(screen.contains("Permission required"), "{screen}");
+        assert!(screen.contains("Allow once"), "{screen}");
+        assert!(screen.contains("Reject"), "{screen}");
+        app.handle_event(&composer_key(Key::Down, false));
+        assert!(matches!(
+            app.handle_event(&composer_key(Key::Enter, false)),
+            Some(Msg::ApprovalDecision(false))
+        ));
+        assert_eq!(app.input.current_value(), "unsent draft");
+        app.handle_event(&composer_key(Key::Char('d'), false));
+        assert!(app.approval_details);
+        app.handle_event(&composer_key(Key::Escape, false));
+        assert!(!app.approval_details);
+        assert_eq!(app.input.current_value(), "unsent draft");
+    }
+
+    #[test]
+    fn session_confirmation_and_rejection_require_advertised_options() {
+        let mut app = PorygonTui::new();
+        app.terminal_width = 40;
+        app.terminal_height = 12;
+        app.pending_approval = Some(ApprovalRequest {
+            scope: Some("tool_call".into()),
+            decision_version: Some("v1".into()),
+            decision_stale: false,
+            id: "one".into(),
+            tool_name: "run_argv".into(),
+            params: serde_json::json!({"params":{"argv":["printf","hello"]}, "approval_options":["once","session","reject_feedback"], "session_scope":{"conversation_id":"conversation-1","project_root":"/project","argv":["printf","hello"]}}),
+            risk_score: -1.0,
+            reasoning: "review".into(),
+            blast_radius: "unknown".into(),
+            reversible: None,
+        });
+        app.show_approval_modal = true;
+        app.handle_event(&composer_key(Key::Down, false));
+        assert!(app.handle_event(&composer_key(Key::Enter, false)).is_none());
+        assert_eq!(app.approval_stage, 1);
+        let rows = app
+            .approval_rows(app.pending_approval.as_ref().unwrap())
+            .join("\n");
+        assert!(
+            rows.contains("conversation-1") && rows.contains("/project") && rows.contains("printf")
+        );
+        app.handle_event(&composer_key(Key::End, false));
+        assert!(matches!(
+            app.handle_event(&composer_key(Key::Enter, false)),
+            Some(Msg::ApprovalSession)
+        ));
+        app.handle_event(&composer_key(Key::Escape, false));
+        app.handle_event(&composer_key(Key::Down, false));
+        assert!(app.handle_event(&composer_key(Key::Enter, false)).is_none());
+        assert_eq!(app.approval_stage, 2);
+        app.handle_event(&composer_key(Key::Char('x'), false));
+        assert!(
+            matches!(app.handle_event(&composer_key(Key::Enter, false)), Some(Msg::ApprovalRejectFeedback(text)) if text == "x")
+        );
+        app.pending_approval.as_mut().unwrap().params["session_scope"]["argv"] =
+            serde_json::json!(["different"]);
+        assert!(!app.approval_session_available());
+    }
+
+    #[test]
     fn long_approval_is_readable_and_enter_cannot_decide() {
         let mut app = PorygonTui::new();
         app.terminal_width = 40;
@@ -1035,6 +1297,7 @@ mod tests {
             reversible: None,
         });
         app.show_approval_modal = true;
+        app.approval_details = true;
         assert!(app.handle_event(&composer_key(Key::Enter, false)).is_none());
         app.handle_event(&composer_key(Key::End, false));
         assert!(app.approval_scroll > 20);

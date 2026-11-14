@@ -1451,6 +1451,10 @@ impl PorygonTui {
                 self.pending_approval_decision = None;
                 self.pending_approval = Some(request);
                 self.approval_scroll = 0;
+                self.approval_choice = 0;
+                self.approval_details = false;
+                self.approval_stage = 0;
+                self.approval_feedback.set_value("");
                 self.show_approval_modal = current_run_request;
                 if current_run_request {
                     self.run_can_continue = false;
@@ -1459,6 +1463,10 @@ impl PorygonTui {
                 Cmd::none()
             }
             Msg::ApprovalDecision(approved) => self.decide_approval(approved),
+            Msg::ApprovalSession => self.decide_approval_with_options(true, true, None),
+            Msg::ApprovalRejectFeedback(feedback) => {
+                self.decide_approval_with_options(false, false, Some(feedback))
+            }
             Msg::ApprovalBecameStale(id, version, error) => {
                 if self.approval_is_stream {
                     return Cmd::none();

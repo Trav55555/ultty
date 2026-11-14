@@ -410,12 +410,37 @@ impl PorygonTui {
     }
 
     pub(crate) fn decide_approval(&mut self, approved: bool) -> Cmd<Msg> {
+        self.decide_approval_with_options(approved, false, None)
+    }
+
+    pub(crate) fn decide_approval_with_options(
+        &mut self,
+        approved: bool,
+        session: bool,
+        feedback: Option<String>,
+    ) -> Cmd<Msg> {
         if self.approval_in_flight {
             return Cmd::none();
         }
         let Some(request) = self.pending_approval.as_ref() else {
             return Cmd::none();
         };
+        if (session && !self.approval_session_available())
+            || (feedback.is_some()
+                && (self.approval_is_stream || !self.approval_supports("reject_feedback")))
+        {
+            return Cmd::ShowToast(Toast::warning(
+                "This decision is not supported by the daemon.",
+            ));
+        }
+        if feedback
+            .as_ref()
+            .is_some_and(|text| text.chars().count() > 4000)
+        {
+            return Cmd::ShowToast(Toast::warning(
+                "Instructions must be at most 4000 characters.",
+            ));
+        }
         if self.approval_is_stream {
             let sent = self.stream_control.as_ref().is_some_and(|sender| {
                 sender
@@ -458,12 +483,14 @@ impl PorygonTui {
                 .iter()
                 .any(|tool| matches!(tool.status, ToolStatus::Approved));
         Cmd::spawn(async move {
-            let result = approval_client::submit_decision(
+            let result = approval_client::submit_decision_with_options(
                 &connection.client,
                 &connection.base_url,
                 &id,
                 &version,
                 decision,
+                session,
+                feedback,
             )
             .await;
             match result {

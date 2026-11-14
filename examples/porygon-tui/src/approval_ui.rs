@@ -8,6 +8,33 @@ use crate::types::ApprovalRequest;
 use crate::{Msg, PorygonTui};
 
 impl PorygonTui {
+    pub(crate) fn approval_session_available(&self) -> bool {
+        if self.approval_is_stream || !self.approval_supports("session") {
+            return false;
+        }
+        self.pending_approval.as_ref().is_some_and(|r| {
+            let scope = &r.params["session_scope"];
+            ["conversation_id", "project_root"].iter().all(|key| {
+                scope
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|v| !v.trim().is_empty())
+            }) && scope
+                .get("argv")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|a| !a.is_empty() && a.iter().all(serde_json::Value::is_string))
+                && scope.get("argv") == r.params.get("params").and_then(|p| p.get("argv"))
+        })
+    }
+
+    pub(crate) fn approval_supports(&self, option: &str) -> bool {
+        self.pending_approval
+            .as_ref()
+            .and_then(|r| r.params.get("approval_options"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items.iter().any(|v| v.as_str() == Some(option)))
+    }
+
     pub(crate) fn approval_decision_blocker(&self) -> Option<&'static str> {
         if self.approval_is_stream {
             return None;
@@ -91,6 +118,10 @@ impl PorygonTui {
         self.approval_is_stream = false;
         self.approval_in_flight = false;
         self.approval_scroll = 0;
+        self.approval_choice = 0;
+        self.approval_details = false;
+        self.approval_stage = 0;
+        self.approval_feedback.set_value("");
         self.show_approval_modal = true;
         Cmd::none()
     }
