@@ -138,7 +138,7 @@ impl PorygonTui {
     }
 
     fn approval_panel_height(&self) -> u16 {
-        self.terminal_height.saturating_sub(2).clamp(1, 9)
+        self.terminal_height.saturating_sub(2).clamp(1, 10)
     }
 
     pub(crate) fn update_scroll_dimensions(&mut self) {
@@ -329,21 +329,27 @@ impl PorygonTui {
                 .max(1),
         );
         let preview = format!("{}: {preview}", request.tool_name);
-        let mut lines = crate::work_views::wrap(&preview, width).into_iter();
-        let first = lines.next().unwrap_or_default();
-        let preview = if lines.next().is_some() {
-            format!("{first} ...")
-        } else {
-            first
-        };
+        let lines = crate::work_views::wrap(&preview, width);
         let mut panel = Column::new()
             .height(Dimension::Cells(f32::from(self.approval_panel_height())))
             .flex_shrink(0.0)
             .border(BorderStyle::rounded())
             .border_color(Theme::current().primary)
             .bg(Theme::current().background)
-            .child(Text::new("Permission required"))
-            .child(Text::new(preview));
+            .child(Text::new("Permission required"));
+        for (index, line) in lines.iter().take(2).enumerate() {
+            let text = if index == 1 && lines.len() > 2 {
+                format!(
+                    "{} …",
+                    line.chars()
+                        .take(width.saturating_sub(2))
+                        .collect::<String>()
+                )
+            } else {
+                line.clone()
+            };
+            panel = panel.child(Text::new(text));
+        }
         if self.approval_stage == 2 {
             return panel
                 .child(Text::new("Reject this command. Optional instructions:"))
@@ -354,10 +360,21 @@ impl PorygonTui {
             vec![
                 "Allow once",
                 "Allow this command for this session",
-                "Reject",
+                if self.approval_supports("reject_feedback") {
+                    "Reject with instructions…"
+                } else {
+                    "Reject"
+                },
             ]
         } else {
-            vec!["Allow once", "Reject"]
+            vec![
+                "Allow once",
+                if self.approval_supports("reject_feedback") && !self.approval_is_stream {
+                    "Reject with instructions…"
+                } else {
+                    "Reject"
+                },
+            ]
         };
         for (index, label) in labels.iter().enumerate() {
             let selected = self.approval_choice == index;
@@ -1237,7 +1254,7 @@ mod tests {
             decision_stale: false,
             id: "one".into(),
             tool_name: "run_argv".into(),
-            params: serde_json::json!({"params": {"argv": ["printf", "hello"]}}),
+            params: serde_json::json!({"params": {"argv": ["/a/very/long/absolute/path/to/the/installed/demo/tool/with/a/long/name", "--help"]}}),
             risk_score: -1.0,
             reasoning: "review".into(),
             blast_radius: "unknown".into(),
@@ -1259,6 +1276,7 @@ mod tests {
             .collect::<String>();
         assert!(screen.contains("Visible conversation"), "{screen}");
         assert!(screen.contains("Permission required"), "{screen}");
+        assert!(screen.contains("--help"), "{screen}");
         assert!(screen.contains("Allow once"), "{screen}");
         assert!(screen.contains("Reject"), "{screen}");
         let native = ulttui::widgets::render_view_messages(&app.render_view()).unwrap();
