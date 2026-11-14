@@ -74,7 +74,17 @@ impl PorygonTui {
                 .unwrap_or_else(|| item.source.clone()),
             params: serde_json::to_value(&item.context).unwrap_or_default(),
             risk_score: -1.0,
-            reasoning: item.objective.clone(),
+            reasoning: if item
+                .context
+                .additional
+                .get("reason")
+                .and_then(|value| value.as_str())
+                == Some("missing_policy_binding")
+            {
+                format!("Execution is not enabled. Approve this exact action once, or deny it. This does not enable future commands. {}", item.objective)
+            } else {
+                item.objective.clone()
+            },
             blast_radius: "unknown".into(),
             reversible: None,
         });

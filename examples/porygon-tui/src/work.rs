@@ -200,6 +200,15 @@ pub(crate) fn category(status: &str) -> &'static str {
     }
 }
 
+/// A completed daemon turn does not establish success of the user's task.
+pub(crate) fn status_label(status: &str) -> &str {
+    if status == "completed" {
+        "turn ended"
+    } else {
+        status
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

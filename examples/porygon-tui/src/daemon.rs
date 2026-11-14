@@ -1322,6 +1322,9 @@ impl PorygonTui {
                     self.observe_run(id, result)
                 }
             }
+            Msg::RunApprovalsObserved(id, epoch, generation, result) => {
+                self.observe_run_approvals(id, epoch, generation, result)
+            }
             Msg::StopObserved(id, epoch, result) => {
                 if epoch != self.run_epoch {
                     return Cmd::none();
@@ -1388,7 +1391,11 @@ impl PorygonTui {
             }
             Msg::WeatherFailed => Cmd::none(),
             Msg::ApprovalReceived(request, is_stream) => {
-                if !is_stream && self.waiting_response {
+                let current_run_request = self
+                    .current_run
+                    .as_deref()
+                    .is_some_and(|id| request.params["run_id"].as_str() == Some(id));
+                if !is_stream && self.waiting_response && !current_run_request {
                     return Cmd::none();
                 }
                 if let Some(inspected) = self.pending_approval.as_mut() {
@@ -1400,14 +1407,20 @@ impl PorygonTui {
                     {
                         inspected.decision_stale = true;
                     }
-                    if is_stream {
-                        self.queued_stream_approvals.push_back(request);
+                    if (is_stream || current_run_request) && inspected.id != request.id {
+                        self.queued_stream_approvals.push_back((request, is_stream));
                     }
                     return Cmd::none();
                 }
                 self.approval_is_stream = is_stream;
+                self.pending_approval_decision = None;
                 self.pending_approval = Some(request);
-                self.show_approval_modal = false;
+                self.approval_scroll = 0;
+                self.show_approval_modal = current_run_request;
+                if current_run_request {
+                    self.run_can_continue = false;
+                    self.status.step = "blocked; approval required (F4)".into();
+                }
                 Cmd::none()
             }
             Msg::ApprovalDecision(approved) => self.decide_approval(approved),
@@ -1438,6 +1451,23 @@ impl PorygonTui {
                 }
                 match result {
                     Ok(()) => {
+                        if let Some(index) = self
+                            .pending_approval
+                            .as_ref()
+                            .and_then(|request| request.params["tool_call_id"].as_str())
+                            .and_then(|call_id| self.tool_ids.iter().rposition(|id| id == call_id))
+                        {
+                            if matches!(self.tool_calls[index].status, ToolStatus::Pending) {
+                                self.tool_calls[index].status = if matches!(
+                                    self.pending_approval_decision,
+                                    Some(crate::approval_client::ApprovalDecision::Approve)
+                                ) {
+                                    ToolStatus::Approved
+                                } else {
+                                    ToolStatus::Rejected
+                                };
+                            }
+                        }
                         self.work.approvals.retain(|item| {
                             item.id != id || item.decision_version.as_deref() != Some(&version)
                         });
@@ -1446,11 +1476,15 @@ impl PorygonTui {
                             .selected
                             .min(self.work.approvals.len().saturating_sub(1));
                         self.approval_in_flight = false;
+                        self.pending_approval_decision = None;
                         self.pending_approval = None;
                         self.show_approval_modal = false;
                         self.approval_is_stream = false;
-                        if let Some(next) = self.queued_stream_approvals.pop_front() {
-                            self.handle_update(Msg::ApprovalReceived(next, true));
+                        if self.run_unresolved {
+                            self.status.step = "decision accepted; awaiting run outcome".into();
+                        }
+                        if let Some((next, is_stream)) = self.queued_stream_approvals.pop_front() {
+                            self.handle_update(Msg::ApprovalReceived(next, is_stream));
                         }
                         Cmd::ShowToast(Toast::success(
                             "Daemon confirmed the decision; execution may still be pending.",
@@ -3041,7 +3075,7 @@ mod tests {
     #[test]
     fn sidebar_shows_when_chat_keeps_readable_width() {
         let mut app = PorygonTui::new();
-        app.terminal_width = 100;
+        app.terminal_width = 118;
 
         assert!(app.should_show_sidebar());
     }

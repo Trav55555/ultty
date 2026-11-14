@@ -60,6 +60,7 @@ impl PorygonTui {
         self.current_response = self.messages.len().checked_sub(1);
         self.submitting_parked_run = self.run_can_continue;
         self.run_can_continue = false;
+        self.approval_execution_pending = false;
         self.run_unresolved = true;
         self.waiting_response = true;
         self.stopping = false;
@@ -132,6 +133,28 @@ impl PorygonTui {
                     blast_radius: "unknown".into(), reversible: None,
                 }, true))
             }
+            Event::DurableApproval { id, decision_version, context } => {
+                if context["run_id"].as_str() != Some(&run_id) {
+                    self.error = Some("Approval belongs to another run; no decision was enabled.".into());
+                    return Cmd::ShowToast(Toast::error("Approval run identity does not match."));
+                }
+                let tool_name = context["tool_name"].as_str().unwrap_or_default().to_owned();
+                if let Some(index) = context["tool_call_id"].as_str().and_then(|call_id| {
+                    self.tool_ids.iter().rposition(|id| id == call_id)
+                }) {
+                    self.tool_calls[index].status = ToolStatus::Pending;
+                }
+                let reasoning = if context["reason"] == "missing_policy_binding" {
+                    "Execution is not enabled. Approve this exact action once, or deny it. This does not enable future commands."
+                } else {
+                    "Approve the exact action shown once, or deny it. Execution has not happened yet."
+                };
+                self.handle_update(Msg::ApprovalReceived(ApprovalRequest {
+                    scope: Some("tool_call".into()), decision_version: Some(decision_version), decision_stale: false,
+                    id, tool_name, params: context, risk_score: -1.0,
+                    reasoning: reasoning.into(), blast_radius: "unknown".into(), reversible: None,
+                }, false))
+            }
             Event::DecisionSent(id) => {
                 if self.pending_approval.as_ref().is_some_and(|r| r.id == id) {
                     self.show_approval_modal = false;
@@ -139,8 +162,8 @@ impl PorygonTui {
                     self.approval_in_flight = false;
                     self.approval_is_stream = false;
                     self.status.step = "decision sent; awaiting daemon outcome".into();
-                    if let Some(next) = self.queued_stream_approvals.pop_front() {
-                        return self.handle_update(Msg::ApprovalReceived(next, true));
+                    if let Some((next, is_stream)) = self.queued_stream_approvals.pop_front() {
+                        return self.handle_update(Msg::ApprovalReceived(next, is_stream));
                     }
                     return Cmd::ShowToast(Toast::warning(
                         "Decision sent. Tool outcome is not yet confirmed.",
@@ -167,13 +190,22 @@ impl PorygonTui {
                 result,
                 success,
             } => {
+                let resolves_pending_action = self.pending_approval.as_ref().is_some_and(|request| {
+                    request.params["tool_call_id"].as_str() == Some(&id)
+                });
                 if let Some(index) = self.tool_ids.iter().rposition(|current| current == &id) {
+                    let was_approved = matches!(self.tool_calls[index].status, ToolStatus::Approved);
                     self.tool_calls[index].status = if success {
                         ToolStatus::Completed
                     } else {
                         ToolStatus::Failed
                     };
                     self.tool_calls[index].result = Some(result);
+                    if was_approved || resolves_pending_action {
+                        self.approval_execution_pending = self.tool_calls.iter().any(|tool| {
+                            matches!(tool.status, ToolStatus::Approved)
+                        });
+                    }
                 }
                 Cmd::none()
             }
@@ -242,6 +274,7 @@ impl PorygonTui {
         if self.current_run.as_deref() != Some(&id) || !self.run_unresolved {
             return Cmd::none();
         }
+        self.approval_check_generation = self.approval_check_generation.wrapping_add(1);
         match result {
             Err(error) => {
                 self.error = Some(format!(
@@ -259,12 +292,21 @@ impl PorygonTui {
                     "completed" | "failed" | "cancelled" | "insufficient_oracle"
                 );
                 self.run_unresolved = !terminal;
-                self.run_can_continue = run.status == "awaiting_input";
-                self.status.step = format!("run {}", run.status);
+                self.run_can_continue = false;
+                self.status.step = match run.status.as_str() {
+                    "completed" if run.error.is_some() => "turn ended with error".into(),
+                    "completed" => "turn ended".into(),
+                    "paused_needs_review" | "insufficient_oracle" => {
+                        "blocked; inspect Attention (F4)".into()
+                    }
+                    "awaiting_input" => "checking pending actions before continuing".into(),
+                    _ => format!("run {}", run.status),
+                };
                 if let Some(error) = run.error {
                     self.error = Some(error);
                 }
                 if terminal {
+                    self.approval_execution_pending = false;
                     self.stopping = false;
                     self.end_native_stream();
                     if let Some(result) = run.result {
@@ -289,9 +331,70 @@ impl PorygonTui {
                     }
                     return Cmd::unsubscribe("agent-stream");
                 }
+                if run.status == "awaiting_input" {
+                    return self.inspect_run_approvals(id);
+                }
                 Cmd::none()
             }
         }
+    }
+
+    fn inspect_run_approvals(&self, id: String) -> Cmd<Msg> {
+        let Some(connection) = self.connection.clone() else {
+            return Cmd::none();
+        };
+        let epoch = self.run_epoch;
+        let generation = self.approval_check_generation;
+        Cmd::spawn(async move {
+            let result =
+                approval_client::fetch_pending(&connection.client, &connection.base_url, 200)
+                    .await
+                    .map_err(|error| error.to_string());
+            Msg::RunApprovalsObserved(id, epoch, generation, result)
+        })
+    }
+
+    pub(crate) fn observe_run_approvals(
+        &mut self,
+        id: String,
+        epoch: u64,
+        generation: u64,
+        result: Result<approval_client::PendingApprovals, String>,
+    ) -> Cmd<Msg> {
+        if self.current_run.as_deref() != Some(&id)
+            || epoch != self.run_epoch
+            || generation != self.approval_check_generation
+            || !self.run_unresolved
+            || self.waiting_response
+        {
+            return Cmd::none();
+        }
+        let pending = match result {
+            Ok(pending) => pending,
+            Err(error) => {
+                self.error = Some(format!("Could not inspect pending actions: {error}. Use /reconnect; your draft is preserved."));
+                self.status.step = "pending actions unconfirmed; /reconnect".into();
+                return Cmd::none();
+            }
+        };
+        if let Some(item) = pending
+            .items
+            .iter()
+            .find(|item| item.context.run_id.as_deref() == Some(&id))
+        {
+            self.status.step = "blocked; approval required (F4)".into();
+            self.run_can_continue = false;
+            return self.inspect_durable_approval(item);
+        }
+        if pending.count > pending.items.len() as u64 {
+            self.status.step = "pending actions list incomplete; inspect Attention (F4)".into();
+        } else if self.approval_execution_pending || self.pending_approval.is_some() {
+            self.status.step = "decision accepted; awaiting run outcome".into();
+        } else {
+            self.run_can_continue = true;
+            self.status.step = "waiting for your reply".into();
+        }
+        Cmd::none()
     }
 
     pub(crate) fn stop_native_run(&mut self) -> Cmd<Msg> {
@@ -342,12 +445,18 @@ impl PorygonTui {
             .clone()
             .expect("durable decision blocker requires a version");
         self.approval_in_flight = true;
+        let decision = if approved {
+            ApprovalDecision::Approve
+        } else {
+            ApprovalDecision::Deny
+        };
+        self.pending_approval_decision = Some(decision);
+        self.approval_execution_pending = approved
+            || self
+                .tool_calls
+                .iter()
+                .any(|tool| matches!(tool.status, ToolStatus::Approved));
         Cmd::spawn(async move {
-            let decision = if approved {
-                ApprovalDecision::Approve
-            } else {
-                ApprovalDecision::Deny
-            };
             let result = approval_client::submit_decision(
                 &connection.client,
                 &connection.base_url,
@@ -395,6 +504,20 @@ mod tests {
             error: None,
             metadata: json!({"conversation_id":"conv-a"}),
         }
+    }
+
+    fn confirm_no_pending_actions(app: &mut PorygonTui) {
+        app.observe_run_approvals(
+            "run-a".into(),
+            app.run_epoch,
+            app.approval_check_generation,
+            Ok(approval_client::PendingApprovals {
+                count: 0,
+                limit: 200,
+                updated_at: None,
+                items: Vec::new(),
+            }),
+        );
     }
 
     fn approval(id: &str) -> ApprovalRequest {
@@ -507,6 +630,7 @@ mod tests {
         let mut app = active();
         app.waiting_response = false;
         app.observe_run("run-a".into(), Ok(snapshot("awaiting_input")));
+        confirm_no_pending_actions(&mut app);
         app.input.set_value("my answer");
         let command = app.start_native_turn();
         assert!(!matches!(command, Cmd::None));
@@ -564,6 +688,7 @@ mod tests {
         let mut app = active();
         app.waiting_response = false;
         app.observe_run("run-a".into(), Ok(snapshot("awaiting_input")));
+        confirm_no_pending_actions(&mut app);
         app.input.set_value("reply");
         app.start_native_turn();
         app.native_event(
@@ -584,6 +709,7 @@ mod tests {
         let mut app = active();
         app.waiting_response = false;
         app.observe_run("run-a".into(), Ok(snapshot("awaiting_input")));
+        confirm_no_pending_actions(&mut app);
         app.stop_native_run();
         app.input.set_value("reply");
         app.start_native_turn();
@@ -596,6 +722,7 @@ mod tests {
         let mut app = active();
         app.waiting_response = false;
         app.observe_run("run-a".into(), Ok(snapshot("awaiting_input")));
+        confirm_no_pending_actions(&mut app);
         let old_epoch = app.run_epoch;
         app.input.set_value("reply");
         app.start_native_turn();
@@ -617,6 +744,7 @@ mod tests {
             app.run_epoch,
             Ok(snapshot("awaiting_input")),
         ));
+        confirm_no_pending_actions(&mut app);
         assert!(app.run_can_continue);
     }
 
@@ -631,5 +759,295 @@ mod tests {
         assert!(!app.stopping);
         app.stop_native_run();
         assert!(!app.stopping);
+    }
+
+    #[test]
+    fn test_completed_readback_reports_turn_end_without_claiming_task_success() {
+        let mut app = active();
+        app.observe_run("run-a".into(), Ok(snapshot("completed")));
+        assert_eq!(app.status.step, "turn ended");
+        assert!(!app.run_unresolved);
+    }
+
+    #[test]
+    fn test_paused_readback_reports_actionable_blocked_status() {
+        let mut app = active();
+        app.waiting_response = false;
+        app.observe_run("run-a".into(), Ok(snapshot("paused_needs_review")));
+        assert_eq!(app.status.step, "blocked; inspect Attention (F4)");
+        assert!(app.run_unresolved);
+        assert!(!app.run_can_continue);
+    }
+
+    fn durable_context(run_id: &str) -> serde_json::Value {
+        json!({
+            "tool_name": "run_argv", "params": {"argv": ["git", "status", "--short"]},
+            "run_id": run_id, "principal_id": "owner", "approval_expires_at": "2099-01-01T00:00:00Z",
+            "reason": "missing_policy_binding", "tool_call_id": "call-a",
+        })
+    }
+
+    #[test]
+    fn test_live_capability_request_preserves_stream_and_exact_action() {
+        let mut app = active();
+        let (sender, _receiver) = mpsc::channel(8);
+        app.stream_control = Some(sender);
+        app.input.set_value("keep next thought");
+        app.native_event(
+            "run-a".into(),
+            Event::ToolCall {
+                id: "call-a".into(),
+                name: "run_argv".into(),
+                arguments: json!({"argv":["git","status","--short"]}),
+            },
+        );
+        app.native_event(
+            "run-a".into(),
+            Event::DurableApproval {
+                id: "approval-a".into(),
+                decision_version: "version-a".into(),
+                context: durable_context("run-a"),
+            },
+        );
+        let request = app
+            .pending_approval
+            .as_ref()
+            .expect("durable request is actionable");
+        assert_eq!(request.decision_version.as_deref(), Some("version-a"));
+        assert_eq!(
+            request.params["params"]["argv"],
+            json!(["git", "status", "--short"])
+        );
+        assert!(request.reasoning.contains("exact action once"));
+        assert!(!app.approval_is_stream, "versioned decisions use HTTP");
+        assert!(app.show_approval_modal);
+        assert!(app.waiting_response);
+        assert!(app.stream_control.is_some());
+        assert!(matches!(app.tool_calls[0].status, ToolStatus::Pending));
+        app.decide_approval(true);
+        app.handle_update(Msg::ApprovalSubmitted(
+            "approval-a".into(),
+            "version-a".into(),
+            Ok(()),
+        ));
+        assert!(app.pending_approval.is_none());
+        assert!(
+            app.waiting_response,
+            "accepted decision does not finish execution"
+        );
+        assert!(app.approval_execution_pending);
+        assert!(!app.run_can_continue);
+        assert_eq!(app.input.current_value(), "keep next thought");
+        assert!(app.status.step.contains("awaiting run outcome"));
+        assert!(matches!(app.tool_calls[0].status, ToolStatus::Approved));
+        assert!(app.tool_calls[0].result.is_none());
+        app.native_event(
+            "run-a".into(),
+            Event::ToolResult {
+                id: "call-a".into(),
+                result: "clean".into(),
+                success: true,
+            },
+        );
+        assert!(matches!(app.tool_calls[0].status, ToolStatus::Completed));
+        assert!(!app.approval_execution_pending);
+        assert_eq!(app.input.current_value(), "keep next thought");
+    }
+
+    #[test]
+    fn test_live_capability_request_rejects_other_run_identity() {
+        let mut app = active();
+        app.native_event(
+            "run-a".into(),
+            Event::DurableApproval {
+                id: "approval-b".into(),
+                decision_version: "version-b".into(),
+                context: durable_context("run-b"),
+            },
+        );
+        assert!(app.pending_approval.is_none());
+        assert!(app
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("another run"));
+    }
+
+    #[test]
+    fn test_empty_approval_queue_does_not_reopen_turn_after_authorization() {
+        let mut app = active();
+        app.waiting_response = false;
+        app.approval_execution_pending = true;
+        app.observe_run("run-a".into(), Ok(snapshot("awaiting_input")));
+        confirm_no_pending_actions(&mut app);
+        assert!(!app.run_can_continue);
+        assert!(app.run_unresolved);
+        assert!(app.status.step.contains("awaiting run outcome"));
+    }
+
+    #[test]
+    fn test_pending_queue_failure_preserves_draft_and_blocks_continuation() {
+        let mut app = active();
+        app.waiting_response = false;
+        app.input.set_value("draft");
+        app.observe_run("run-a".into(), Ok(snapshot("awaiting_input")));
+        app.observe_run_approvals(
+            "run-a".into(),
+            app.run_epoch,
+            app.approval_check_generation,
+            Err("HTTP 500".into()),
+        );
+        assert!(!app.run_can_continue);
+        assert_eq!(app.input.current_value(), "draft");
+        assert!(app.status.step.contains("unconfirmed"));
+    }
+
+    #[test]
+    fn test_parked_run_opens_only_its_bound_pending_action() {
+        let mut app = active();
+        app.waiting_response = false;
+        app.observe_run("run-a".into(), Ok(snapshot("awaiting_input")));
+        let item = |id: &str, run_id: &str| {
+            serde_json::from_value(json!({
+            "id":id,"decision_version":"version-a","scope":"tool_call","source":"tool:run_argv",
+            "objective":"inspect repository","priority":"normal","context":durable_context(run_id),"created_at":"now",
+        })).unwrap()
+        };
+        app.observe_run_approvals(
+            "run-a".into(),
+            app.run_epoch,
+            app.approval_check_generation,
+            Ok(approval_client::PendingApprovals {
+                count: 2,
+                limit: 200,
+                updated_at: None,
+                items: vec![item("other", "run-b"), item("ours", "run-a")],
+            }),
+        );
+        assert_eq!(app.pending_approval.as_ref().unwrap().id, "ours");
+        assert!(app.show_approval_modal);
+        assert!(!app.run_can_continue);
+        assert!(app.status.step.contains("approval required"));
+    }
+
+    #[test]
+    fn test_incomplete_or_stale_pending_read_does_not_enable_reply() {
+        let mut app = active();
+        app.waiting_response = false;
+        app.observe_run("run-a".into(), Ok(snapshot("awaiting_input")));
+        let generation = app.approval_check_generation;
+        app.observe_run_approvals(
+            "run-a".into(),
+            app.run_epoch,
+            generation,
+            Ok(approval_client::PendingApprovals {
+                count: 201,
+                limit: 200,
+                updated_at: None,
+                items: Vec::new(),
+            }),
+        );
+        assert!(!app.run_can_continue);
+        assert!(app.status.step.contains("incomplete"));
+        app.observe_run("run-a".into(), Ok(snapshot("executing")));
+        app.observe_run_approvals(
+            "run-a".into(),
+            app.run_epoch,
+            generation,
+            Ok(approval_client::PendingApprovals {
+                count: 0,
+                limit: 200,
+                updated_at: None,
+                items: Vec::new(),
+            }),
+        );
+        assert!(!app.run_can_continue);
+        assert_eq!(app.status.step, "run executing");
+    }
+
+    #[test]
+    fn test_tool_result_before_http_confirmation_stays_authoritative() {
+        let mut app = active();
+        app.native_event(
+            "run-a".into(),
+            Event::ToolCall {
+                id: "call-a".into(),
+                name: "run_argv".into(),
+                arguments: json!({"argv":["git","status"]}),
+            },
+        );
+        app.native_event(
+            "run-a".into(),
+            Event::DurableApproval {
+                id: "approval-a".into(),
+                decision_version: "version-a".into(),
+                context: durable_context("run-a"),
+            },
+        );
+        app.decide_approval(true);
+        app.native_event(
+            "run-a".into(),
+            Event::ToolResult {
+                id: "call-a".into(),
+                result: "failed".into(),
+                success: false,
+            },
+        );
+        app.handle_update(Msg::ApprovalSubmitted(
+            "approval-a".into(),
+            "version-a".into(),
+            Ok(()),
+        ));
+        assert!(matches!(app.tool_calls[0].status, ToolStatus::Failed));
+        assert!(!app.approval_execution_pending);
+        assert!(app.waiting_response);
+    }
+
+    #[test]
+    fn test_terminal_run_before_decision_confirmation_keeps_terminal_status() {
+        let mut app = active();
+        app.native_event(
+            "run-a".into(),
+            Event::DurableApproval {
+                id: "approval-a".into(),
+                decision_version: "version-a".into(),
+                context: durable_context("run-a"),
+            },
+        );
+        app.decide_approval(true);
+        app.observe_run("run-a".into(), Ok(snapshot("completed")));
+        app.handle_update(Msg::ApprovalSubmitted(
+            "approval-a".into(),
+            "version-a".into(),
+            Ok(()),
+        ));
+        assert_eq!(app.status.step, "turn ended");
+        assert!(!app.run_unresolved);
+        assert!(!app.approval_execution_pending);
+    }
+
+    #[test]
+    fn test_queued_durable_request_keeps_http_transport() {
+        let mut app = active();
+        app.native_event(
+            "run-a".into(),
+            Event::Approval {
+                id: "legacy".into(),
+                tool: "shell".into(),
+                arguments: json!({}),
+            },
+        );
+        app.native_event(
+            "run-a".into(),
+            Event::DurableApproval {
+                id: "durable".into(),
+                decision_version: "version-a".into(),
+                context: durable_context("run-a"),
+            },
+        );
+        app.native_event("run-a".into(), Event::DecisionSent("legacy".into()));
+        assert_eq!(app.pending_approval.as_ref().unwrap().id, "durable");
+        assert!(!app.approval_is_stream);
+        assert!(app.show_approval_modal);
     }
 }

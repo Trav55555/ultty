@@ -28,6 +28,7 @@ pub struct MarkdownView {
     reparse_from: Option<ReparsePoint>,
     streaming: bool,
     wrap_width_cols: Option<usize>,
+    word_wrap_prose: bool,
     accessible: super::Accessible,
 }
 
@@ -239,6 +240,7 @@ impl MarkdownView {
             reparse_from,
             streaming: false,
             wrap_width_cols: None,
+            word_wrap_prose: false,
             accessible: super::Accessible::default(),
         }
     }
@@ -309,6 +311,15 @@ impl MarkdownView {
         self
     }
 
+    /// Wrap prose at whitespace while keeping code and quoted blocks intact.
+    ///
+    /// This affects prepared transcript rows only. Soft wraps do not add copy
+    /// newlines, and links and inline styles stay attached to their text.
+    pub fn word_wrap_prose(mut self) -> Self {
+        self.word_wrap_prose = true;
+        self
+    }
+
     /// Show link destinations alongside their labels for a text-only transcript.
     ///
     /// This creates a new view and leaves ordinary Markdown rendering unchanged.
@@ -355,8 +366,11 @@ impl MarkdownView {
                 rich = RichText::new().span("─".repeat(width), Style::default());
             }
             let dim = matches!(block, Block::CodeBlock { .. } | Block::BlockQuote { .. });
+            let word_wrap_prose = self.word_wrap_prose && !dim;
             let mut row = RichText::new();
             let mut links: Vec<(usize, usize, String)> = Vec::new();
+            let mut pending_space: Vec<(String, Style, Option<&str>, usize)> = Vec::new();
+            let mut pending_cells = 0usize;
             let targets: Vec<Option<&str>> = match block {
                 Block::Heading { spans, .. } | Block::Paragraph { spans } => {
                     spans.iter().map(|s| s.link.as_deref()).collect()
@@ -383,6 +397,15 @@ impl MarkdownView {
                 let mut style = rich.spans[span_index].style.clone();
                 style.dim |= dim;
                 if cluster == "\n" || cluster == "\r\n" {
+                    append_pending_whitespace(
+                        std::mem::take(&mut pending_space),
+                        &mut row,
+                        &mut links,
+                        &mut rows,
+                        &mut column,
+                        width,
+                    );
+                    pending_cells = 0;
                     let mut completed =
                         PreparedMarkdownRow::new(std::mem::replace(&mut row, RichText::new()));
                     completed.hard_break = true;
@@ -392,6 +415,79 @@ impl MarkdownView {
                     logical_column = 0;
                     continue;
                 }
+
+                if word_wrap_prose && cluster.chars().all(char::is_whitespace) {
+                    let space = if cluster == "\t" {
+                        " ".repeat(8 - logical_column % 8)
+                    } else {
+                        cluster.to_string()
+                    };
+                    let cells = UnicodeWidthStr::width(space.as_str());
+                    pending_cells += cells;
+                    logical_column += cells;
+                    pending_space.push((space, style, target, cells));
+                    continue;
+                }
+
+                if word_wrap_prose && !pending_space.is_empty() {
+                    let word_width = text[offset..]
+                        .graphemes(true)
+                        .take_while(|grapheme| !grapheme.chars().all(char::is_whitespace))
+                        .map(|grapheme| UnicodeWidthStr::width(grapheme).max(1))
+                        .sum::<usize>();
+                    if column > 0
+                        && column
+                            .saturating_add(pending_cells)
+                            .saturating_add(word_width)
+                            > width
+                    {
+                        if column.saturating_add(pending_cells) <= width {
+                            append_pending_whitespace(
+                                std::mem::take(&mut pending_space),
+                                &mut row,
+                                &mut links,
+                                &mut rows,
+                                &mut column,
+                                width,
+                            );
+                            let mut completed = PreparedMarkdownRow::new(std::mem::replace(
+                                &mut row,
+                                RichText::new(),
+                            ));
+                            completed.links = std::mem::take(&mut links);
+                            rows.push(completed);
+                            column = 0;
+                        } else {
+                            let mut completed = PreparedMarkdownRow::new(std::mem::replace(
+                                &mut row,
+                                RichText::new(),
+                            ));
+                            completed.links = std::mem::take(&mut links);
+                            rows.push(completed);
+                            column = 0;
+                            append_pending_whitespace(
+                                std::mem::take(&mut pending_space),
+                                &mut row,
+                                &mut links,
+                                &mut rows,
+                                &mut column,
+                                width,
+                            );
+                        }
+                        pending_cells = 0;
+                    } else {
+                        append_pending_whitespace(
+                            std::mem::take(&mut pending_space),
+                            &mut row,
+                            &mut links,
+                            &mut rows,
+                            &mut column,
+                            width,
+                        );
+                        pending_cells = 0;
+                    }
+                }
+
                 let expanded;
                 let cluster = if cluster == "\t" {
                     expanded = " ".repeat(8 - logical_column % 8);
@@ -409,30 +505,19 @@ impl MarkdownView {
                         rows.push(completed);
                         column = 0;
                     }
-                    if let Some(target) = target.filter(|target| target.len() <= 2048) {
-                        let start: usize = row.spans.iter().map(|span| span.text.len()).sum();
-                        let end = start + grapheme.len();
-                        if let Some(last) = links
-                            .last_mut()
-                            .filter(|last| last.1 == start && last.2 == target)
-                        {
-                            last.1 = end;
-                        } else {
-                            links.push((start, end, target.to_string()));
-                        }
-                    }
-                    if let Some(last) = row.spans.last_mut().filter(|last| last.style == style) {
-                        last.text.push_str(grapheme);
-                    } else {
-                        row.spans.push(ultty_protocol::Span {
-                            text: grapheme.into(),
-                            style: style.clone(),
-                        });
-                    }
+                    append_prepared_grapheme(&mut row, &mut links, &style, target, grapheme);
                     column += cells;
                     logical_column += cells;
                 }
             }
+            append_pending_whitespace(
+                pending_space,
+                &mut row,
+                &mut links,
+                &mut rows,
+                &mut column,
+                width,
+            );
             let mut completed = PreparedMarkdownRow::new(row);
             completed.hard_break = !final_block;
             completed.links = links;
@@ -1315,6 +1400,59 @@ fn block_content(block: &Block) -> Content {
     }
 }
 
+fn append_pending_whitespace<'a>(
+    pending: Vec<(String, Style, Option<&'a str>, usize)>,
+    row: &mut RichText,
+    links: &mut Vec<(usize, usize, String)>,
+    rows: &mut Vec<PreparedMarkdownRow>,
+    column: &mut usize,
+    width: usize,
+) {
+    for (space, style, target, _) in pending {
+        for grapheme in space.graphemes(true) {
+            let cells = UnicodeWidthStr::width(grapheme).max(1);
+            if *column > 0 && (*column).saturating_add(cells) > width {
+                let mut completed =
+                    PreparedMarkdownRow::new(std::mem::replace(row, RichText::new()));
+                completed.links = std::mem::take(links);
+                rows.push(completed);
+                *column = 0;
+            }
+            append_prepared_grapheme(row, links, &style, target, grapheme);
+            *column += cells;
+        }
+    }
+}
+
+fn append_prepared_grapheme(
+    row: &mut RichText,
+    links: &mut Vec<(usize, usize, String)>,
+    style: &Style,
+    target: Option<&str>,
+    grapheme: &str,
+) {
+    if let Some(target) = target.filter(|target| target.len() <= 2048) {
+        let start: usize = row.spans.iter().map(|span| span.text.len()).sum();
+        let end = start + grapheme.len();
+        if let Some(last) = links
+            .last_mut()
+            .filter(|last| last.1 == start && last.2 == target)
+        {
+            last.1 = end;
+        } else {
+            links.push((start, end, target.to_string()));
+        }
+    }
+    if let Some(last) = row.spans.last_mut().filter(|last| last.style == *style) {
+        last.text.push_str(grapheme);
+    } else {
+        row.spans.push(ultty_protocol::Span {
+            text: grapheme.into(),
+            style: style.clone(),
+        });
+    }
+}
+
 fn count_lines(text: &str) -> usize {
     if text.is_empty() {
         1
@@ -1851,6 +1989,130 @@ mod tests {
         }];
         let rows: Vec<_> = emoji.prepared_rows(2).iter().map(text).collect();
         assert_eq!(rows, ["👩\u{200d}💻", "A"]);
+    }
+
+    #[test]
+    fn word_wrapping_prose_keeps_words_styles_and_soft_break_copy_text() {
+        let rows = MarkdownView::new("**alpha** beta gamma")
+            .word_wrap_prose()
+            .prepared_rows(8);
+        let rendered: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                row.content
+                    .spans
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect::<String>()
+            })
+            .collect();
+
+        assert_eq!(rendered, ["alpha ", "beta ", "gamma"]);
+        assert!(rows.iter().all(|row| !row.hard_break));
+        assert!(rows[0].content.spans.iter().any(|span| span.style.bold));
+        assert_eq!(rendered.concat(), "alpha beta gamma");
+        assert!(rows.iter().all(|row| {
+            let text: String = row
+                .content
+                .spans
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect();
+            UnicodeWidthStr::width(text.as_str()) <= 8
+        }));
+    }
+
+    #[test]
+    fn word_wrapping_preserves_long_whitespace_and_exact_width_offsets() {
+        let cases = [
+            ("12345678 next", 8, "12345678 next"),
+            ("one          two", 8, "one          two"),
+            ("alpha\tbeta", 8, "alpha   beta"),
+        ];
+        for (source, width, expected) in cases {
+            let rows = MarkdownView::new(source)
+                .word_wrap_prose()
+                .prepared_rows(width);
+            let rendered = rows
+                .iter()
+                .map(|row| {
+                    row.content
+                        .spans
+                        .iter()
+                        .map(|span| span.text.as_str())
+                        .collect::<String>()
+                })
+                .collect::<String>();
+
+            assert_eq!(rendered, expected, "source={source:?}");
+            assert!(rows.iter().all(|row| {
+                let text: String = row
+                    .content
+                    .spans
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect();
+                UnicodeWidthStr::width(text.as_str()) <= width
+            }));
+        }
+    }
+
+    #[test]
+    fn word_wrapping_prose_preserves_link_ranges_and_code_whitespace() {
+        let linked = MarkdownView::new("Read [quick start](https://example.test/start)")
+            .with_visible_link_targets()
+            .word_wrap_prose()
+            .prepared_rows(10);
+        let linked_text: Vec<_> = linked
+            .iter()
+            .map(|row| {
+                row.content
+                    .spans
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect::<String>()
+            })
+            .collect();
+        let targets: Vec<_> = linked
+            .iter()
+            .flat_map(|row| {
+                row.clone()
+                    .with_selection_metadata("1:0:0".into())
+                    .native_metadata()
+            })
+            .filter(|(key, _)| key.starts_with("transcript-link-v1-"))
+            .map(|(_, value)| value)
+            .collect();
+        assert!(linked_text
+            .concat()
+            .contains("quick start (https://example.test/start)"));
+        assert!(targets
+            .iter()
+            .all(|value| value.ends_with(":https://example.test/start")));
+        assert!(
+            targets.len() >= 2,
+            "link should carry across a soft wrap: {targets:?}"
+        );
+
+        let source = "```\n  alpha   beta\n```";
+        let ordinary = MarkdownView::new(source).prepared_rows(6);
+        let wrapped = MarkdownView::new(source).word_wrap_prose().prepared_rows(6);
+        assert_eq!(
+            ordinary
+                .iter()
+                .map(|row| (&row.content, row.hard_break))
+                .collect::<Vec<_>>(),
+            wrapped
+                .iter()
+                .map(|row| (&row.content, row.hard_break))
+                .collect::<Vec<_>>()
+        );
+        let wrapped_code = wrapped
+            .iter()
+            .flat_map(|row| &row.content.spans)
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        assert!(wrapped_code.contains("  alpha   beta"), "{wrapped_code:?}");
     }
 
     #[test]

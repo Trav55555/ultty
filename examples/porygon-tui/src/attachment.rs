@@ -186,6 +186,21 @@ mod tests {
         assert_eq!(app.messages[0].content, "B history");
         assert_eq!(app.current_run.as_deref(), Some("run-B"));
         assert!(app.run_unresolved);
+        assert!(
+            !app.run_can_continue,
+            "pending actions must be inspected before replying"
+        );
+        app.observe_run_approvals(
+            "run-B".into(),
+            app.run_epoch,
+            app.approval_check_generation,
+            Ok(crate::approval_client::PendingApprovals {
+                count: 0,
+                limit: 200,
+                updated_at: None,
+                items: Vec::new(),
+            }),
+        );
         assert!(app.run_can_continue);
         assert!(!app.waiting_response);
         app.run_unresolved = false;

@@ -6,9 +6,11 @@ use crate::sidebar::sidebar_view;
 use crate::types::{ApprovalRequest, FileTreeEntry};
 use crate::{Msg, PorygonTui};
 
-const SIDEBAR_MIN_TERMINAL_WIDTH: u16 = 100;
 const SIDEBAR_WIDTH_CELLS: u16 = 34;
 const MESSAGE_CHROME_CELLS: u16 = 4;
+const MIN_TRANSCRIPT_CONTENT_CELLS: u16 = 80;
+const SIDEBAR_MIN_TERMINAL_WIDTH: u16 =
+    SIDEBAR_WIDTH_CELLS + MESSAGE_CHROME_CELLS + MIN_TRANSCRIPT_CONTENT_CELLS;
 
 pub(crate) fn format_file_tree(entry: &FileTreeEntry, prefix: &str, is_last: bool) -> String {
     let connector = if is_last { "└── " } else { "├── " };
@@ -178,15 +180,39 @@ impl PorygonTui {
         } else {
             format!("{:.0}%", request.risk_score * 100.0)
         };
+        let durable_tool_call =
+            !self.approval_is_stream && request.scope.as_deref() == Some("tool_call");
+        let durable_context = durable_tool_call.then_some(&request.params);
         let scope = if self.approval_is_stream {
             "current stream"
+        } else if durable_context
+            .and_then(|context| context.get("reason"))
+            .and_then(serde_json::Value::as_str)
+            == Some("missing_policy_binding")
+        {
+            "this invocation only"
         } else {
             "durable request"
         };
-        let content = format!("Request: {}\nScope: {scope}\nTool: {}\nReason: {}\nRisk: {risk}\nAffected scope: {}\nReversible: {}\nArguments:\n{}",
-            request.id, request.tool_name, request.reasoning, request.blast_radius,
+        let context_line = |key: &str, label: &str| {
+            durable_context
+                .and_then(|context| context.get(key))
+                .and_then(serde_json::Value::as_str)
+                .map(|value| format!("{label}: {value}\n"))
+                .unwrap_or_default()
+        };
+        let arguments = durable_context
+            .and_then(|context| context.get("params"))
+            .unwrap_or(&request.params);
+        let content = format!("Tool: {}\nArguments:\n{}\nScope: {scope}\n{}{}{}Request: {}\nReason: {}\nRisk: {risk}\nAffected scope: {}\nReversible: {}",
+            request.tool_name,
+            serde_json::to_string_pretty(arguments).unwrap_or_else(|error| format!("Could not display arguments: {error}")),
+            context_line("run_id", "Run"),
+            context_line("principal_id", "Principal"),
+            context_line("approval_expires_at", "Expires"),
+            request.id, request.reasoning, request.blast_radius,
             match request.reversible {Some(true)=>"yes",Some(false)=>"no",None=>"unknown"},
-            serde_json::to_string_pretty(&request.params).unwrap_or_else(|error| format!("Could not display arguments: {error}")));
+        );
         crate::work_views::wrap(&content, width)
     }
 
@@ -366,6 +392,13 @@ impl PorygonTui {
     }
 
     pub(crate) fn status_step_text(&self) -> String {
+        if self.pending_approval.is_some() {
+            return if self.status.step.contains("approval required") {
+                self.status.step.clone()
+            } else {
+                "approval required (F4)".into()
+            };
+        }
         if self.stopping {
             return "stop requested; awaiting daemon".into();
         }
@@ -765,29 +798,40 @@ mod tests {
             ultty_protocol::AppMessage::SetContent { content: ultty_protocol::Content::RichText(text), .. }
             if text.spans.iter().any(|span| span.text.trim() == "}"))));
 
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
-        terminal
-            .draw(|frame| {
-                app.approval_page_view(app.pending_approval.as_ref().unwrap())
-                    .render_ansi(frame, frame.area())
-            })
-            .unwrap();
-        let screen: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        assert!(screen.contains("TAIL-ARGUMENT"), "{screen}");
+        let render_screen = |app: &PorygonTui| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 12)).unwrap();
+            terminal
+                .draw(|frame| {
+                    app.approval_page_view(app.pending_approval.as_ref().unwrap())
+                        .render_ansi(frame, frame.area())
+                })
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        let final_page = render_screen(&app);
+        assert!(final_page.contains("}"), "{final_page}");
         let end = app.approval_scroll;
         for _ in 0..20 {
             app.handle_event(&composer_key(Key::Down, false));
         }
         assert_eq!(app.approval_scroll, end);
-        app.handle_event(&composer_key(Key::Up, false));
-        assert_eq!(app.approval_scroll, end - 1);
+        let mut action_reachable = false;
+        while app.approval_scroll > 0 && !action_reachable {
+            app.handle_event(&composer_key(Key::Up, false));
+            let page = render_screen(&app);
+            action_reachable = page.contains("TAIL-ARGUMENT");
+        }
+        assert!(
+            action_reachable,
+            "action arguments were not reachable by paging"
+        );
         assert!(matches!(
             app.handle_event(&composer_key(Key::Char('n'), false)),
             Some(Msg::ApprovalDecision(false))
@@ -996,16 +1040,77 @@ mod tests {
     }
 
     #[test]
-    fn message_content_width_reserves_sidebar_when_visible() {
+    fn sidebar_breakpoint_keeps_transcript_content_width_usable() {
         let mut app = PorygonTui::new();
-        app.terminal_width = 99;
-        let narrow = app.message_content_width_cols();
-        app.terminal_width = 100;
-        let with_sidebar = app.message_content_width_cols();
+        let widths = [99, 100, 102];
+        let content_widths: Vec<_> = widths
+            .into_iter()
+            .map(|width| {
+                app.terminal_width = width;
+                app.message_content_width_cols()
+            })
+            .collect();
 
-        assert!(
-            with_sidebar < narrow,
-            "with_sidebar={with_sidebar} narrow={narrow}"
-        );
+        assert_eq!(content_widths, [95, 96, 98]);
+        app.terminal_width = 117;
+        assert!(!app.should_show_sidebar());
+        app.terminal_width = 118;
+        assert!(app.should_show_sidebar());
+        assert_eq!(app.message_content_width_cols(), 80);
+    }
+
+    #[test]
+    fn durable_approval_shows_action_context_before_arguments() {
+        let mut app = PorygonTui::new();
+        app.terminal_width = 60;
+        let request = ApprovalRequest {
+            scope: Some("tool_call".into()),
+            decision_version: Some("version-1".into()),
+            decision_stale: false,
+            id: "approval-1".into(),
+            tool_name: "shell".into(),
+            params: serde_json::json!({
+                "run_id": "run-1",
+                "principal_id": "owner-1",
+                "approval_expires_at": "2099-01-01T00:00:00Z",
+                "reason": "missing_policy_binding",
+                "call_hash": "low-level-hash",
+                "params": {"argv": ["git", "status", "--short"]}
+            }),
+            risk_score: -1.0,
+            reasoning: "Authorize this exact action once".into(),
+            blast_radius: "unknown".into(),
+            reversible: None,
+        };
+
+        let rows = app.approval_rows(&request).join("\n");
+        assert!(rows.find("Arguments:").unwrap() < rows.find("Run: run-1").unwrap());
+        assert!(rows.contains("Principal: owner-1"));
+        assert!(rows.contains("Expires: 2099-01-01T00:00:00Z"));
+        assert!(rows.contains("Scope: this invocation only"));
+        assert!(rows.contains("git"));
+        assert!(!rows.contains("low-level-hash"));
+        assert!(rows.contains("Authorize this exact action once"));
+    }
+
+    #[test]
+    fn pending_approval_status_precedes_stream_token_count() {
+        let mut app = PorygonTui::new();
+        app.waiting_response = true;
+        app.stream_token_count = 42;
+        app.status.step = "blocked; approval required (F4)".into();
+        app.pending_approval = Some(ApprovalRequest {
+            scope: Some("tool_call".into()),
+            decision_version: Some("version-1".into()),
+            decision_stale: false,
+            id: "approval-1".into(),
+            tool_name: "shell".into(),
+            params: serde_json::json!({}),
+            risk_score: -1.0,
+            reasoning: "Approve once".into(),
+            blast_radius: "unknown".into(),
+            reversible: None,
+        });
+        assert_eq!(app.status_step_text(), "blocked; approval required (F4)");
     }
 }

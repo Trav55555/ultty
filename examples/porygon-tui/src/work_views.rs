@@ -2,7 +2,7 @@ use ulttui::prelude::*;
 use ulttui::widgets::RichText;
 use unicode_width::UnicodeWidthChar;
 
-use crate::work::{attention, category, AttentionItem, Page};
+use crate::work::{attention, category, status_label, AttentionItem, Page};
 use crate::PorygonTui;
 
 pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -44,7 +44,7 @@ fn rows(app: &PorygonTui) -> (Vec<String>, usize) {
                         "{} [{} / {}] {} | {}",
                         if i == state.selected { ">" } else { " " },
                         category(&run.status),
-                        run.status,
+                        status_label(&run.status),
                         run.objective,
                         run.id
                     ),
@@ -75,7 +75,7 @@ fn rows(app: &PorygonTui) -> (Vec<String>, usize) {
                     }
                     AttentionItem::Run(index) => {
                         let r = &state.runs[*index];
-                        format!("{}: {} | {}", r.status, r.objective, r.id)
+                        format!("{}: {} | {}", status_label(&r.status), r.objective, r.id)
                     }
                 };
                 rows.extend(wrap(
@@ -93,7 +93,7 @@ fn rows(app: &PorygonTui) -> (Vec<String>, usize) {
             {
                 for line in [
                     format!("Objective: {}", run.objective),
-                    format!("Run: {} | {}", run.id, run.status),
+                    format!("Run: {} | {}", run.id, status_label(&run.status)),
                     format!("Result: {}", run.result.as_deref().unwrap_or("unknown")),
                     format!("Error: {}", run.error.as_deref().unwrap_or("none reported")),
                     "Accepted: unknown | Merged: unknown".into(),

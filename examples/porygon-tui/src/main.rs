@@ -157,12 +157,16 @@ pub(crate) struct PorygonTui {
     pub(crate) stopping: bool,
     pub(crate) approval_in_flight: bool,
     pub(crate) approval_is_stream: bool,
+    /// A confirmed approval permits execution, not another user turn.
+    pub(crate) approval_execution_pending: bool,
+    pub(crate) pending_approval_decision: Option<approval_client::ApprovalDecision>,
     pub(crate) tool_ids: Vec<String>,
     pub(crate) current_response: Option<usize>,
     pub(crate) run_can_continue: bool,
     pub(crate) submitting_parked_run: bool,
     pub(crate) run_epoch: u64,
-    pub(crate) queued_stream_approvals: std::collections::VecDeque<ApprovalRequest>,
+    pub(crate) approval_check_generation: u64,
+    pub(crate) queued_stream_approvals: std::collections::VecDeque<(ApprovalRequest, bool)>,
 }
 
 impl PorygonTui {
@@ -242,11 +246,14 @@ impl PorygonTui {
             stopping: false,
             approval_in_flight: false,
             approval_is_stream: false,
+            approval_execution_pending: false,
+            pending_approval_decision: None,
             tool_ids: Vec::new(),
             current_response: None,
             run_can_continue: false,
             submitting_parked_run: false,
             run_epoch: 0,
+            approval_check_generation: 0,
             queued_stream_approvals: std::collections::VecDeque::new(),
         }
     }
@@ -304,6 +311,12 @@ enum Msg {
     NativeEvent(String, u64, native_stream::Event),
     InspectRun,
     RunObserved(String, u64, Result<connection::RunSnapshot, String>),
+    RunApprovalsObserved(
+        String,
+        u64,
+        u64,
+        Result<approval_client::PendingApprovals, String>,
+    ),
     StopObserved(String, u64, Result<connection::RunSnapshot, String>),
     SessionSaved,
     SessionForked(String),
