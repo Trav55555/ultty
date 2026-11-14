@@ -25,11 +25,18 @@ pub async fn fetch_status(
     anyhow::ensure!(body.get("model").is_some(), "Invalid daemon TUI status");
     let (cpu, ram) = get_system_stats();
     Ok(AgentStatus {
-        model: body["model"]["name"]
+        model: if body["model"]["provider"].as_str() == Some("unknown") {
+            "not reported".into()
+        } else {
+            body["model"]["name"]
+                .as_str()
+                .unwrap_or("not reported")
+                .to_string()
+        },
+        context_quality: body["context_budget"]["quality"]
             .as_str()
             .unwrap_or("unknown")
             .to_string(),
-        context_quality: "unknown".into(),
         pressure: "unknown".into(),
         cpu_usage: unit_fraction(cpu),
         ram_usage: unit_fraction(ram),

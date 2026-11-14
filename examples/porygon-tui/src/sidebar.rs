@@ -467,6 +467,29 @@ fn moon_view(_app: &PorygonTui) -> Column {
         )
 }
 
+fn activity_label(app: &PorygonTui) -> &'static str {
+    if !app.connected {
+        "OFFLINE"
+    } else if app.pending_approval.is_some() || app.approval_in_flight {
+        "REVIEW"
+    } else if app.run_unresolved {
+        "UNKNOWN"
+    } else if app.stopping {
+        "STOPPING"
+    } else if app.waiting_response || app.current_run.is_some() {
+        "RUNNING"
+    } else {
+        "IDLE"
+    }
+}
+
+fn reported_money(value: Option<f64>) -> String {
+    match value.filter(|value| value.is_finite() && *value >= 0.0) {
+        Some(value) => format!("${value:.2}"),
+        None => "not reported".into(),
+    }
+}
+
 pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
     let conn_status = if app.connected {
         RichText::new()
@@ -488,23 +511,6 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
         _ => ("◆", Color::Rgb(247, 247, 247), "UNKNOWN"),
     };
 
-    let ratio = if app.status.budget_usd > 0.0 {
-        app.status.cost_usd / app.status.budget_usd
-    } else {
-        0.0
-    };
-    let bar_w = 10usize;
-    let filled = (ratio.clamp(0.0, 1.0) * bar_w as f64).round() as usize;
-    let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(bar_w - filled));
-    let bar_color = if ratio > 0.8 {
-        Color::Rgb(255, 93, 110)
-    } else if ratio > 0.5 {
-        Color::Rgb(249, 226, 175)
-    } else {
-        Color::Rgb(58, 224, 221)
-    };
-    let pct = (ratio * 100.0).round() as u32;
-
     let dim = Style {
         dim: true,
         ..Style::new()
@@ -522,7 +528,7 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
                 .align_center()
                 .width(Dimension::Percent(100.0))
                 .child(RichText::new().span(
-                    "▚▚ CASSETTE STATUS ▚▚",
+                    "WORK STATUS",
                     Style::new().fg(Color::Rgb(255, 93, 110)).bold(),
                 )),
         )
@@ -540,7 +546,11 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
             RichText::new()
                 .span("MCP:    ", label_style.clone())
                 .span(
-                    format!("{}/{}", app.mcp_healthy_count, app.mcp_server_count),
+                    if app.mcp_server_count == 0 {
+                        "inspect with /mcp".into()
+                    } else {
+                        format!("{}/{}", app.mcp_healthy_count, app.mcp_server_count)
+                    },
                     Style::new().fg(if app.mcp_server_count > 0 && app.mcp_healthy_count == 0 {
                         Color::Rgb(255, 93, 110)
                     } else {
@@ -560,27 +570,29 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
         )
         .child(
             RichText::new()
-                .span("MODE:   ", label_style.clone())
-                .span("ACTIVE", Style::new().fg(Color::Rgb(255, 93, 110)).bold())
+                .span("STATE:  ", label_style.clone())
+                .span(
+                    activity_label(app),
+                    Style::new().fg(Color::Rgb(255, 93, 110)).bold(),
+                )
                 .fill_width(),
         )
         .child(Divider::horizontal())
         .child(
             RichText::new()
                 .span("BUDGET: ", label_style.clone())
-                .span(format!("${:.2}", app.status.budget_usd), Style::default())
+                .span(reported_money(app.status.budget_usd), Style::default())
                 .fill_width(),
         )
         .child(
             RichText::new()
-                .span("USAGE:  ", label_style.clone())
-                .span(&bar, Style::new().fg(bar_color))
-                .span(format!(" {pct}%"), dim.clone())
+                .span("COST:   ", label_style.clone())
+                .span(reported_money(app.status.cost_usd), Style::default())
                 .fill_width(),
         )
         .child(
             RichText::new()
-                .span("CPU     ", label_style.clone())
+                .span("LOCAL LOAD 1m ", label_style.clone())
                 .span(
                     usage_bar(app.status.cpu_usage),
                     Style::new().fg(if app.status.cpu_usage > 0.8 {
@@ -597,7 +609,7 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
         )
         .child(
             RichText::new()
-                .span("RAM     ", label_style.clone())
+                .span("LOCAL RAM ", label_style.clone())
                 .span(
                     usage_bar(app.status.ram_usage),
                     Style::new().fg(if app.status.ram_usage > 0.8 {
@@ -712,6 +724,31 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn absent_telemetry_is_not_a_zero_cost_or_an_invented_budget() {
+        let status = crate::types::AgentStatus::default();
+        assert_eq!(super::reported_money(status.cost_usd), "not reported");
+        assert_eq!(super::reported_money(status.budget_usd), "not reported");
+        assert_eq!(super::reported_money(Some(0.0)), "$0.00");
+        assert_eq!(super::reported_money(Some(f64::NAN)), "not reported");
+        assert_eq!(status.model, "not reported");
+        assert_eq!(status.context_quality, "unknown");
+    }
+
+    #[test]
+    fn activity_follows_connection_and_run_state() {
+        let mut app = super::PorygonTui::new();
+        assert_eq!(super::activity_label(&app), "OFFLINE");
+        app.connected = true;
+        assert_eq!(super::activity_label(&app), "IDLE");
+        app.waiting_response = true;
+        assert_eq!(super::activity_label(&app), "RUNNING");
+        app.approval_in_flight = true;
+        assert_eq!(super::activity_label(&app), "REVIEW");
+        app.approval_in_flight = false;
+        app.run_unresolved = true;
+        assert_eq!(super::activity_label(&app), "UNKNOWN");
+    }
 
     #[test]
     fn usage_bar_saturates_out_of_range_input() {
