@@ -268,6 +268,7 @@ enum Msg {
     ConversationLoaded(String, u64, Result<Vec<ChatMessage>, String>),
     Init,
     SendMessage,
+    RunPalette(String),
     PollConnection,
     PollStatus,
     ConnectionChecked(Result<(), String>),

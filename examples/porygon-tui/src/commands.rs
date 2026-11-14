@@ -638,7 +638,10 @@ impl CommandRegistry {
                 };
                 let score = [cmd.name, alias, cmd.description]
                     .iter()
-                    .filter_map(|text| fuzzy_score(&text.to_lowercase(), &query))
+                    .enumerate()
+                    .filter_map(|(field, text)| {
+                        fuzzy_score(&text.to_lowercase(), &query).map(|score| score + field * 100)
+                    })
                     .min()?;
                 Some((score, index, cmd))
             })

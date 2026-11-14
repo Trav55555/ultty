@@ -1257,6 +1257,13 @@ impl PorygonTui {
                     Cmd::batch(cmds)
                 }
             }
+            Msg::RunPalette(command) => {
+                if let Some(action) = self.command_registry.parse(&command) {
+                    self.handle_command_action(action)
+                } else {
+                    Cmd::ShowToast(Toast::warning("Unknown command; draft preserved."))
+                }
+            }
             Msg::SendMessage => {
                 let text = self.input.current_value().to_string();
                 if text.trim().is_empty() {
