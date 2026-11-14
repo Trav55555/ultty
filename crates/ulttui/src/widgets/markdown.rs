@@ -1400,8 +1400,8 @@ fn block_content(block: &Block) -> Content {
     }
 }
 
-fn append_pending_whitespace<'a>(
-    pending: Vec<(String, Style, Option<&'a str>, usize)>,
+fn append_pending_whitespace(
+    pending: Vec<(String, Style, Option<&str>, usize)>,
     row: &mut RichText,
     links: &mut Vec<(usize, usize, String)>,
     rows: &mut Vec<PreparedMarkdownRow>,

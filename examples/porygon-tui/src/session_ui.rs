@@ -451,7 +451,8 @@ impl PorygonTui {
             ApprovalDecision::Deny
         };
         self.pending_approval_decision = Some(decision);
-        self.approval_execution_pending = approved
+        self.approval_execution_pending = self.approval_execution_pending
+            || approved
             || self
                 .tool_calls
                 .iter()
@@ -1049,5 +1050,41 @@ mod tests {
         assert_eq!(app.pending_approval.as_ref().unwrap().id, "durable");
         assert!(!app.approval_is_stream);
         assert!(app.show_approval_modal);
+    }
+
+    #[test]
+    fn test_later_denial_preserves_earlier_unobserved_approved_execution() {
+        let mut app = active();
+        app.waiting_response = false;
+        app.input.set_value("keep next thought");
+        for (id, approved) in [("approval-a", true), ("approval-b", false)] {
+            let mut request = approval(id);
+            request.params = durable_context("run-a");
+            app.handle_update(Msg::ApprovalReceived(request, false));
+            app.decide_approval(approved);
+            app.handle_update(Msg::ApprovalSubmitted(
+                id.into(),
+                "fixture-version".into(),
+                Ok(()),
+            ));
+        }
+        assert!(
+            app.tool_calls.is_empty(),
+            "attached approvals have no local tool rows"
+        );
+        assert!(
+            app.approval_execution_pending,
+            "denying B cannot finish accepted A"
+        );
+        app.observe_run("run-a".into(), Ok(snapshot("awaiting_input")));
+        confirm_no_pending_actions(&mut app);
+        assert!(
+            !app.run_can_continue,
+            "an empty queue cannot prove A finished"
+        );
+        assert_eq!(app.input.current_value(), "keep next thought");
+        app.observe_run("run-a".into(), Ok(snapshot("completed")));
+        assert!(!app.approval_execution_pending);
+        assert!(!app.run_unresolved);
     }
 }
