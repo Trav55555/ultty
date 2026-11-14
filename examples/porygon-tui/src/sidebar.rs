@@ -371,35 +371,6 @@ fn weather_view(app: &PorygonTui) -> Column {
     panel
 }
 
-fn usage_percent(fraction: f64) -> Option<u32> {
-    fraction
-        .is_finite()
-        .then(|| (fraction.clamp(0.0, 1.0) * 100.0).round() as u32)
-}
-
-fn budget_usage_text(cost_usd: f64, budget_usd: f64) -> String {
-    let cost = if cost_usd.is_finite() {
-        format!("${:.2}", cost_usd.max(0.0))
-    } else {
-        "n/a".into()
-    };
-    let budget = if budget_usd.is_finite() && budget_usd > 0.0 {
-        format!("${budget_usd:.2}")
-    } else {
-        "n/a".into()
-    };
-
-    if !cost_usd.is_finite() || !budget_usd.is_finite() || budget_usd <= 0.0 {
-        return format!("{cost} / {budget}");
-    }
-    if cost_usd >= budget_usd {
-        return format!("{cost} / {budget} (over budget)");
-    }
-
-    let percent = ((cost_usd.max(0.0) / budget_usd) * 100.0).round() as u32;
-    format!("{cost} / {budget} ({percent}%)")
-}
-
 fn moon_enabled_from_env() -> bool {
     std::env::var_os("PORYGON_MOON").is_some_and(|value| value == "1")
 }
@@ -488,6 +459,31 @@ fn moon_view(_app: &PorygonTui) -> Column {
         )
 }
 
+fn activity_label(app: &PorygonTui) -> &'static str {
+    if !app.connected {
+        "OFFLINE"
+    } else if app.pending_approval.is_some() || app.approval_in_flight {
+        "REVIEW"
+    } else if app.stopping {
+        "STOPPING"
+    } else if app.waiting_response {
+        "RUNNING"
+    } else if app.run_can_continue {
+        "WAITING"
+    } else if app.run_unresolved {
+        "UNKNOWN"
+    } else {
+        "IDLE"
+    }
+}
+
+fn reported_money(value: Option<f64>) -> String {
+    match value.filter(|value| value.is_finite() && *value >= 0.0) {
+        Some(value) => format!("${value:.2}"),
+        None => "not reported".into(),
+    }
+}
+
 pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
     let conn_status = if app.connected {
         RichText::new()
@@ -509,13 +505,11 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
         _ => ("◆", Color::Rgb(247, 247, 247), "UNKNOWN"),
     };
 
+    let dim = Style {
+        dim: true,
+        ..Style::new()
+    };
     let label_style = Style::new().fg(Color::Rgb(136, 136, 136));
-    let cpu_text = usage_percent(app.status.cpu_usage)
-        .map(|percent| format!("{percent}%"))
-        .unwrap_or_else(|| "n/a".into());
-    let ram_text = usage_percent(app.status.ram_usage)
-        .map(|percent| format!("{percent}%"))
-        .unwrap_or_else(|| "n/a".into());
 
     let mut cassette = Column::new()
         .bg(Color::Rgb(26, 26, 29))
@@ -528,7 +522,7 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
                 .align_center()
                 .width(Dimension::Percent(100.0))
                 .child(RichText::new().span(
-                    "▚▚ CASSETTE STATUS ▚▚",
+                    "WORK STATUS",
                     Style::new().fg(Color::Rgb(255, 93, 110)).bold(),
                 )),
         )
@@ -546,7 +540,11 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
             RichText::new()
                 .span("MCP:    ", label_style.clone())
                 .span(
-                    format!("{}/{}", app.mcp_healthy_count, app.mcp_server_count),
+                    if app.mcp_server_count == 0 {
+                        "inspect with /mcp".into()
+                    } else {
+                        format!("{}/{}", app.mcp_healthy_count, app.mcp_server_count)
+                    },
                     Style::new().fg(if app.mcp_server_count > 0 && app.mcp_healthy_count == 0 {
                         Color::Rgb(255, 93, 110)
                     } else {
@@ -568,51 +566,40 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
             RichText::new()
                 .span("STATE:  ", label_style.clone())
                 .span(
-                    app.status_step_text(),
+                    activity_label(app),
                     Style::new().fg(Color::Rgb(255, 93, 110)).bold(),
                 )
+                .fill_width(),
+        )
+        .child(
+            RichText::new()
+                .span("STEP:   ", label_style.clone())
+                .span(app.status_step_text(), Style::default())
                 .fill_width(),
         )
         .child(Divider::horizontal())
         .child(
             RichText::new()
                 .span("BUDGET: ", label_style.clone())
-                .span(format!("${:.2}", app.status.budget_usd), Style::default())
+                .span(reported_money(app.status.budget_usd), Style::default())
                 .fill_width(),
         )
         .child(
             RichText::new()
-                .span("SPEND:  ", label_style.clone())
-                .span(
-                    budget_usage_text(app.status.cost_usd, app.status.budget_usd),
-                    Style::default(),
-                )
+                .span("COST:   ", label_style.clone())
+                .span(reported_money(app.status.cost_usd), Style::default())
                 .fill_width(),
         )
         .child(
             RichText::new()
-                .span("CPU:    ", label_style.clone())
-                .span(
-                    cpu_text,
-                    Style::new().fg(if app.status.cpu_usage > 0.8 {
-                        Color::Rgb(255, 93, 110)
-                    } else {
-                        Color::Rgb(166, 227, 161)
-                    }),
-                )
+                .span("LOAD/core 1m: ", label_style.clone())
+                .span(format!("{:.2}", app.status.cpu_usage), dim.clone())
                 .fill_width(),
         )
         .child(
             RichText::new()
-                .span("RAM:    ", label_style.clone())
-                .span(
-                    ram_text,
-                    Style::new().fg(if app.status.ram_usage > 0.8 {
-                        Color::Rgb(255, 93, 110)
-                    } else {
-                        Color::Rgb(58, 224, 221)
-                    }),
-                )
+                .span("LOCAL RAM: ", label_style.clone())
+                .span(format!("{:.0}%", app.status.ram_usage * 100.0), dim.clone())
                 .fill_width(),
         )
         .child(Divider::horizontal())
@@ -623,6 +610,12 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
                     format!("{ctx_icon} {ctx_label}"),
                     Style::new().fg(ctx_color).bold(),
                 )
+                .fill_width(),
+        )
+        .child(
+            RichText::new()
+                .span("STEP:    ", label_style)
+                .span(app.status.step.as_str(), dim)
                 .fill_width(),
         );
 
@@ -703,43 +696,80 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
         .overflow_y_hidden()
         .gap(1.0)
         .child(cassette);
-
     if app.weather_enabled || app.weather.is_some() {
         sidebar = sidebar.child(weather_view(app));
     }
     if moon_enabled_from_env() {
         sidebar = sidebar.child(moon_view(app));
     }
-
     sidebar
 }
 
 #[cfg(test)]
 mod tests {
-
     #[test]
-    fn usage_percent_handles_bounds_and_non_finite_values() {
-        assert_eq!(super::usage_percent(0.0), Some(0));
-        assert_eq!(super::usage_percent(0.5), Some(50));
-        assert_eq!(super::usage_percent(1.0), Some(100));
-        assert_eq!(super::usage_percent(7.5), Some(100));
-        assert_eq!(super::usage_percent(-3.0), Some(0));
-        assert_eq!(super::usage_percent(f64::NAN), None);
-        assert_eq!(super::usage_percent(f64::INFINITY), None);
+    fn absent_telemetry_is_not_a_zero_cost_or_an_invented_budget() {
+        let status = crate::types::AgentStatus::default();
+        assert_eq!(super::reported_money(status.cost_usd), "not reported");
+        assert_eq!(super::reported_money(status.budget_usd), "not reported");
+        assert_eq!(super::reported_money(Some(0.0)), "$0.00");
+        assert_eq!(super::reported_money(Some(f64::NAN)), "not reported");
+        assert_eq!(status.model, "not reported");
+        assert_eq!(status.context_quality, "unknown");
     }
 
     #[test]
-    fn budget_usage_reports_unavailable_and_over_budget_values() {
-        assert_eq!(super::budget_usage_text(0.25, 5.0), "$0.25 / $5.00 (5%)");
-        assert_eq!(
-            super::budget_usage_text(6.0, 5.0),
-            "$6.00 / $5.00 (over budget)"
-        );
-        assert_eq!(super::budget_usage_text(f64::NAN, 5.0), "n/a / $5.00");
-        assert_eq!(super::budget_usage_text(0.25, 0.0), "$0.25 / n/a");
+    fn activity_follows_connection_and_run_state() {
+        let mut app = super::PorygonTui::new();
+        assert_eq!(super::activity_label(&app), "OFFLINE");
+        app.connected = true;
+        assert_eq!(super::activity_label(&app), "IDLE");
+        app.waiting_response = true;
+        assert_eq!(super::activity_label(&app), "RUNNING");
+        app.approval_in_flight = true;
+        assert_eq!(super::activity_label(&app), "REVIEW");
+        app.approval_in_flight = false;
+        app.run_unresolved = true;
+        assert_eq!(super::activity_label(&app), "RUNNING");
+        app.waiting_response = false;
+        assert_eq!(super::activity_label(&app), "UNKNOWN");
+        app.stopping = true;
+        assert_eq!(super::activity_label(&app), "STOPPING");
+        app.stopping = false;
+        app.run_can_continue = true;
+        assert_eq!(super::activity_label(&app), "WAITING");
+        app.run_can_continue = false;
+        app.run_unresolved = false;
+        app.current_run = Some("finished-run".into());
+        assert_eq!(super::activity_label(&app), "IDLE");
     }
+
     use super::*;
     use ultty_protocol::{AlignContent, JustifyContent};
+
+    #[test]
+    fn sidebar_shows_plain_load_and_hides_opt_in_cards() {
+        let mut app = PorygonTui::new();
+        app.weather_enabled = false;
+        app.status.cpu_usage = 2.75;
+        app.status.ram_usage = 0.57;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(34, 30)).unwrap();
+        terminal
+            .draw(|frame| sidebar_view(&app).render_ansi(frame, frame.area()))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("LOAD/core 1m: 2.75"), "{text}");
+        assert!(text.contains("LOCAL RAM: 57%"), "{text}");
+        assert!(!text.contains("WEATHER"));
+        assert!(!text.contains("MOON"));
+    }
 
     #[test]
     fn sidebar_root_keeps_panels_top_aligned_when_stretched() {

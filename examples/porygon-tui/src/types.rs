@@ -168,8 +168,8 @@ pub struct ValidationResult {
 
 #[derive(Debug, Clone)]
 pub struct AgentStatus {
-    pub cost_usd: f64,
-    pub budget_usd: f64,
+    pub cost_usd: Option<f64>,
+    pub budget_usd: Option<f64>,
     pub pressure: String,
     pub model: String,
     pub context_quality: String,
@@ -238,13 +238,13 @@ pub struct StreamPerfSummary {
 impl Default for AgentStatus {
     fn default() -> Self {
         Self {
-            cost_usd: 0.0,
-            budget_usd: 5.0,
-            pressure: "normal".into(),
-            model: "claude-sonnet-4".into(),
-            context_quality: "peak".into(),
+            cost_usd: None,
+            budget_usd: None,
+            pressure: "unknown".into(),
+            model: "not reported".into(),
+            context_quality: "unknown".into(),
             step: "idle".into(),
-            agent_name: "agent".into(),
+            agent_name: "not reported".into(),
             cpu_usage: 0.0,
             ram_usage: 0.0,
         }

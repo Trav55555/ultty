@@ -25,13 +25,20 @@ pub async fn fetch_status(
     anyhow::ensure!(body.get("model").is_some(), "Invalid daemon TUI status");
     let (cpu, ram) = get_system_stats();
     Ok(AgentStatus {
-        model: body["model"]["name"]
+        model: if body["model"]["provider"].as_str() == Some("unknown") {
+            "not reported".into()
+        } else {
+            body["model"]["name"]
+                .as_str()
+                .unwrap_or("not reported")
+                .to_string()
+        },
+        context_quality: body["context_budget"]["quality"]
             .as_str()
             .unwrap_or("unknown")
             .to_string(),
-        context_quality: "unknown".into(),
         pressure: "unknown".into(),
-        cpu_usage: unit_fraction(cpu),
+        cpu_usage: nonnegative_finite(cpu),
         ram_usage: unit_fraction(ram),
         ..AgentStatus::default()
     })
@@ -43,6 +50,25 @@ pub(crate) fn unit_fraction(value: f64) -> f64 {
         0.0
     } else {
         value.clamp(0.0, 1.0)
+    }
+}
+
+fn nonnegative_finite(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    #[test]
+    fn normalized_load_preserves_overcommit_and_rejects_invalid_values() {
+        assert_eq!(super::nonnegative_finite(2.75), 2.75);
+        assert_eq!(super::nonnegative_finite(-1.0), 0.0);
+        assert_eq!(super::nonnegative_finite(f64::NAN), 0.0);
+        assert_eq!(super::nonnegative_finite(f64::INFINITY), 0.0);
     }
 }
 
@@ -61,7 +87,9 @@ fn get_system_stats() -> (f64, f64) {
             // SAFETY: sysconf only reads its integer argument and has no
             // memory-safety preconditions.
             let cores = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as f64;
-            cpu = (load[0] / cores).clamp(0.0, 1.0);
+            if cores > 0.0 {
+                cpu = nonnegative_finite(load[0] / cores);
+            }
         }
 
         // RAM usage from /proc/meminfo
@@ -1248,6 +1276,13 @@ impl PorygonTui {
                         cmds.push(Cmd::message(Msg::PollWeather));
                     }
                     Cmd::batch(cmds)
+                }
+            }
+            Msg::RunPalette(command) => {
+                if let Some(action) = self.command_registry.parse(&command) {
+                    self.handle_command_action(action)
+                } else {
+                    Cmd::ShowToast(Toast::warning("Unknown command; draft preserved."))
                 }
             }
             Msg::SendMessage => {

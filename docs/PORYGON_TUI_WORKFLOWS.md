@@ -14,14 +14,17 @@ the draft in the composer.
 | Ctrl+X, then Enter | Insert a newline |
 | Shift+Enter | Insert a newline when the terminal reports this chord distinctly |
 | Up/Down, Home/End | Move within the draft |
-| Ctrl+Space | Complete the first matching slash command |
-| Tab / Shift+Tab | Move focus |
+| Ctrl+P | Open the searchable command palette without changing the draft |
+| Up/Down, Page Up/Page Down | Select a command while a palette or slash suggestions are visible |
+| Tab | Insert the selected command without executing it; otherwise move focus |
+| Enter | Run the selected command deliberately, or send the draft when no suggestion is active |
+| Ctrl+Space | Insert the selected slash suggestion |
 | F1 | Show keys and commands |
 | F2 | Find/open conversations; Ctrl+N starts a new conversation |
 | F3 | Inspect work and verification results |
 | F4 | Inspect approvals and waiting or blocked work |
 | Ctrl+Y | Copy the latest nonempty reply as source text |
-| Escape | Close help or dismiss command suggestions |
+| Escape | Close the palette/help or dismiss suggestions; preserve the draft |
 | Ctrl+C | Stop the active response; when idle, quit |
 | Page Up / Page Down | Read earlier or later transcript content |
 | Ctrl+Home / Ctrl+End | Read the oldest output / follow the latest output |
@@ -30,6 +33,22 @@ With an unsent draft, the first idle Ctrl+C asks for confirmation before exit.
 Press Ctrl+C again to quit; editing cancels that confirmation. Drafts are saved
 locally. Stopping a response retains the draft. Help and navigation pages keep
 these stop and confirmation controls active.
+
+Command search ranks case-insensitive matches in command names, aliases and
+descriptions. Slash suggestions appear when the draft begins with a single
+command token; arguments remain editable without intercepting Enter. The palette
+accepts a bounded pasted query. Escape closes it without changing the draft;
+Tab inserts at the cursor and Enter runs the selected command while preserving
+the existing draft. File and `@` path completion are not provided by this palette.
+
+The optional sidebar shows daemon-reported values only when available. Budget,
+cost and model may say `not reported`. `LOAD/core 1m` is the local host's
+one-minute load average divided by its online CPU count, not process CPU usage;
+it can exceed 1. These host metrics are implemented for Linux; unavailable
+samples currently fall back to zero rather than an unknown indicator. `LOCAL RAM`
+is the local host memory-use estimate. Weather and
+moon panels appear only with `PORYGON_WEATHER=1`; that opt-in also enables a
+third-party weather/geolocation request.
 
 Bracketed paste inserts text as one edit, including newlines, without executing
 embedded keys or submitting a message. ANSI terminals must support bracketed

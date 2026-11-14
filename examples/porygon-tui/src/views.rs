@@ -123,10 +123,13 @@ impl PorygonTui {
     }
 
     fn suggestion_rows(&self) -> u16 {
-        if self.terminal_height < 20 {
+        if self.terminal_height <= 10 {
             0
         } else {
-            self.suggestions.len().min(3) as u16
+            self.suggestions
+                .len()
+                .min(5)
+                .min(self.terminal_height.saturating_sub(10) as usize) as u16
         }
     }
 
@@ -156,16 +159,18 @@ impl PorygonTui {
     fn refresh_composer(&mut self) {
         self.persist_conversation();
         let value = self.input.current_value();
-        self.suggestions = if value.starts_with('/') && !value.contains('\n') {
+        self.suggestions = if value.starts_with('/') && !value.chars().any(char::is_whitespace) {
             self.command_registry
                 .completions(value)
                 .iter()
-                .take(3)
                 .map(|cmd| (format!("/{}", cmd.name), cmd.description.to_string()))
                 .collect()
         } else {
             Vec::new()
         };
+        self.suggestion_selected = self
+            .suggestion_selected
+            .min(self.suggestions.len().saturating_sub(1));
         self.quit_armed = false;
         self.update_scroll_dimensions();
         if self.follow_output {
@@ -292,9 +297,9 @@ impl PorygonTui {
                 }
             });
         let shortcuts = if self.terminal_width < 80 {
-            format!(" F1 help F2 F3 F4({attention}) ")
+            format!(" ^P commands F1 F2 F3 F4({attention}) ")
         } else {
-            format!(" F1 help F2 sessions F3 work F4 attention {attention} ")
+            format!(" Ctrl+P commands F1 help F2 sessions F3 work F4 attention {attention} ")
         };
         Row::new()
             .height(Dimension::Cells(1.0))
@@ -363,18 +368,38 @@ impl PorygonTui {
             .flex_shrink(0.0)
             .child(Text::new(self.composer_hint()))
             .child(self.input.clone().height(self.composer_rows()));
-        for (name, description) in self
-            .suggestions
-            .iter()
-            .take(self.suggestion_rows() as usize)
+        let count = self.suggestion_rows() as usize;
+        let start = self
+            .suggestion_selected
+            .saturating_sub(count.saturating_sub(1));
+        for (index, (name, description)) in
+            self.suggestions.iter().enumerate().skip(start).take(count)
         {
-            col = col.child(Text::new(format!("{name}  {description}")));
+            let line = format!(
+                "{} {name}  {description}",
+                if index == self.suggestion_selected {
+                    ">"
+                } else {
+                    " "
+                }
+            );
+            let width = usize::from(self.terminal_width.max(1));
+            let line = crate::work_views::wrap(&line, width)
+                .into_iter()
+                .next()
+                .unwrap_or_default();
+            col = col.child(Text::new(line));
         }
-        col.child(Text::new(if self.suggestions.is_empty() {
-            "Shift+Enter: newline where supported | / commands"
+        let hint = if self.suggestions.is_empty() {
+            "Shift+Enter: newline | / commands"
         } else {
-            "Ctrl+Space: complete | Tab: change focus"
-        }))
+            "↑↓ select · Tab insert · Enter run · Esc"
+        };
+        let hint = crate::work_views::wrap(hint, usize::from(self.terminal_width.max(1)))
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        col.child(Text::new(hint))
     }
 
     fn status_bar_view(&self) -> Row {
@@ -425,19 +450,33 @@ impl PorygonTui {
         }
         if !self.show_approval_modal {
             if let Event::Key(key) = event {
+                if key.modifiers.ctrl
+                    && key.key == Key::Char('p')
+                    && !self.conversations.open
+                    && self.work.page == crate::work::Page::Closed
+                    && !self.show_help
+                {
+                    self.palette_open = !self.palette_open;
+                    self.palette_query.clear();
+                    self.suggestion_selected = 0;
+                    return None;
+                }
                 match key.key {
                     Key::F(1) => {
+                        self.palette_open = false;
                         self.conversations.open = false;
                         self.work.page = crate::work::Page::Closed;
                         self.show_help = !self.show_help;
                         return None;
                     }
                     Key::F(2) => {
+                        self.palette_open = false;
                         self.show_help = false;
                         self.work.page = crate::work::Page::Closed;
                         return Some(Msg::OpenConversations);
                     }
                     Key::F(3) | Key::F(4) => {
+                        self.palette_open = false;
                         self.conversations.open = false;
                         self.show_help = false;
                         return Some(Msg::OpenWork(if key.key == Key::F(3) {
@@ -449,6 +488,66 @@ impl PorygonTui {
                     _ => {}
                 }
             }
+        }
+        if self.show_approval_modal {
+            self.palette_open = false;
+        }
+        if self.palette_open && !matches!(event, Event::Quit) {
+            if let Event::Paste { text, .. } = event {
+                let remaining = 256usize.saturating_sub(self.palette_query.chars().count());
+                self.palette_query
+                    .extend(text.chars().filter(|ch| !ch.is_control()).take(remaining));
+                self.suggestion_selected = 0;
+                return None;
+            }
+            if let Event::Key(key) = event {
+                let count = self.command_registry.completions(&self.palette_query).len();
+                let page = self.terminal_height.saturating_sub(6).max(1) as usize;
+                match key.key {
+                    Key::Escape => self.palette_open = false,
+                    Key::Up => {
+                        self.suggestion_selected = self.suggestion_selected.saturating_sub(1)
+                    }
+                    Key::Down => {
+                        self.suggestion_selected =
+                            (self.suggestion_selected + 1).min(count.saturating_sub(1))
+                    }
+                    Key::PageUp => {
+                        self.suggestion_selected = self.suggestion_selected.saturating_sub(page)
+                    }
+                    Key::PageDown => {
+                        self.suggestion_selected =
+                            (self.suggestion_selected + page).min(count.saturating_sub(1))
+                    }
+                    Key::Backspace => {
+                        self.palette_query.pop();
+                        self.suggestion_selected = 0;
+                    }
+                    Key::Char(ch) if !key.modifiers.ctrl && !key.modifiers.alt => {
+                        if self.palette_query.chars().count() < 256 && !ch.is_control() {
+                            self.palette_query.push(ch);
+                            self.suggestion_selected = 0;
+                        }
+                    }
+                    Key::Tab | Key::Enter => {
+                        if let Some(cmd) = self
+                            .command_registry
+                            .completions(&self.palette_query)
+                            .get(self.suggestion_selected)
+                        {
+                            let command = format!("/{} ", cmd.name);
+                            self.palette_open = false;
+                            if key.key == Key::Enter {
+                                return Some(Msg::RunPalette(command));
+                            }
+                            self.input.insert_text(&command);
+                            self.refresh_composer();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return None;
         }
         if self.conversations.open && !matches!(event, Event::Quit) {
             return self.conversation_event(event);
@@ -618,6 +717,40 @@ impl PorygonTui {
                 if ke.key == Key::Char('y') && ke.modifiers.ctrl {
                     return Some(Msg::CopyLatestAssistant);
                 }
+                if ke.focused_id.as_deref() == Some("chat-input") && self.suggestion_rows() > 0 {
+                    let last = self.suggestions.len().saturating_sub(1);
+                    let step = self.suggestion_rows().max(1) as usize;
+                    match ke.key {
+                        Key::Up => {
+                            self.suggestion_selected = self.suggestion_selected.saturating_sub(1);
+                            return None;
+                        }
+                        Key::Down => {
+                            self.suggestion_selected = (self.suggestion_selected + 1).min(last);
+                            return None;
+                        }
+                        Key::PageUp => {
+                            self.suggestion_selected =
+                                self.suggestion_selected.saturating_sub(step);
+                            return None;
+                        }
+                        Key::PageDown => {
+                            self.suggestion_selected = (self.suggestion_selected + step).min(last);
+                            return None;
+                        }
+                        Key::Tab | Key::Enter if !ke.modifiers.shift && !self.newline_prefix => {
+                            let name = self.suggestions[self.suggestion_selected].0.clone();
+                            self.input.set_value(format!("{name} "));
+                            self.refresh_composer();
+                            return if ke.key == Key::Enter {
+                                Some(Msg::SendMessage)
+                            } else {
+                                None
+                            };
+                        }
+                        _ => {}
+                    }
+                }
                 match ke.key {
                     Key::PageUp | Key::PageDown => {
                         self.update_scroll_dimensions();
@@ -670,7 +803,7 @@ impl PorygonTui {
                         return Some(Msg::SendMessage);
                     }
                     if ke.key == Key::Char(' ') && ke.modifiers.ctrl {
-                        if let Some((first, _)) = self.suggestions.first() {
+                        if let Some((first, _)) = self.suggestions.get(self.suggestion_selected) {
                             self.input.set_value(format!("{first} "));
                         }
                     } else {
@@ -706,6 +839,48 @@ impl PorygonTui {
         if self.conversations.open {
             return Stack::new().child(self.conversation_view());
         }
+        if self.palette_open && !self.show_approval_modal {
+            let commands = self.command_registry.completions(&self.palette_query);
+            let height = self.terminal_height.saturating_sub(5).max(1) as usize;
+            let start = self
+                .suggestion_selected
+                .saturating_sub(height.saturating_sub(1));
+            let width = usize::from(self.terminal_width.saturating_sub(2).max(1));
+            let header = crate::work_views::wrap("Commands · ↑↓ Tab Enter Esc", width)
+                .into_iter()
+                .next()
+                .unwrap_or_default();
+            let query = crate::work_views::wrap(&format!("Search: {}", self.palette_query), width)
+                .into_iter()
+                .last()
+                .unwrap_or_default();
+            let mut view = Column::new()
+                .padding(1.0)
+                .child(Text::new(header))
+                .child(Text::new(query));
+            if commands.is_empty() {
+                view = view.child(Text::new("No matching commands."));
+            }
+            for (index, cmd) in commands.iter().enumerate().skip(start).take(height) {
+                let line = format!(
+                    "{} /{}  {}",
+                    if index == self.suggestion_selected {
+                        ">"
+                    } else {
+                        " "
+                    },
+                    cmd.name,
+                    cmd.description
+                );
+                let width = usize::from(self.terminal_width.saturating_sub(2).max(1));
+                let line = crate::work_views::wrap(&line, width)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default();
+                view = view.child(Text::new(line));
+            }
+            return Stack::new().child(view);
+        }
         if self.show_help {
             let mut help = Column::new()
                 .width(Dimension::Percent(100.0))
@@ -730,7 +905,7 @@ impl PorygonTui {
                 "Ctrl+C when idle: save draft and quit.",
                 "With a draft, press Ctrl+C twice to quit.",
                 "PgUp/PgDn: history. Ctrl+Home/End: oldest/latest.",
-                "Type / for commands. Ctrl+Space: complete.",
+                "Ctrl+P: commands. /help: all registered commands.",
                 "/reconnect: inspect. /attach ID: read a run.",
             ] {
                 help = help.child(Text::new(line));
@@ -764,6 +939,82 @@ mod tests {
             },
             focused_id: Some("chat-input".into()),
         })
+    }
+
+    #[test]
+    fn palette_escape_preserves_draft_and_tab_inserts_without_running() {
+        let mut app = PorygonTui::new();
+        app.input.set_value("unfinished draft");
+        app.handle_event(&composer_key(Key::Char('p'), true));
+        assert!(app.palette_open);
+        for ch in "mdl".chars() {
+            app.handle_event(&composer_key(Key::Char(ch), false));
+        }
+        assert!(app
+            .command_registry
+            .completions(&app.palette_query)
+            .iter()
+            .any(|c| c.name == "model"));
+        app.handle_event(&composer_key(Key::Escape, false));
+        assert_eq!(app.input.current_value(), "unfinished draft");
+        app.handle_event(&composer_key(Key::Char('p'), true));
+        for ch in "model".chars() {
+            app.handle_event(&composer_key(Key::Char(ch), false));
+        }
+        assert!(app.handle_event(&composer_key(Key::Tab, false)).is_none());
+        assert!(app.input.current_value().contains("unfinished draft"));
+        assert!(app.input.current_value().contains("/model "));
+        assert!(!app.palette_open);
+    }
+
+    #[test]
+    fn palette_paste_does_not_change_draft_and_approval_takes_focus() {
+        let mut app = PorygonTui::new();
+        app.input.set_value("keep draft");
+        app.handle_event(&composer_key(Key::Char('p'), true));
+        app.handle_event(&Event::Paste {
+            text: "model\n".repeat(80),
+            focused_id: None,
+        });
+        assert!(app.palette_query.chars().count() <= 256);
+        assert!(!app.palette_query.contains('\n'));
+        assert!(app.handle_event(&composer_key(Key::Enter, false)).is_none());
+        assert_eq!(app.input.current_value(), "keep draft");
+        app.show_approval_modal = true;
+        app.handle_event(&composer_key(Key::Escape, false));
+        assert!(!app.palette_open);
+    }
+
+    #[test]
+    fn palette_enter_dispatches_without_changing_draft() {
+        let mut app = PorygonTui::new();
+        app.input.set_value("keep draft");
+        app.handle_event(&composer_key(Key::Char('p'), true));
+        for ch in "model".chars() {
+            app.handle_event(&composer_key(Key::Char(ch), false));
+        }
+        assert!(matches!(
+            app.handle_event(&composer_key(Key::Enter, false)),
+            Some(Msg::RunPalette(_))
+        ));
+        assert_eq!(app.input.current_value(), "keep draft");
+    }
+
+    #[test]
+    fn slash_selection_moves_and_enter_explicitly_dispatches() {
+        let mut app = PorygonTui::new();
+        app.terminal_height = 24;
+        for ch in "/s".chars() {
+            app.handle_event(&composer_key(Key::Char(ch), false));
+        }
+        assert!(app.suggestions.len() > 1);
+        app.handle_event(&composer_key(Key::Down, false));
+        let selected = app.suggestions[1].0.clone();
+        assert!(matches!(
+            app.handle_event(&composer_key(Key::Enter, false)),
+            Some(Msg::SendMessage)
+        ));
+        assert_eq!(app.input.current_value(), format!("{selected} "));
     }
 
     #[test]
@@ -974,6 +1225,35 @@ mod tests {
                     "{width}x{height}: missing {expected}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn ansi_palette_navigation_is_visible_at_standard_sizes() {
+        for (width, height) in [(80, 24), (160, 48)] {
+            let mut app = PorygonTui::new();
+            app.terminal_width = width;
+            app.terminal_height = height;
+            app.input.set_value("draft remains");
+            app.handle_event(&composer_key(Key::Char('p'), true));
+            for ch in "mdl".chars() {
+                app.handle_event(&composer_key(Key::Char(ch), false));
+            }
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| app.render_view().render_ansi(frame, frame.area()))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains("/model"), "{width}x{height}: {text}");
+            app.handle_event(&composer_key(Key::Escape, false));
+            assert_eq!(app.input.current_value(), "draft remains");
         }
     }
 
