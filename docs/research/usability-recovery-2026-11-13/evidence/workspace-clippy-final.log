@@ -1,0 +1,129 @@
+    Checking ulttui v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/crates/ulttui)
+    Checking x11rb v0.13.2
+    Checking zbus_names v4.3.5
+    Checking calloop v0.13.0
+    Checking naga v30.0.1
+    Checking wayland-csd-frame v0.3.0
+    Checking phf_shared v0.14.0
+    Checking gpu-allocator v0.28.0
+    Checking wayland-cursor v0.31.14
+    Checking khronos-egl v6.0.0
+    Checking flate2 v1.1.11
+    Checking wayland-protocols-wlr v0.3.12
+    Checking miniz_oxide v0.8.9
+    Checking owned_ttf_parser v0.25.1
+    Checking fdeflate v0.3.7
+    Checking accesskit v0.25.2
+    Checking zbus v5.19.0
+    Checking zbus_xml v5.2.1
+    Checking calloop-wayland-source v0.3.0
+    Checking font-types v0.11.3
+    Checking font-types v0.12.7
+    Checking ordered-float v5.5.1
+    Checking renderdoc-sys v1.1.0
+    Checking anstyle v1.0.14
+    Checking ab_glyph_rasterizer v0.1.10
+    Checking plotters-backend v0.3.7
+    Checking profiling v1.0.18
+    Checking glow v0.17.0
+    Checking clap_lex v1.1.1
+    Checking ciborium-io v0.2.2
+    Checking ab_glyph v0.2.32
+    Checking read-fonts v0.41.0
+    Checking smithay-client-toolkit v0.19.2
+    Checking ciborium-ll v0.2.2
+    Checking zbus-lockstep v0.5.2
+    Checking accesskit_consumer v0.39.2
+    Checking plotters-svg v0.3.7
+    Checking read-fonts v0.37.0
+    Checking phf v0.14.0
+    Checking clap_builder v4.6.7
+    Checking getrandom v0.3.4
+    Checking tiny-skia v0.11.4
+    Checking itertools v0.10.5
+    Checking pxfm v0.1.30
+    Checking ultty-bench v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/tools/ultty-bench)
+    Checking cast v0.3.0
+    Checking roxmltree v0.20.0
+    Checking percent-encoding v2.3.2
+    Checking ahash v0.8.12
+    Checking ciborium v0.2.2
+    Checking criterion-plot v0.5.0
+    Checking x11-dl v2.21.0
+    Checking sctk-adwaita v0.10.1
+    Checking fontconfig-parser v0.5.8
+    Checking plotters v0.3.7
+    Checking png v0.18.1
+    Checking xkbcommon-dl v0.4.2
+    Checking wayland-protocols-plasma v0.3.12
+    Checking tinytemplate v1.2.1
+    Checking clap v4.6.7
+    Checking is-terminal v0.4.17
+    Checking is-docker v0.2.0
+    Checking dpi v0.1.2
+    Checking zeno v0.3.3
+    Checking byteorder-lite v0.1.0
+    Checking option-ext v0.2.0
+    Checking smol_str v0.2.2
+    Checking yazi v0.2.2
+    Checking anes v0.1.6
+    Checking tinyvec v1.13.3
+    Checking oorandom v11.1.5
+    Checking dirs-sys v0.4.1
+    Checking is-wsl v0.4.0
+    Checking criterion v0.5.1
+    Checking unicode-script v0.5.9
+    Checking fontdb v0.23.0
+    Checking rangemap v1.8.0
+    Checking sys-locale v0.3.2
+    Checking self_cell v1.3.0
+    Checking linebender_resource_handle v0.1.1
+    Checking unicode-linebreak v0.1.5
+    Checking unicode-bidi v0.3.18
+    Checking iana-time-zone v0.1.65
+    Checking smol_str v0.3.7
+    Checking chrono v0.4.45
+    Checking open v5.4.5
+    Checking dirs v5.0.1
+    Checking png v0.17.16
+    Checking pollster v0.3.0
+    Checking moxcms v0.8.1
+    Checking tokio-stream v0.1.19
+    Checking ulttui-lua v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/crates/ulttui-lua)
+    Checking sysinfo v0.33.1
+    Checking tokio-test v0.4.6
+    Checking winit v0.30.13
+    Checking sysmon v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/examples/sysmon)
+    Checking atspi-common v0.13.0
+    Checking notify-rust v4.18.2
+    Checking ultty-protocol v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/crates/ultty-protocol)
+    Checking skrifa v0.40.0
+    Checking harfrust v0.5.2
+    Checking chat v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/examples/chat)
+    Checking counter-app v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/examples/counter-app)
+    Checking form-app v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/examples/form-app)
+    Checking async-fetch v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/examples/async-fetch)
+    Checking agent-transcript v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/examples/agent-transcript)
+    Checking wgpu-naga-bridge v30.0.1
+    Checking todo-app v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/examples/todo-app)
+    Checking wgpu-hal v30.0.1
+    Checking image v0.25.10
+    Checking dashboard v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/examples/dashboard)
+    Checking skrifa v0.44.0
+    Checking atspi-proxies v0.13.0
+    Checking accesskit_atspi_common v0.21.1
+    Checking hello-native v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/examples/hello-native)
+    Checking split-panes v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/examples/split-panes)
+    Checking arboard v3.7.0
+    Checking ultty-vt v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/crates/ultty-vt)
+    Checking ultty-client v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/crates/ultty-client)
+    Checking atspi v0.29.0
+    Checking accesskit_unix v0.24.1
+    Checking swash v0.2.10
+    Checking wgpu-core-deps-windows-linux-android v30.0.1
+    Checking wgpu-core v30.0.1
+    Checking accesskit_winit v0.34.2
+    Checking cosmic-text v0.19.0
+    Checking wgpu v30.0.1
+    Checking ultty v0.2.0 (/home/travers/projects/tui-terminal/.worktrees/usability-recovery/crates/ultty)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 42.91s

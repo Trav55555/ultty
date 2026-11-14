@@ -1,0 +1,7 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running unittests src/main.rs (/home/travers/projects/tui-terminal/examples/porygon-tui/target/debug/deps/porygon_tui-fe906e5790b4c62c)
+
+running 1 test
+test session_ui::tests::test_later_denial_preserves_earlier_unobserved_approved_execution ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 122 filtered out; finished in 0.00s

@@ -1,0 +1,4 @@
+57761bf059938d2073fe2fd7f8e30d39031f30d15ac2bb543c3b5af92534bb12  /home/travers/projects/tui-terminal/.worktrees/usability-recovery/target/porygon-usability-candidate-protocol
+9504d7ba4ada284220f1769264a95c12d59efff83e42caeea8e1de681468f7f0  /home/travers/.local/lib/porygon-ui/6263867-native-selection/ultty
+fac58a722f3528a6d31ad8f3da9b0fab05409fa838df3827e85ce133a3980e75  /home/travers/.local/lib/porygon-ui/6263867-native-selection/ulttyctl
+bef2a4d48cc7315547d29d1263655c163d1ccf9503a2ac848be54396e6ee3705  /home/travers/projects/tui-terminal/.worktrees/usability-recovery/docs/research/usability-recovery-2026-11-13/test_usability_native.py
