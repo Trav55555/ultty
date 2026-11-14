@@ -38,7 +38,7 @@ pub async fn fetch_status(
             .unwrap_or("unknown")
             .to_string(),
         pressure: "unknown".into(),
-        cpu_usage: unit_fraction(cpu),
+        cpu_usage: nonnegative_finite(cpu),
         ram_usage: unit_fraction(ram),
         ..AgentStatus::default()
     })
@@ -50,6 +50,25 @@ pub(crate) fn unit_fraction(value: f64) -> f64 {
         0.0
     } else {
         value.clamp(0.0, 1.0)
+    }
+}
+
+fn nonnegative_finite(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    #[test]
+    fn normalized_load_preserves_overcommit_and_rejects_invalid_values() {
+        assert_eq!(super::nonnegative_finite(2.75), 2.75);
+        assert_eq!(super::nonnegative_finite(-1.0), 0.0);
+        assert_eq!(super::nonnegative_finite(f64::NAN), 0.0);
+        assert_eq!(super::nonnegative_finite(f64::INFINITY), 0.0);
     }
 }
 
@@ -68,7 +87,9 @@ fn get_system_stats() -> (f64, f64) {
             // SAFETY: sysconf only reads its integer argument and has no
             // memory-safety preconditions.
             let cores = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } as f64;
-            cpu = (load[0] / cores).clamp(0.0, 1.0);
+            if cores > 0.0 {
+                cpu = nonnegative_finite(load[0] / cores);
+            }
         }
 
         // RAM usage from /proc/meminfo

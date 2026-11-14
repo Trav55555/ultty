@@ -1185,6 +1185,35 @@ mod tests {
     }
 
     #[test]
+    fn ansi_palette_navigation_is_visible_at_standard_sizes() {
+        for (width, height) in [(80, 24), (160, 48)] {
+            let mut app = PorygonTui::new();
+            app.terminal_width = width;
+            app.terminal_height = height;
+            app.input.set_value("draft remains");
+            app.handle_event(&composer_key(Key::Char('p'), true));
+            for ch in "mdl".chars() {
+                app.handle_event(&composer_key(Key::Char(ch), false));
+            }
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| app.render_view().render_ansi(frame, frame.area()))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains("/model"), "{width}x{height}: {text}");
+            app.handle_event(&composer_key(Key::Escape, false));
+            assert_eq!(app.input.current_value(), "draft remains");
+        }
+    }
+
+    #[test]
     fn conversation_and_multiline_draft_are_visible_at_both_sizes() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;

@@ -371,18 +371,6 @@ fn weather_view(app: &PorygonTui) -> Column {
     panel
 }
 
-/// Ten-cell usage bar for a 0..=1 fraction; out-of-range or NaN input
-/// saturates instead of underflowing the empty-cell count.
-fn usage_bar(fraction: f64) -> String {
-    const CELLS: usize = 10;
-    let filled = if fraction.is_nan() {
-        0
-    } else {
-        ((fraction.clamp(0.0, 1.0) * CELLS as f64).round() as usize).min(CELLS)
-    };
-    format!("[{}{}]", "█".repeat(filled), "░".repeat(CELLS - filled))
-}
-
 fn moon_view(_app: &PorygonTui) -> Column {
     // Unicode moon phase emoji (each renders as 2 columns wide)
     let emojis = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"];
@@ -592,36 +580,14 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
         )
         .child(
             RichText::new()
-                .span("LOCAL LOAD 1m ", label_style.clone())
-                .span(
-                    usage_bar(app.status.cpu_usage),
-                    Style::new().fg(if app.status.cpu_usage > 0.8 {
-                        Color::Rgb(255, 93, 110)
-                    } else {
-                        Color::Rgb(166, 227, 161)
-                    }),
-                )
-                .span(
-                    format!(" {:.0}%", app.status.cpu_usage * 100.0),
-                    dim.clone(),
-                )
+                .span("LOAD/core 1m: ", label_style.clone())
+                .span(format!("{:.2}", app.status.cpu_usage), dim.clone())
                 .fill_width(),
         )
         .child(
             RichText::new()
-                .span("LOCAL RAM ", label_style.clone())
-                .span(
-                    usage_bar(app.status.ram_usage),
-                    Style::new().fg(if app.status.ram_usage > 0.8 {
-                        Color::Rgb(255, 93, 110)
-                    } else {
-                        Color::Rgb(58, 224, 221)
-                    }),
-                )
-                .span(
-                    format!(" {:.0}%", app.status.ram_usage * 100.0),
-                    dim.clone(),
-                )
+                .span("LOCAL RAM: ", label_style.clone())
+                .span(format!("{:.0}%", app.status.ram_usage * 100.0), dim.clone())
                 .fill_width(),
         )
         .child(Divider::horizontal())
@@ -697,7 +663,7 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
         );
     }
 
-    Column::new()
+    let sidebar = Column::new()
         .width(Dimension::Cells(34.0))
         .flex_shrink(0.0)
         .justify_start()
@@ -717,9 +683,12 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
         .border_color(Color::Rgb(58, 224, 221))
         .overflow_y_hidden()
         .gap(1.0)
-        .child(cassette)
-        .child(weather_view(app))
-        .child(moon_view(app))
+        .child(cassette);
+    if app.weather_enabled {
+        sidebar.child(weather_view(app)).child(moon_view(app))
+    } else {
+        sidebar
+    }
 }
 
 #[cfg(test)]
@@ -750,17 +719,32 @@ mod tests {
         assert_eq!(super::activity_label(&app), "UNKNOWN");
     }
 
-    #[test]
-    fn usage_bar_saturates_out_of_range_input() {
-        assert_eq!(super::usage_bar(0.0), "[░░░░░░░░░░]");
-        assert_eq!(super::usage_bar(0.5), "[█████░░░░░]");
-        assert_eq!(super::usage_bar(1.0), "[██████████]");
-        assert_eq!(super::usage_bar(7.5), "[██████████]");
-        assert_eq!(super::usage_bar(-3.0), "[░░░░░░░░░░]");
-        assert_eq!(super::usage_bar(f64::NAN), "[░░░░░░░░░░]");
-    }
     use super::*;
     use ultty_protocol::{AlignContent, JustifyContent};
+
+    #[test]
+    fn sidebar_shows_plain_load_and_hides_opt_in_cards() {
+        let mut app = PorygonTui::new();
+        app.weather_enabled = false;
+        app.status.cpu_usage = 2.75;
+        app.status.ram_usage = 0.57;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(34, 30)).unwrap();
+        terminal
+            .draw(|frame| sidebar_view(&app).render_ansi(frame, frame.area()))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("LOAD/core 1m: 2.75"), "{text}");
+        assert!(text.contains("LOCAL RAM: 57%"), "{text}");
+        assert!(!text.contains("WEATHER"));
+        assert!(!text.contains("MOON"));
+    }
 
     #[test]
     fn sidebar_root_keeps_panels_top_aligned_when_stretched() {
