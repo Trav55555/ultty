@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 static NEXT_SAVE: AtomicU64 = AtomicU64::new(1);
 const MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
@@ -126,7 +127,7 @@ impl SessionData {
     pub fn new() -> Self {
         Self {
             version: 1,
-            timestamp: chrono_timestamp(),
+            timestamp: iso_timestamp(SystemTime::now()),
             tabs: Vec::new(),
             active_tab_index: 0,
         }
@@ -310,37 +311,49 @@ impl Default for SessionData {
     }
 }
 
-/// Generate a timestamp string for the session.
-fn chrono_timestamp() -> String {
-    use std::time::SystemTime;
-
-    let now = SystemTime::now()
+/// Formats `time` as an ISO 8601 UTC timestamp, `YYYY-MM-DDTHH:MM:SSZ`.
+fn iso_timestamp(time: SystemTime) -> String {
+    let secs = time
         .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-
-    // Simple ISO-like timestamp without external crate
-    let secs = now.as_secs();
-    let days_since_epoch = secs / 86400;
-    let secs_today = secs % 86400;
-
-    // Approximate date calculation (not accounting for leap years perfectly)
-    let years = 1970 + days_since_epoch / 365;
-    let remaining_days = days_since_epoch % 365;
-    let month = remaining_days / 30 + 1;
-    let day = remaining_days % 30 + 1;
-
-    let hours = secs_today / 3600;
-    let minutes = (secs_today % 3600) / 60;
-    let seconds = secs_today % 60;
-
+        .unwrap_or_default()
+        .as_secs();
+    let (year, month, day) = civil_from_days(secs / 86_400);
+    let secs_today = secs % 86_400;
     format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        years, month, day, hours, minutes, seconds
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        secs_today / 3600,
+        (secs_today % 3600) / 60,
+        secs_today % 60,
     )
+}
+
+/// Converts days since 1970-01-01 to a proleptic Gregorian (year, month, day).
+///
+/// Howard Hinnant's `civil_from_days`, shifted so years start on 1 March and
+/// the leap day falls at the end of the year.
+fn civil_from_days(days: u64) -> (u64, u64, u64) {
+    // Days since 0000-03-01.
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    (year, month, day)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
     use super::*;
     use tempfile::TempDir;
 
@@ -483,12 +496,18 @@ mod tests {
     // ── Timestamp format ─────────────────────────────────────────────
 
     #[test]
-    fn chrono_timestamp_is_iso_like() {
-        let ts = chrono_timestamp();
-        // Should match YYYY-MM-DDTHH:MM:SSZ
-        assert!(ts.contains('T'), "timestamp missing T separator: {ts}");
-        assert!(ts.ends_with('Z'), "timestamp missing trailing Z: {ts}");
-        assert_eq!(ts.len(), 20, "unexpected timestamp length: {ts}");
+    fn iso_timestamp_uses_real_calendar_dates() {
+        let at = |secs: u64| iso_timestamp(UNIX_EPOCH + Duration::from_secs(secs));
+        assert_eq!(at(0), "1970-01-01T00:00:00Z");
+        // Leap day, and the days around it.
+        assert_eq!(at(1_709_164_799), "2024-02-28T23:59:59Z");
+        assert_eq!(at(1_709_164_800), "2024-02-29T00:00:00Z");
+        assert_eq!(at(1_709_251_200), "2024-03-01T00:00:00Z");
+        // 1900 and 2100 are not leap years; 2000 is.
+        assert_eq!(at(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(at(4_107_542_400), "2100-03-01T00:00:00Z");
+        assert_eq!(at(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(at(1_767_225_599), "2025-12-31T23:59:59Z");
     }
 
     // ── Clone / Debug derive ─────────────────────────────────────────
