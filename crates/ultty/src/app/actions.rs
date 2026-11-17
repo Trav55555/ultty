@@ -367,7 +367,7 @@ impl App {
     /// Take a screenshot of the terminal.
     pub(super) fn take_screenshot(&mut self) {
         // Generate filename with timestamp
-        let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+        let timestamp = ultty::local_time::file_stamp(std::time::SystemTime::now());
         let filename = format!("ultty-screenshot-{}.png", timestamp);
 
         // Try Pictures directory first, then current directory
@@ -430,7 +430,7 @@ impl App {
     pub(super) fn debug_dump_terminal(&self) {
         use std::io::Write;
 
-        let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+        let timestamp = ultty::local_time::file_stamp(std::time::SystemTime::now());
         let filename = format!("/tmp/ultty-debug-{}.txt", timestamp);
 
         let Some(terminal) = self.terminal() else {

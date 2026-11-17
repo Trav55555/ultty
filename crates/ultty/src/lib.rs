@@ -58,6 +58,7 @@ pub mod event_loop;
 pub mod geometry;
 pub mod inherit_dir;
 pub mod keys;
+pub mod local_time;
 pub mod pane_layout;
 #[cfg(feature = "gui")]
 pub mod renderer;

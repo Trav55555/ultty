@@ -86,7 +86,6 @@ base64 = { workspace = true }
 
 # Image (for screenshots)
 png = { version = "0.17", optional = true }
-chrono = "0.4"
 
 # Accessibility (ADR 0021): AT-SPI on Linux, NSAccessibility on macOS. The
 # default features minus winit's, which the workspace already enables;

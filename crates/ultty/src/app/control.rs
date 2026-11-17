@@ -1432,7 +1432,7 @@ impl App {
                 let path = match path {
                     Some(path_str) => std::path::PathBuf::from(path_str),
                     None => {
-                        let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+                        let timestamp = ultty::local_time::file_stamp(std::time::SystemTime::now());
                         let filename = format!("ultty-screenshot-{}.png", timestamp);
                         dirs::picture_dir()
                             .map(|p| p.join("Screenshots").join(&filename))
