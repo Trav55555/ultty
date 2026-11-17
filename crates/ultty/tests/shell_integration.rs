@@ -33,6 +33,7 @@ fn run_shell(
     home: &Path,
     runtime: &Path,
     inherited: &[(&str, &str)],
+    flags: &[&str],
     lines: &[&str],
 ) -> Run {
     let dir = install(runtime).expect("install integration files");
@@ -45,7 +46,7 @@ fn run_shell(
     let Injection {
         args,
         env: injected,
-    } = plan(shell, &[shell], &lookup, &dir).expect("shell gets injected");
+    } = plan(shell, &argv0_and(shell, flags), &lookup, &dir).expect("shell gets injected");
     let mut env: Vec<(OsString, OsString)> = vec![
         ("HOME".into(), home.into()),
         ("TERM".into(), "xterm-256color".into()),
@@ -94,6 +95,12 @@ fn run_shell(
     Run {
         output: String::from_utf8_lossy(&output).into_owned(),
     }
+}
+
+fn argv0_and<'a>(shell: &'a str, flags: &[&'a str]) -> Vec<&'a str> {
+    let mut argv = vec![shell];
+    argv.extend(flags);
+    argv
 }
 
 fn count(haystack: &str, needle: &str) -> usize {
@@ -158,6 +165,7 @@ fn bash_runs_the_users_bashrc_and_marks_once() {
         &s.home,
         &s.runtime,
         &[],
+        &[],
         &[
             "echo \"USER_VAR=$USER_VAR\"",
             "source \"$ULTTY_SHELL_INTEGRATION_DIR/bash/ultty.bash\"",
@@ -196,6 +204,7 @@ fn zsh_keeps_the_original_zdotdir_and_runs_the_users_rc_files() {
         &s.home,
         &s.runtime,
         &[("ZDOTDIR", zdot_str)],
+        &[],
         &[
             "echo \"USER_VAR=$USER_VAR ENVFILE=$ENV_FILE_RAN\"",
             "echo \"ZDOTDIR_IS=[$ZDOTDIR] SAVED=[${ULTTY_ZSH_ZDOTDIR-unset}]\"",
@@ -250,6 +259,7 @@ fn zsh_without_a_zdotdir_reads_dotfiles_from_home_and_leaves_it_unset() {
         &s.home,
         &s.runtime,
         &[],
+        &[],
         &[
             "echo \"USER_VAR=$USER_VAR\"",
             "echo \"ZDOTDIR_IS=[${ZDOTDIR-unset}]\"",
@@ -261,5 +271,187 @@ fn zsh_without_a_zdotdir_reads_dotfiles_from_home_and_leaves_it_unset() {
         run.output.contains("ZDOTDIR_IS=[unset]"),
         "ZDOTDIR not left unset:\n{:?}",
         run.output
+    );
+}
+
+#[test]
+fn login_bash_runs_the_login_files_and_leaves_posix_mode() {
+    let Some(bash) = find("bash") else {
+        eprintln!("skipped: bash is not installed");
+        return;
+    };
+    let s = sandbox();
+    // Only .bash_profile may run: .bash_login and .profile come after it,
+    // and .bashrc runs only because the profile sources it.
+    std::fs::write(
+        s.home.join(".bash_profile"),
+        "echo PROFILE_RAN\n[ -r \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\"\n",
+    )
+    .unwrap();
+    std::fs::write(s.home.join(".bash_login"), "echo WRONG_LOGIN_FILE\n").unwrap();
+    std::fs::write(s.home.join(".profile"), "echo WRONG_PROFILE\n").unwrap();
+    std::fs::write(
+        s.home.join(".bashrc"),
+        "export USER_VAR=from-rc\necho RC_BASH_RAN\n",
+    )
+    .unwrap();
+    for flag in [&["-l"][..], &["--login"]] {
+        let run = run_shell(
+            &bash,
+            &s.home,
+            &s.runtime,
+            &[("ENV", "/nonexistent/user-env")],
+            flag,
+            &[
+                "echo \"USER_VAR=$USER_VAR\"",
+                "shopt -q login_shell && echo LOGIN_SHELL_YES",
+                "set -o | grep -q '^posix.*on' && echo POSIX_ON || echo POSIX_OFF",
+                "echo \"POSIXLY=[${POSIXLY_CORRECT-unset}] ENV=[$ENV]\"",
+                "exit",
+            ],
+        );
+        let out = &run.output;
+        assert_integrated(&run, "RC_BASH_RAN");
+        assert!(out.contains("PROFILE_RAN"), "{flag:?}: {out:?}");
+        assert!(!out.contains("WRONG_"), "{flag:?}: {out:?}");
+        assert!(out.contains("LOGIN_SHELL_YES"), "{flag:?}: {out:?}");
+        assert!(out.contains("POSIX_OFF"), "{flag:?}: {out:?}");
+        assert!(
+            out.contains("POSIXLY=[unset] ENV=[/nonexistent/user-env]"),
+            "{flag:?}: {out:?}"
+        );
+    }
+}
+
+#[test]
+fn login_bash_falls_back_through_the_login_files() {
+    let Some(bash) = find("bash") else {
+        eprintln!("skipped: bash is not installed");
+        return;
+    };
+    let s = sandbox();
+    // No .bash_profile or .bash_login: .profile runs, and no .bashrc is
+    // read because it does not source it.
+    std::fs::write(
+        s.home.join(".profile"),
+        "export USER_VAR=from-rc\necho PROFILE_FALLBACK\n",
+    )
+    .unwrap();
+    std::fs::write(s.home.join(".bashrc"), "echo BASHRC_SHOULD_NOT_RUN\n").unwrap();
+    let run = run_shell(
+        &bash,
+        &s.home,
+        &s.runtime,
+        &[],
+        &["-l"],
+        &["echo \"USER_VAR=$USER_VAR\"", "true", "exit"],
+    );
+    assert_integrated(&run, "PROFILE_FALLBACK");
+    assert!(
+        !run.output.contains("BASHRC_SHOULD_NOT_RUN"),
+        "{:?}",
+        run.output
+    );
+}
+
+#[test]
+fn zsh_login_reads_zprofile_and_zlogin_from_the_restored_zdotdir() {
+    let Some(zsh) = find("zsh") else {
+        eprintln!("skipped: zsh is not installed");
+        return;
+    };
+    let s = sandbox();
+    let zdot = s.home.join("zdot");
+    std::fs::create_dir(&zdot).unwrap();
+    std::fs::write(
+        zdot.join(".zprofile"),
+        "export USER_VAR=from-rc\necho ZPROFILE_RAN\n",
+    )
+    .unwrap();
+    std::fs::write(zdot.join(".zshrc"), "PS1='%# '\necho RC_ZSH_RAN\n").unwrap();
+    std::fs::write(zdot.join(".zlogin"), "echo ZLOGIN_RAN\n").unwrap();
+    // Dotfiles in HOME must not be read when ZDOTDIR names another directory.
+    std::fs::write(s.home.join(".zprofile"), "echo WRONG_HOME_ZPROFILE\n").unwrap();
+    let zdot_str = zdot.to_str().unwrap();
+    let run = run_shell(
+        &zsh,
+        &s.home,
+        &s.runtime,
+        &[("ZDOTDIR", zdot_str)],
+        &["-l"],
+        &[
+            "echo \"USER_VAR=$USER_VAR\"",
+            "[[ -o login ]] && echo LOGIN_YES",
+            "echo \"ZDOTDIR_IS=[$ZDOTDIR] SAVED=[${ULTTY_ZSH_ZDOTDIR-unset}]\"",
+            "exit",
+        ],
+    );
+    assert_integrated(&run, "ZPROFILE_RAN");
+    for needle in ["RC_ZSH_RAN", "ZLOGIN_RAN", "LOGIN_YES"] {
+        assert!(run.output.contains(needle), "{needle}: {:?}", run.output);
+    }
+    assert!(!run.output.contains("WRONG_"), "{:?}", run.output);
+    assert!(
+        run.output
+            .contains(&format!("ZDOTDIR_IS=[{zdot_str}] SAVED=[unset]")),
+        "ZDOTDIR not restored:\n{:?}",
+        run.output
+    );
+}
+
+/// A tab opened with a command that is just a shell gets the integration,
+/// and a tab running anything else does not.
+#[test]
+fn a_command_tab_running_a_bare_shell_gets_the_marks() {
+    use ultty::terminal_manager::{TabEnv, TerminalManager};
+    let Some(bash) = find("bash") else {
+        eprintln!("skipped: bash is not installed");
+        return;
+    };
+    let s = sandbox();
+    std::fs::write(
+        s.home.join(".bashrc"),
+        "PS1='$ '\nexport USER_VAR=from-rc\n",
+    )
+    .unwrap();
+    let home = s.home.clone();
+    let mut tab_env = move |_| -> std::io::Result<TabEnv> {
+        Ok(vec![
+            ("HOME".into(), home.clone().into()),
+            ("PROMPT_COMMAND".into(), "".into()),
+            ("ENV".into(), "".into()),
+            ("BASH_ENV".into(), "".into()),
+        ])
+    };
+    let mut marks = |args: &[String]| -> bool {
+        let mut manager = TerminalManager::empty(80, 24);
+        manager
+            .create_tab_with_command(
+                &bash,
+                args,
+                Some(s.home.to_str().unwrap()),
+                None,
+                &mut tab_env,
+            )
+            .expect("spawn");
+        let id = manager.focused_terminal_id().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut found = false;
+        while Instant::now() < deadline && !found {
+            let _ = manager.process_all();
+            let terminal = manager.terminal(id).unwrap().event_loop.terminal();
+            found = terminal
+                .grid()
+                .rows()
+                .any(|row| row.marks().input_start != 0);
+            drop(terminal);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        found
+    };
+    assert!(marks(&[]), "bare shell has no prompt marks");
+    assert!(
+        marks(&["-l".to_string()]),
+        "login shell has no prompt marks"
     );
 }

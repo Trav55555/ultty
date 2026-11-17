@@ -39,20 +39,33 @@ environment Ultty starts in turns it off too. In a shell that was injected,
 `ULTTY_SHELL_INTEGRATION` is `auto` and `ULTTY_SHELL_INTEGRATION_DIR` names
 the directory of integration files, so an rc file can test for it.
 
-How each shell is started (the shell runs with no other arguments):
+How each shell is started (the shell runs with no other arguments, except
+that `-l` or `--login` is kept):
 
 - **bash** runs with `--rcfile` pointing at a wrapper that sources your
   `~/.bashrc`, then the integration. This keeps bash's normal startup: no
   `--posix` mode to undo, and `/etc/bash.bashrc` still runs first. A login
-  bash (`-l`, `--login`) ignores `--rcfile`, so it is left as it is and gets no
-  integration; source the script by hand there.
+  bash (`-l`, `--login`, or a leading `-` in `argv[0]`) ignores `--rcfile`, so
+  it runs as `bash [-l] --posix` with `ENV` naming a script that puts your
+  `ENV` back, turns posix mode off, runs `/etc/profile` and the first of
+  `~/.bash_profile`, `~/.bash_login` and `~/.profile` (your `~/.bashrc` runs
+  only if one of them sources it, as usual), then loads the integration. The
+  shell is still a login shell, and no longer in posix mode, when you get the
+  prompt. Ultty itself starts your shell as a plain interactive shell, not a
+  login shell, on Linux and macOS alike; a login bash comes from a launch
+  profile or `ultty -e bash -l`.
 - **zsh** runs with `ZDOTDIR` pointing at a directory whose `.zshenv` puts
   your original `ZDOTDIR` back (unset stays unset), runs your own `.zshenv`,
-  and loads the integration from the first prompt, after your `.zshrc`.
+  and loads the integration from the first prompt, after your `.zshrc`. With
+  `-l`, `.zprofile` and `.zlogin` are read from your original `ZDOTDIR`, since
+  it is restored before they are looked for.
 - **fish** finds the script in `vendor_conf.d`, because Ultty's directory is
   first on `XDG_DATA_DIRS`; the script removes that entry again.
-- Any other shell is not touched, and neither is a tab that runs a command
-  rather than a shell (`ultty -e`, a launch profile with `command`).
+- A tab that runs a bare shell as its command (`ultty -e bash`, a launch
+  profile or `ulttyctl` new-tab with `command = "zsh"`, or the same with
+  `-l`/`--login`) is injected like a default shell, and the off switches apply.
+- Any other shell is not touched, and neither is a shell given other
+  arguments (`bash -c ...`) or a tab that runs any other command.
 
 If you already source `ultty.bash`, `ultty.zsh` or `ultty.fish` yourself, keep
 doing so: the scripts do nothing the second time, so marks are sent once.

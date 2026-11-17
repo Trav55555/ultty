@@ -1304,6 +1304,16 @@ impl TerminalManager {
         for arg in args {
             full_args.push(arg);
         }
+        // A command that is just a shell (`bash`, `zsh -l`) gets the shell
+        // integration like a default shell; anything else is left alone.
+        let injected = crate::pty::shell_integration::spawn_plan(command, &full_args, env);
+        let (full_args, env): (Vec<&str>, &[(OsString, OsString)]) = match &injected {
+            Some((injected_args, injected_env)) => (
+                injected_args.iter().map(String::as_str).collect(),
+                injected_env,
+            ),
+            None => (full_args, env),
+        };
 
         // Explicit launches confirm both directory setup and exec before
         // publishing the pane; restored shell directories retain their fallback.
