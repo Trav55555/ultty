@@ -1,0 +1,27 @@
+# Andromeda
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/EliverLara/Andromeda
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Andromeda"
+foreground = "#e5e5e5"
+background = "#262a33"
+cursor = "#f8f8f0"
+selection = "#5a5c62c0"
+
+[palette]
+black = "#000000"
+red = "#cd3131"
+green = "#05bc79"
+yellow = "#e5e512"
+blue = "#2472c8"
+magenta = "#bc3fbc"
+cyan = "#0fa8cd"
+white = "#e5e5e5"
+bright_black = "#666666"
+bright_red = "#cd3131"
+bright_green = "#05bc79"
+bright_yellow = "#e5e512"
+bright_blue = "#2472c8"
+bright_magenta = "#bc3fbc"
+bright_cyan = "#0fa8cd"
+bright_white = "#e5e5e5"

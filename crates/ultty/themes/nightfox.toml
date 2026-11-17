@@ -1,0 +1,27 @@
+# Nightfox
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/edeneast/nightfox.nvim
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Nightfox"
+foreground = "#cdcecf"
+background = "#192330"
+cursor = "#cdcecf"
+selection = "#2b3b51c0"
+
+[palette]
+black = "#393b44"
+red = "#c94f6d"
+green = "#81b29a"
+yellow = "#dbc074"
+blue = "#719cd6"
+magenta = "#9d79d6"
+cyan = "#63cdcf"
+white = "#dfdfe0"
+bright_black = "#575860"
+bright_red = "#d16983"
+bright_green = "#8ebaa4"
+bright_yellow = "#e0c989"
+bright_blue = "#86abdc"
+bright_magenta = "#baa1e2"
+bright_cyan = "#7ad5d6"
+bright_white = "#e4e4e5"

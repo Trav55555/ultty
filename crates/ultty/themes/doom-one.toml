@@ -1,0 +1,27 @@
+# Doom One
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/doomemacs/themes
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Doom One"
+foreground = "#bbc2cf"
+background = "#282c34"
+cursor = "#51afef"
+selection = "#42444bc0"
+
+[palette]
+black = "#000000"
+red = "#ff6c6b"
+green = "#98be65"
+yellow = "#ecbe7b"
+blue = "#a9a1e1"
+magenta = "#c678dd"
+cyan = "#51afef"
+white = "#bbc2cf"
+bright_black = "#595959"
+bright_red = "#ff6655"
+bright_green = "#99bb66"
+bright_yellow = "#ecbe7b"
+bright_blue = "#a9a1e1"
+bright_magenta = "#c678dd"
+bright_cyan = "#51afef"
+bright_white = "#bfbfbf"

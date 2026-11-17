@@ -1,0 +1,27 @@
+# Tomorrow Night Blue
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/chriskempson/tomorrow-theme/tree/master/iTerm2
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Tomorrow Night Blue"
+foreground = "#ffffff"
+background = "#002451"
+cursor = "#ffffff"
+selection = "#003f8ec0"
+
+[palette]
+black = "#000000"
+red = "#ff9da4"
+green = "#d1f1a9"
+yellow = "#ffeead"
+blue = "#bbdaff"
+magenta = "#ebbbff"
+cyan = "#99ffff"
+white = "#ffffff"
+bright_black = "#4c4c4c"
+bright_red = "#ff9da4"
+bright_green = "#d1f1a9"
+bright_yellow = "#ffeead"
+bright_blue = "#bbdaff"
+bright_magenta = "#ebbbff"
+bright_cyan = "#99ffff"
+bright_white = "#ffffff"

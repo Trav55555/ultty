@@ -1,0 +1,27 @@
+# Spacegray
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/SublimeText/Spacegray
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Spacegray"
+foreground = "#b3b8c3"
+background = "#20242d"
+cursor = "#b3b8c3"
+selection = "#16181ec0"
+
+[palette]
+black = "#000000"
+red = "#b04b57"
+green = "#87b379"
+yellow = "#e5c179"
+blue = "#7d8fa4"
+magenta = "#a47996"
+cyan = "#85a7a5"
+white = "#b3b8c3"
+bright_black = "#4c4c4c"
+bright_red = "#b04b57"
+bright_green = "#87b379"
+bright_yellow = "#e5c179"
+bright_blue = "#7d8fa4"
+bright_magenta = "#a47996"
+bright_cyan = "#85a7a5"
+bright_white = "#ffffff"

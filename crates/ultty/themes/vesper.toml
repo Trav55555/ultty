@@ -1,0 +1,27 @@
+# Vesper
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/raunofreiberg/vesper
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Vesper"
+foreground = "#ffffff"
+background = "#101010"
+cursor = "#acb1ab"
+selection = "#988049c0"
+
+[palette]
+black = "#101010"
+red = "#f5a191"
+green = "#90b99f"
+yellow = "#e6b99d"
+blue = "#aca1cf"
+magenta = "#e29eca"
+cyan = "#ea83a5"
+white = "#a0a0a0"
+bright_black = "#7e7e7e"
+bright_red = "#ff8080"
+bright_green = "#99ffe4"
+bright_yellow = "#ffc799"
+bright_blue = "#b9aeda"
+bright_magenta = "#ecaad6"
+bright_cyan = "#f591b2"
+bright_white = "#ffffff"

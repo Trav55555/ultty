@@ -65,6 +65,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Session deployment packaging
         run: python3 -S -m unittest discover -s scripts/deploy -p 'test_*.py'
+      - name: Theme importer
+        run: python3 -S -m unittest discover -s scripts/themes -p 'test_*.py'
       - name: Installer against current and older releases
         run: scripts/install-sh-test.sh
       - run: scripts/ci-runner-step.sh cargo test --workspace

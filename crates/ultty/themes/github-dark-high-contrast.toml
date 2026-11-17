@@ -1,0 +1,27 @@
+# GitHub Dark High Contrast
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/primer/github-vscode-theme
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "GitHub Dark High Contrast"
+foreground = "#f0f3f6"
+background = "#0a0c10"
+cursor = "#71b7ff"
+selection = "#f0f3f6c0"
+
+[palette]
+black = "#7a828e"
+red = "#ff9492"
+green = "#26cd4d"
+yellow = "#f0b72f"
+blue = "#71b7ff"
+magenta = "#cb9eff"
+cyan = "#39c5cf"
+white = "#d9dee3"
+bright_black = "#9ea7b3"
+bright_red = "#ffb1af"
+bright_green = "#4ae168"
+bright_yellow = "#f7c843"
+bright_blue = "#91cbff"
+bright_magenta = "#dbb7ff"
+bright_cyan = "#56d4dd"
+bright_white = "#ffffff"

@@ -1,0 +1,27 @@
+# Zenwritten Light
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/zenbones-theme/zenbones.nvim
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Zenwritten Light"
+foreground = "#353535"
+background = "#eeeeee"
+cursor = "#353535"
+selection = "#d7d7d7c0"
+
+[palette]
+black = "#eeeeee"
+red = "#a8334c"
+green = "#4f6c31"
+yellow = "#944927"
+blue = "#286486"
+magenta = "#88507d"
+cyan = "#3b8992"
+white = "#353535"
+bright_black = "#aca9a9"
+bright_red = "#94253e"
+bright_green = "#3f5a22"
+bright_yellow = "#803d1c"
+bright_blue = "#1d5573"
+bright_magenta = "#7b3b70"
+bright_cyan = "#2b747c"
+bright_white = "#5c5c5c"

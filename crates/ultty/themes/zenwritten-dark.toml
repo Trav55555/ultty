@@ -1,0 +1,27 @@
+# Zenwritten Dark
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/zenbones-theme/zenbones.nvim
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Zenwritten Dark"
+foreground = "#bbbbbb"
+background = "#191919"
+cursor = "#c9c9c9"
+selection = "#404040c0"
+
+[palette]
+black = "#191919"
+red = "#de6e7c"
+green = "#819b69"
+yellow = "#b77e64"
+blue = "#6099c0"
+magenta = "#b279a7"
+cyan = "#66a5ad"
+white = "#bbbbbb"
+bright_black = "#4a4546"
+bright_red = "#e8838f"
+bright_green = "#8bae68"
+bright_yellow = "#d68c67"
+bright_blue = "#61abda"
+bright_magenta = "#cf86c1"
+bright_cyan = "#65b8c1"
+bright_white = "#8e8e8e"

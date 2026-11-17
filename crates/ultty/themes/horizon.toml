@@ -1,0 +1,27 @@
+# Horizon
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/jolaleye/horizon-theme-vscode
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Horizon"
+foreground = "#d5d8da"
+background = "#1c1e26"
+cursor = "#6c6f93"
+selection = "#6c6f93c0"
+
+[palette]
+black = "#000000"
+red = "#e95678"
+green = "#29d398"
+yellow = "#fab795"
+blue = "#26bbd9"
+magenta = "#ee64ac"
+cyan = "#59e1e3"
+white = "#e5e5e5"
+bright_black = "#666666"
+bright_red = "#ec6a88"
+bright_green = "#3fdaa4"
+bright_yellow = "#fbc3a7"
+bright_blue = "#3fc4de"
+bright_magenta = "#f075b5"
+bright_cyan = "#6be4e6"
+bright_white = "#e5e5e5"

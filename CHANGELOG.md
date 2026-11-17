@@ -9,6 +9,11 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Added
 
+- 88 more bundled colour themes (Catppuccin, Dracula, Gruvbox, Nord,
+  Solarized, Tokyo Night, Rose Pine, Kanagawa, GitHub and others), your own
+  in `~/.config/ultty/themes/`, and `ultty --list-themes`. `colors.theme` in
+  `config.toml` now takes effect at start, by any spelling of the name; see
+  `docs/configuration.md`.
 - Shell integration loads by itself in the bash, zsh and fish shells Ultty
   starts, with no rc edits (`terminal.shell_integration = "auto" | "off"`,
   or `ULTTY_SHELL_INTEGRATION=off`). The scripts now also report the working

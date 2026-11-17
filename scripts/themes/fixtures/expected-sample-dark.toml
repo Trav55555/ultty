@@ -1,0 +1,27 @@
+# Sample Dark
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://example.com/sample
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Sample Dark"
+foreground = "#f0f0f0"
+background = "#101010"
+cursor = "#ff0000"
+selection = "#303030c0"
+
+[palette]
+black = "#000001"
+red = "#000002"
+green = "#000003"
+yellow = "#000004"
+blue = "#000005"
+magenta = "#000006"
+cyan = "#000007"
+white = "#000008"
+bright_black = "#000009"
+bright_red = "#00000a"
+bright_green = "#00000b"
+bright_yellow = "#00000c"
+bright_blue = "#00000d"
+bright_magenta = "#00000e"
+bright_cyan = "#00000f"
+bright_white = "#000010"

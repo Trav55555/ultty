@@ -1,0 +1,27 @@
+# GitHub Dark Dimmed
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/primer/github-vscode-theme
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "GitHub Dark Dimmed"
+foreground = "#adbac7"
+background = "#22272e"
+cursor = "#539bf5"
+selection = "#adbac7c0"
+
+[palette]
+black = "#545d68"
+red = "#f47067"
+green = "#57ab5a"
+yellow = "#c69026"
+blue = "#539bf5"
+magenta = "#b083f0"
+cyan = "#39c5cf"
+white = "#909dab"
+bright_black = "#636e7b"
+bright_red = "#ff938a"
+bright_green = "#6bc46d"
+bright_yellow = "#daaa3f"
+bright_blue = "#6cb6ff"
+bright_magenta = "#dcbdfb"
+bright_cyan = "#56d4dd"
+bright_white = "#cdd9e5"

@@ -1,0 +1,27 @@
+# Edge Light
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/sainnhe/edge
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Edge Light"
+foreground = "#4b505b"
+background = "#fafafa"
+cursor = "#3a8b84"
+selection = "#e3eaf6c0"
+
+[palette]
+black = "#fafafa"
+red = "#d05858"
+green = "#608e32"
+yellow = "#be7e05"
+blue = "#5079be"
+magenta = "#b05ccc"
+cyan = "#3a8b84"
+white = "#8790a0"
+bright_black = "#afb8c2"
+bright_red = "#e17373"
+bright_green = "#76af6f"
+bright_yellow = "#deb974"
+bright_blue = "#6996e0"
+bright_magenta = "#bf75d6"
+bright_cyan = "#5dbbc1"
+bright_white = "#7e869b"

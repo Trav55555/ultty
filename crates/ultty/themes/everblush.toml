@@ -1,0 +1,27 @@
+# Everblush
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/Everblush/everblush
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Everblush"
+foreground = "#dadada"
+background = "#141b1e"
+cursor = "#dadada"
+selection = "#141b1ec0"
+
+[palette]
+black = "#232a2d"
+red = "#e57474"
+green = "#8ccf7e"
+yellow = "#e5c76b"
+blue = "#67b0e8"
+magenta = "#c47fd5"
+cyan = "#6cbfbf"
+white = "#b3b9b8"
+bright_black = "#464e50"
+bright_red = "#ef7e7e"
+bright_green = "#96d988"
+bright_yellow = "#f4d67a"
+bright_blue = "#71baf2"
+bright_magenta = "#ce89df"
+bright_cyan = "#67cbe7"
+bright_white = "#bdc3c2"

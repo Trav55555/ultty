@@ -39,13 +39,24 @@ impl Config {
     pub fn load() -> Self {
         Self::config_path()
             .and_then(|path| Self::load_from_path(&path).ok())
-            .unwrap_or_default()
+            .unwrap_or_else(|| {
+                let mut config = Self::default();
+                let dir = Self::config_dir().map(|dir| dir.join("themes"));
+                config.colors.resolve_themes(dir.as_deref(), None);
+                config
+            })
     }
 
     /// Load configuration from a specific path.
     pub fn load_from_path(path: &PathBuf) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
         let mut config: Self = toml::from_str(&contents).map_err(ConfigError::Parse)?;
+        let raw: toml::Table = toml::from_str(&contents).map_err(ConfigError::Parse)?;
+        let user_themes = path.parent().map(|dir| dir.join("themes"));
+        config.colors.resolve_themes(
+            user_themes.as_deref(),
+            raw.get("colors").and_then(toml::Value::as_table),
+        );
         config.warn_on_duplicate_keybindings();
         config.font.clamp_size();
         config.font.clamp_line_height();
@@ -207,20 +218,7 @@ impl ThemeConfig {
 
 impl Default for ColorConfig {
     fn default() -> Self {
-        // Include built-in themes
-        let mut themes = HashMap::new();
-        themes.insert(
-            "everforest-dark".to_string(),
-            ThemeConfig::everforest_dark(),
-        );
-        themes.insert("tokyo-night".to_string(), ThemeConfig::tokyo_night());
-        themes.insert("gruvbox-dark".to_string(), ThemeConfig::gruvbox_dark());
-        themes.insert(
-            "catppuccin-mocha".to_string(),
-            ThemeConfig::catppuccin_mocha(),
-        );
-        themes.insert("dark".to_string(), ThemeConfig::dark());
-        themes.insert("light".to_string(), ThemeConfig::light());
+        let themes = crate::themes::default_registry();
 
         let default_theme = ThemeConfig::everforest_dark();
 
@@ -237,14 +235,84 @@ impl Default for ColorConfig {
 }
 
 impl ColorConfig {
-    /// Get the list of available theme names.
+    /// Get the available theme names, sorted.
     pub fn theme_names(&self) -> Vec<String> {
-        self.themes.keys().cloned().collect()
+        let mut names: Vec<String> = self.themes.keys().cloned().collect();
+        names.sort();
+        names
     }
 
-    /// Get a theme by name.
+    /// Get a theme by name. Names match without regard to case, and a space
+    /// or underscore is the same as a dash.
     pub fn get_theme(&self, name: &str) -> Option<&ThemeConfig> {
-        self.themes.get(name)
+        self.themes.get(&crate::themes::normalize_name(name))
+    }
+
+    /// Complete the theme registry after the config file is read: the
+    /// built-in and bundled themes, then the user's `themes/` directory,
+    /// then `[colors.themes.*]` tables from the config file itself, each
+    /// replacing earlier themes of the same name. When the file names a
+    /// `theme`, that theme sets the colours, and any colour the file also
+    /// sets explicitly wins over it. `raw` is the file's `[colors]` table.
+    pub(crate) fn resolve_themes(
+        &mut self,
+        user_dir: Option<&std::path::Path>,
+        raw: Option<&toml::Table>,
+    ) {
+        let inline = if raw.is_some_and(|t| t.contains_key("themes")) {
+            std::mem::take(&mut self.themes)
+        } else {
+            HashMap::new()
+        };
+        let mut registry = crate::themes::default_registry();
+        if let Some(dir) = user_dir {
+            registry.extend(crate::themes::load_dir(dir));
+        }
+        registry.extend(
+            inline
+                .into_iter()
+                .map(|(key, theme)| (crate::themes::normalize_name(&key), theme)),
+        );
+        self.themes = registry;
+
+        let Some(raw) = raw else { return };
+        let Some(name) = raw.get("theme").and_then(toml::Value::as_str) else {
+            return;
+        };
+        let Some(theme) = self.get_theme(name).cloned() else {
+            warn!("theme '{name}' not found; run `ultty --list-themes`");
+            return;
+        };
+        let mut base = ColorConfig {
+            palette: PaletteConfig::default(),
+            ..ColorConfig::default()
+        };
+        base.apply_theme(&theme);
+        if raw.contains_key("foreground") {
+            base.foreground = self.foreground;
+        }
+        if raw.contains_key("background") {
+            base.background = self.background;
+        }
+        if raw.contains_key("cursor") {
+            base.cursor = self.cursor;
+        }
+        if raw.contains_key("selection") {
+            base.selection = self.selection;
+        }
+        if let Some(palette) = raw.get("palette").and_then(toml::Value::as_table) {
+            let mut colors = base.palette.to_array();
+            let explicit = self.palette.to_array();
+            for (i, key) in crate::themes::palette_keys().iter().enumerate() {
+                if palette.contains_key(*key) {
+                    colors[i] = explicit[i];
+                }
+            }
+            base.palette = crate::themes::palette_from_array(colors);
+        }
+        base.themes = std::mem::take(&mut self.themes);
+        base.theme = Some(crate::themes::normalize_name(name));
+        *self = base;
     }
 
     /// Apply a theme to this color config.
@@ -1169,7 +1237,7 @@ impl RgbColor {
     /// Parse from hex string like "#RRGGBB" or "RRGGBB".
     pub fn from_hex(s: &str) -> Option<Self> {
         let s = s.trim_start_matches('#');
-        if s.len() != 6 {
+        if s.len() != 6 || !s.is_ascii() {
             return None;
         }
 
@@ -1217,7 +1285,7 @@ impl RgbaColor {
                     a: 255,
                 })
             }
-            8 => {
+            8 if s.is_ascii() => {
                 let r = u8::from_str_radix(&s[0..2], 16).ok()?;
                 let g = u8::from_str_radix(&s[2..4], 16).ok()?;
                 let b = u8::from_str_radix(&s[4..6], 16).ok()?;
@@ -1548,6 +1616,65 @@ copy = "ctrl+c"
         font.line_height = 1.4;
         font.clamp_line_height();
         assert_eq!(font.line_height, 1.4);
+    }
+
+    fn load_colors(dir: &std::path::Path, toml: &str) -> ColorConfig {
+        let path = dir.join("config.toml");
+        std::fs::write(&path, toml).unwrap();
+        Config::load_from_path(&path).unwrap().colors
+    }
+
+    #[test]
+    fn config_theme_is_applied_by_any_spelling_of_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let colors = load_colors(dir.path(), "[colors]\ntheme = \"Rose Pine\"\n");
+        assert_eq!(colors.theme.as_deref(), Some("rose-pine"));
+        assert_eq!(colors.background, RgbColor::from_hex("#191724").unwrap());
+        assert_eq!(colors.get_theme("ROSE_PINE").unwrap().name, "Rose Pine");
+    }
+
+    #[test]
+    fn explicit_colors_win_over_the_theme_and_no_theme_leaves_them_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let colors = load_colors(
+            dir.path(),
+            "[colors]\ntheme = \"dracula\"\nbackground = \"#010203\"\n[colors.palette]\nred = \"#aa0000\"\n",
+        );
+        assert_eq!(colors.background, RgbColor::new(1, 2, 3));
+        assert_eq!(colors.foreground, RgbColor::from_hex("#f8f8f2").unwrap());
+        assert_eq!(colors.palette.red, RgbColor::new(0xaa, 0, 0));
+        assert_eq!(colors.palette.green, RgbColor::from_hex("#50fa7b").unwrap());
+
+        let plain = load_colors(dir.path(), "[colors]\nbackground = \"#010203\"\n");
+        assert_eq!(plain.background, RgbColor::new(1, 2, 3));
+        assert_eq!(plain.foreground, ColorConfig::default().foreground);
+    }
+
+    #[test]
+    fn a_theme_in_the_user_themes_directory_replaces_the_bundled_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let themes = dir.path().join("themes");
+        std::fs::create_dir(&themes).unwrap();
+        let dracula = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("themes/dracula.toml"),
+        )
+        .unwrap()
+        .replace("#282a36", "#123456");
+        std::fs::write(themes.join("Dracula.toml"), dracula).unwrap();
+
+        let colors = load_colors(dir.path(), "[colors]\ntheme = \"dracula\"\n");
+
+        assert_eq!(colors.background, RgbColor::new(0x12, 0x34, 0x56));
+        assert!(
+            colors.theme_names().contains(&"nord".to_owned()),
+            "bundled themes remain"
+        );
+    }
+
+    #[test]
+    fn color_hex_with_multibyte_text_is_rejected_not_a_panic() {
+        assert_eq!(RgbColor::from_hex("é€x"), None);
+        assert_eq!(RgbaColor::from_hex("éééé"), None);
     }
 
     #[test]

@@ -1,0 +1,27 @@
+# Atom One Light
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/atom/atom/tree/master/packages/one-light-ui
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Atom One Light"
+foreground = "#2a2c33"
+background = "#f9f9f9"
+cursor = "#bbbbbb"
+selection = "#d0dffcc0"
+
+[palette]
+black = "#000000"
+red = "#de3e35"
+green = "#3f953a"
+yellow = "#d2b67c"
+blue = "#2f5af3"
+magenta = "#950095"
+cyan = "#3f953a"
+white = "#bbbbbb"
+bright_black = "#000000"
+bright_red = "#de3e35"
+bright_green = "#3f953a"
+bright_yellow = "#d2b67c"
+bright_blue = "#2f5af3"
+bright_magenta = "#a00095"
+bright_cyan = "#3f953a"
+bright_white = "#ffffff"

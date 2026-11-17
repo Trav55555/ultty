@@ -1,0 +1,27 @@
+# Selenized Dark
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/jan-warchol/selenized
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Selenized Dark"
+foreground = "#adbcbc"
+background = "#103c48"
+cursor = "#adbcbc"
+selection = "#184956c0"
+
+[palette]
+black = "#184956"
+red = "#fa5750"
+green = "#75b938"
+yellow = "#dbb32d"
+blue = "#4695f7"
+magenta = "#f275be"
+cyan = "#41c7b9"
+white = "#adbcbc"
+bright_black = "#72898f"
+bright_red = "#ff665c"
+bright_green = "#84c747"
+bright_yellow = "#ebc13d"
+bright_blue = "#58a3ff"
+bright_magenta = "#ff84cd"
+bright_cyan = "#53d6c7"
+bright_white = "#cad8d9"

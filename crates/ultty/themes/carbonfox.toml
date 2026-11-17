@@ -1,0 +1,27 @@
+# Carbonfox
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/EdenEast/nightfox.nvim/tree/main/extra
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Carbonfox"
+foreground = "#f2f4f8"
+background = "#161616"
+cursor = "#f2f4f8"
+selection = "#2a2a2ac0"
+
+[palette]
+black = "#282828"
+red = "#ee5396"
+green = "#25be6a"
+yellow = "#08bdba"
+blue = "#78a9ff"
+magenta = "#be95ff"
+cyan = "#33b1ff"
+white = "#dfdfe0"
+bright_black = "#484848"
+bright_red = "#f16da6"
+bright_green = "#46c880"
+bright_yellow = "#2dc7c4"
+bright_blue = "#8cb6ff"
+bright_magenta = "#c8a5ff"
+bright_cyan = "#52bdff"
+bright_white = "#e4e4e5"

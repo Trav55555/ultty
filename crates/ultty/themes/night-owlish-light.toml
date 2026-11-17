@@ -1,0 +1,27 @@
+# Night Owlish Light
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/praveenpuglia/night-owlish-theme
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Night Owlish Light"
+foreground = "#403f53"
+background = "#ffffff"
+cursor = "#403f53"
+selection = "#f2f2f2c0"
+
+[palette]
+black = "#011627"
+red = "#d3423e"
+green = "#2aa298"
+yellow = "#daaa01"
+blue = "#4876d6"
+magenta = "#403f53"
+cyan = "#08916a"
+white = "#7a8181"
+bright_black = "#7a8181"
+bright_red = "#f76e6e"
+bright_green = "#49d0c5"
+bright_yellow = "#dac26b"
+bright_blue = "#5ca7e4"
+bright_magenta = "#697098"
+bright_cyan = "#00c990"
+bright_white = "#989fb1"

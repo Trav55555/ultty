@@ -1,0 +1,27 @@
+# Alabaster
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: 'https://github.com/mkaschenko/iterm2-theme-alabaster
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Alabaster"
+foreground = "#000000"
+background = "#f7f7f7"
+cursor = "#007acc"
+selection = "#bfdbfec0"
+
+[palette]
+black = "#000000"
+red = "#aa3731"
+green = "#448c27"
+yellow = "#cb9000"
+blue = "#325cc0"
+magenta = "#7a3e9d"
+cyan = "#0083b2"
+white = "#b7b7b7"
+bright_black = "#777777"
+bright_red = "#f05050"
+bright_green = "#60cb00"
+bright_yellow = "#f2af50"
+bright_blue = "#007acc"
+bright_magenta = "#e64ce6"
+bright_cyan = "#00aacb"
+bright_white = "#f7f7f7"

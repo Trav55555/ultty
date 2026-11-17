@@ -1,0 +1,27 @@
+# Cobalt Next
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/davidleininger/cobaltnext-vscode
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Cobalt Next"
+foreground = "#d7deea"
+background = "#162c35"
+cursor = "#ffc64c"
+selection = "#4c5b67c0"
+
+[palette]
+black = "#000000"
+red = "#ff527b"
+green = "#8cc98f"
+yellow = "#ffc64c"
+blue = "#409dd4"
+magenta = "#cba3c7"
+cyan = "#37b5b4"
+white = "#d7deea"
+bright_black = "#62747f"
+bright_red = "#e47e8b"
+bright_green = "#baddbb"
+bright_yellow = "#ffdc91"
+bright_blue = "#7ac0eb"
+bright_magenta = "#f3ccef"
+bright_cyan = "#84e4e3"
+bright_white = "#ffffff"

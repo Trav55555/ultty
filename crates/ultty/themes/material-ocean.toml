@@ -1,0 +1,27 @@
+# Material Ocean
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/kaicataldo/material.vim
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Material Ocean"
+foreground = "#8f93a2"
+background = "#0f111a"
+cursor = "#ffcc00"
+selection = "#1f2233c0"
+
+[palette]
+black = "#546e7a"
+red = "#ff5370"
+green = "#c3e88d"
+yellow = "#ffcb6b"
+blue = "#82aaff"
+magenta = "#c792ea"
+cyan = "#89ddff"
+white = "#ffffff"
+bright_black = "#546e7a"
+bright_red = "#ff5370"
+bright_green = "#c3e88d"
+bright_yellow = "#ffcb6b"
+bright_blue = "#82aaff"
+bright_magenta = "#c792ea"
+bright_cyan = "#89ddff"
+bright_white = "#ffffff"

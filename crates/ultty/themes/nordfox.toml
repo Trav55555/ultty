@@ -1,0 +1,27 @@
+# Nordfox
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/EdenEast/nightfox.nvim/tree/main/extra
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Nordfox"
+foreground = "#cdcecf"
+background = "#2e3440"
+cursor = "#cdcecf"
+selection = "#3e4a5bc0"
+
+[palette]
+black = "#3b4252"
+red = "#bf616a"
+green = "#a3be8c"
+yellow = "#ebcb8b"
+blue = "#81a1c1"
+magenta = "#b48ead"
+cyan = "#88c0d0"
+white = "#e5e9f0"
+bright_black = "#53648d"
+bright_red = "#d06f79"
+bright_green = "#b1d196"
+bright_yellow = "#f0d399"
+bright_blue = "#8cafd2"
+bright_magenta = "#c895bf"
+bright_cyan = "#93ccdc"
+bright_white = "#e7ecf4"

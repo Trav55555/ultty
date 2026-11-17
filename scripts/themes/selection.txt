@@ -1,0 +1,123 @@
+# Themes to bundle, by their name in iTerm2-Color-Schemes' ghostty/ directory.
+# One per line. Formats:
+#   Name                      slug is the lower-cased name with dashes
+#   Name => slug              choose the slug
+#   Name | SPDX | source-url  licence override, for a scheme licenses.yml
+#                             lists as unknown but whose licence was checked
+#                             at source-url
+# The importer refuses any scheme whose licence is not on its allow list.
+# Gruvbox Dark, Catppuccin Mocha and TokyoNight Night are not listed because
+# Ultty already ships hand-tuned `gruvbox-dark`, `catppuccin-mocha` and
+# `tokyo-night`.
+
+# Catppuccin
+Catppuccin Frappe
+Catppuccin Latte
+Catppuccin Macchiato
+
+# Dracula (MIT, checked at its own repository)
+Dracula | MIT | https://github.com/dracula/iterm/blob/master/LICENSE
+
+# Gruvbox
+Gruvbox Dark Hard
+Gruvbox Light
+Gruvbox Light Hard
+Gruvbox Material
+Gruvbox Material Dark
+Gruvbox Material Light
+
+# Nord
+Nord
+Nord Light
+Nordfox
+
+# Solarized: see scripts/themes/sources/
+
+# Tokyo Night
+TokyoNight Day => tokyo-night-day
+TokyoNight Moon => tokyo-night-moon
+TokyoNight Storm => tokyo-night-storm
+
+# One
+Atom One Dark
+Atom One Light
+One Half Dark
+One Half Light
+
+# Rose Pine
+Rose Pine
+Rose Pine Moon
+Rose Pine Dawn
+
+# Kanagawa
+Kanagawa Wave
+Kanagawa Dragon
+Kanagawabones
+
+# Everforest
+Everforest Dark Hard
+Everforest Light Med
+
+# GitHub
+GitHub Dark
+GitHub Dark Default
+GitHub Dark Dimmed
+GitHub Dark High Contrast
+GitHub Dark Colorblind
+GitHub Light Default
+GitHub Light High Contrast
+GitHub Light Colorblind
+
+# Nightfox family
+Nightfox
+Carbonfox
+Dayfox
+Dawnfox
+Duskfox
+Terafox
+
+# Others
+Alabaster
+Andromeda
+Aura
+Ayu Mirage
+Challenger Deep
+Cobalt Next
+Doom One
+Edge Light
+Everblush
+Fairyfloss
+Flexoki Dark
+Flexoki Light
+Horizon
+Hybrid
+Iceberg Dark
+Iceberg Light
+Material
+Material Darker
+Material Ocean
+Melange Dark
+Melange Light
+Mellifluous
+Mellow
+Moonfly
+Night Owlish Light
+Oxocarbon
+Poimandres
+Rebecca
+Selenized Dark
+Selenized Light
+Shades Of Purple
+Snazzy
+Sonokai
+Spacegray
+Synthwave Everything
+Tomorrow
+Tomorrow Night
+Tomorrow Night Blue
+Tomorrow Night Bright
+Tomorrow Night Eighties
+Vesper
+Zenburned
+Zenwritten Dark
+Zenwritten Light
