@@ -487,7 +487,8 @@ mod tests {
     fn recently_run_actions_come_first_with_an_empty_query() {
         let mut palette = open();
         let first = labels(&palette)[0];
-        for query in ["reload", "new tab"] {
+        assert_eq!(first, "New tab");
+        for query in ["reload", "screenshot"] {
             type_text(&mut palette, query);
             assert!(matches!(
                 palette.handle(PaletteKey::Enter),
@@ -495,7 +496,10 @@ mod tests {
             ));
             palette.open(&KeybindingConfig::default());
         }
-        assert_eq!(&labels(&palette)[..3], &["New tab", "Reload config", first]);
+        assert_eq!(
+            &labels(&palette)[..3],
+            &["Take screenshot", "Reload config", "New tab"]
+        );
         // A query ranks by match alone.
         type_text(&mut palette, "copy");
         assert_eq!(
