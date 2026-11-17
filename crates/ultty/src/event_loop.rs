@@ -290,6 +290,14 @@ pub struct InBandInput {
 
 struct Shared {
     state: Mutex<State>,
+    /// Held by the I/O thread from a PTY read until its bytes are parsed,
+    /// and by [`EventLoop::submit_shell_command`] around its check that no
+    /// output is unread, so a submission never sees bytes that are read but
+    /// not yet applied. Separate from `state` so keys and frames never wait
+    /// on a read: holding `state` across reads starved them under a flood
+    /// (keypress latency 27 ms before, 45 to 90 ms after, 2026-11-17).
+    /// Order: `read_gate` before `state`.
+    read_gate: Mutex<()>,
     changed: Condvar,
     /// Threads inside [`EventLoop::wait`]. `Condvar::notify_all` is a futex
     /// system call even with nobody waiting, and the app never waits, so the
@@ -307,6 +315,13 @@ impl Shared {
         // The I/O thread never panics while holding the lock in practice; if
         // it did, the terminal state is still the best we have.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// See [`Shared::read_gate`]. It guards no data, so poisoning is moot.
+    fn read_gate(&self) -> MutexGuard<'_, ()> {
+        self.read_gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Wake threads blocked in [`EventLoop::wait`], if there are any. Call it
@@ -486,6 +501,7 @@ impl EventLoop {
             waiters: AtomicUsize::new(0),
             wake_pending: AtomicBool::new(false),
             waker: Mutex::new(None),
+            read_gate: Mutex::new(()),
             stop: AtomicBool::new(false),
         });
 
@@ -684,6 +700,7 @@ impl EventLoop {
             })?;
         let sequence;
         {
+            let _read_gate = self.shared.read_gate();
             let mut state = self.shared.lock();
             if state.closed || state.attached_exited || self.child.has_exited() {
                 return Err(io::Error::new(io::ErrorKind::BrokenPipe, "PTY closed"));
@@ -1141,9 +1158,10 @@ fn drain(
     let mut read_batches = 0usize;
     let mut read_bytes = 0usize;
     loop {
-        // The master is nonblocking. Reading and applying its bytes share
-        // submit's lock, so drained-but-unparsed old C/D markers cannot be
-        // mistaken for a newly reserved command.
+        // The master is nonblocking. Reading and applying its bytes hold
+        // the read gate submit takes, so drained-but-unparsed old C/D markers
+        // cannot be mistaken for a newly reserved command; keys and frames
+        // take only the state lock and do not wait on the read.
         let (n, urgent) = read_and_parse(shared, parser, buf, |buf| pty.read(buf))?;
         if n == 0 {
             if let Some(start) = start.filter(|_| read_bytes > 0) {
@@ -1172,11 +1190,12 @@ fn read_and_parse(
     buf: &mut [u8],
     read: impl FnOnce(&mut [u8]) -> Result<usize, PtyError>,
 ) -> Result<(usize, bool), PtyError> {
-    let mut state = shared.lock();
+    let _read_gate = shared.read_gate();
     let n = read(buf)?;
     if n == 0 {
         return Ok((0, false));
     }
+    let mut state = shared.lock();
     let history_before = state.terminal.buffer().history_len();
     parse_into(&mut state, parser, &buf[..n]);
     if history_before.saturating_sub(state.terminal.buffer().history_len())
@@ -1743,10 +1762,10 @@ mod status_and_submission_tests {
             .unwrap();
         });
         read_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        // submit_shell_command must acquire this exact lock to reserve or
-        // enqueue. The old bytes are already read but not yet applied.
+        // submit_shell_command must acquire this gate before it checks for
+        // unread output. The old bytes are already read but not yet applied.
         assert!(matches!(
-            event_loop.shared.state.try_lock(),
+            event_loop.shared.read_gate.try_lock(),
             Err(std::sync::TryLockError::WouldBlock)
         ));
         release_tx.send(()).unwrap();
@@ -1754,6 +1773,30 @@ mod status_and_submission_tests {
         assert!(event_loop.submit_shell_command("true").is_err());
         assert!(event_loop.shared.lock().shell_commands.pending.is_none());
         assert_eq!(event_loop.shared.lock().shell_commands.next_sequence, 0);
+    }
+
+    #[test]
+    fn test_keys_do_not_wait_on_a_pty_read() {
+        let mut event_loop = quiet();
+        let shared = Arc::clone(&event_loop.shared);
+        let (read_tx, read_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            read_and_parse(&shared, &mut AnsiParser::new(), &mut [0; 128], |buf| {
+                read_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                buf[0] = b'x';
+                Ok(1)
+            })
+            .unwrap();
+        });
+        read_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The reader is inside read(): the state lock that keys and frames
+        // need must be free (under a flood the reader is almost always here).
+        assert!(event_loop.shared.state.try_lock().is_ok());
+        event_loop.send_input(b"k").unwrap();
+        release_tx.send(()).unwrap();
+        reader.join().unwrap();
     }
 
     #[test]
