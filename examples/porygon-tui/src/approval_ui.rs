@@ -7,6 +7,39 @@ use crate::approval_client::PendingApproval;
 use crate::types::ApprovalRequest;
 use crate::{Msg, PorygonTui};
 
+/// Shown whenever the daemon says the approved command leaves the sandbox.
+pub(crate) const HOST_EXECUTION_LINE: &str = "Runs on your machine (outside the project sandbox)";
+
+/// Whether the daemon marked this request as host execution. Older daemons
+/// omit these fields, so their requests render as before. A refreshed pending
+/// record carries the stored reason and arguments rather than `execution`.
+pub(crate) fn runs_on_host(request: &ApprovalRequest) -> bool {
+    let context = &request.params;
+    context.get("execution").and_then(serde_json::Value::as_str) == Some("host")
+        || context.get("reason").and_then(serde_json::Value::as_str)
+            == Some("host_execution_request")
+        || context
+            .get("params")
+            .and_then(|params| params.get("host"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
+/// The model's stated reason for host execution, when it gave one.
+pub(crate) fn host_justification(request: &ApprovalRequest) -> Option<&str> {
+    let context = &request.params;
+    context
+        .get("justification")
+        .or_else(|| {
+            context
+                .get("params")
+                .and_then(|params| params.get("justification"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
 impl PorygonTui {
     pub(crate) fn approval_session_available(&self) -> bool {
         if self.approval_is_stream || !self.approval_supports("session") {

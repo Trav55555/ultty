@@ -138,7 +138,19 @@ impl PorygonTui {
     }
 
     fn approval_panel_height(&self) -> u16 {
-        self.terminal_height.saturating_sub(2).clamp(1, 10)
+        // Room for the host-execution line and two justification lines.
+        let host_rows = if self
+            .pending_approval
+            .as_ref()
+            .is_some_and(crate::approval_ui::runs_on_host)
+        {
+            3
+        } else {
+            0
+        };
+        self.terminal_height
+            .saturating_sub(2)
+            .clamp(1, 10 + host_rows)
     }
 
     pub(crate) fn update_scroll_dimensions(&mut self) {
@@ -193,7 +205,12 @@ impl PorygonTui {
                     .max(1),
             );
             let scope = &request.params["session_scope"];
-            let content = format!("This exact command may run again in this session until the daemon restarts.\nConversation: {}\nProject: {}\nExact argv: {}", scope["conversation_id"].as_str().unwrap_or(""), scope["project_root"].as_str().unwrap_or(""), scope["argv"]);
+            let location = if crate::approval_ui::runs_on_host(request) {
+                format!("{}.\n", crate::approval_ui::HOST_EXECUTION_LINE)
+            } else {
+                String::new()
+            };
+            let content = format!("{location}This exact command may run again in this session until the daemon restarts.\nConversation: {}\nProject: {}\nExact argv: {}", scope["conversation_id"].as_str().unwrap_or(""), scope["project_root"].as_str().unwrap_or(""), scope["argv"]);
             return crate::work_views::wrap(&content, width);
         }
         let risk = if request.risk_score < 0.0 {
@@ -206,11 +223,12 @@ impl PorygonTui {
         let durable_context = durable_tool_call.then_some(&request.params);
         let scope = if self.approval_is_stream {
             "current stream"
-        } else if durable_context
-            .and_then(|context| context.get("reason"))
-            .and_then(serde_json::Value::as_str)
-            == Some("missing_policy_binding")
-        {
+        } else if matches!(
+            durable_context
+                .and_then(|context| context.get("reason"))
+                .and_then(serde_json::Value::as_str),
+            Some("missing_policy_binding" | "host_execution_request")
+        ) {
             "this invocation only"
         } else {
             "durable request"
@@ -225,7 +243,16 @@ impl PorygonTui {
         let arguments = durable_context
             .and_then(|context| context.get("params"))
             .unwrap_or(&request.params);
-        let content = format!("Tool: {}\nArguments:\n{}\nScope: {scope}\n{}{}{}Request: {}\nReason: {}\nRisk: {risk}\nAffected scope: {}\nReversible: {}",
+        let location = if crate::approval_ui::runs_on_host(request) {
+            format!(
+                "{}\nJustification: {}\n",
+                crate::approval_ui::HOST_EXECUTION_LINE,
+                crate::approval_ui::host_justification(request).unwrap_or("(none given)")
+            )
+        } else {
+            String::new()
+        };
+        let content = format!("{location}Tool: {}\nArguments:\n{}\nScope: {scope}\n{}{}{}Request: {}\nReason: {}\nRisk: {risk}\nAffected scope: {}\nReversible: {}",
             request.tool_name,
             serde_json::to_string_pretty(arguments).unwrap_or_else(|error| format!("Could not display arguments: {error}")),
             context_line("run_id", "Run"),
@@ -329,7 +356,28 @@ impl PorygonTui {
                 .max(1),
         );
         let preview = format!("{}: {preview}", request.tool_name);
-        let lines = crate::work_views::wrap(&preview, width);
+        // At most two wrapped lines; a cut-off second line ends with an ellipsis.
+        let clipped = |text: &str| {
+            let lines = crate::work_views::wrap(text, width);
+            let more = lines.len() > 2;
+            lines
+                .into_iter()
+                .take(2)
+                .enumerate()
+                .map(|(index, line)| {
+                    if index == 1 && more {
+                        format!(
+                            "{} …",
+                            line.chars()
+                                .take(width.saturating_sub(2))
+                                .collect::<String>()
+                        )
+                    } else {
+                        line
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
         let mut panel = Column::new()
             .height(Dimension::Cells(f32::from(self.approval_panel_height())))
             .flex_shrink(0.0)
@@ -337,18 +385,19 @@ impl PorygonTui {
             .border_color(Theme::current().primary)
             .bg(Theme::current().background)
             .child(Text::new("Permission required"));
-        for (index, line) in lines.iter().take(2).enumerate() {
-            let text = if index == 1 && lines.len() > 2 {
-                format!(
-                    "{} …",
-                    line.chars()
-                        .take(width.saturating_sub(2))
-                        .collect::<String>()
-                )
-            } else {
-                line.clone()
-            };
-            panel = panel.child(Text::new(text));
+        for line in clipped(&preview) {
+            panel = panel.child(Text::new(line));
+        }
+        if crate::approval_ui::runs_on_host(request) {
+            panel = panel.child(RichText::new().span(
+                crate::approval_ui::HOST_EXECUTION_LINE,
+                Style::new().fg(Theme::current().warning).bold(),
+            ));
+            if let Some(reason) = crate::approval_ui::host_justification(request) {
+                for line in clipped(&format!("Why: {reason}")) {
+                    panel = panel.child(Text::new(line));
+                }
+            }
         }
         if self.approval_stage == 2 {
             return panel
@@ -1299,6 +1348,94 @@ mod tests {
         app.handle_event(&composer_key(Key::Escape, false));
         assert!(!app.approval_details);
         assert_eq!(app.input.current_value(), "unsent draft");
+    }
+
+    #[test]
+    fn approval_menu_shows_host_execution_only_when_daemon_marks_it() {
+        let render = |params: serde_json::Value| {
+            let mut app = PorygonTui::new();
+            app.terminal_width = 80;
+            app.terminal_height = 24;
+            app.pending_approval = Some(ApprovalRequest {
+                scope: Some("tool_call".into()),
+                decision_version: Some("v1".into()),
+                decision_stale: false,
+                id: "one".into(),
+                tool_name: "run_argv".into(),
+                params,
+                risk_score: -1.0,
+                reasoning: "review".into(),
+                blast_radius: "unknown".into(),
+                reversible: None,
+            });
+            app.show_approval_modal = true;
+            app.update_scroll_dimensions();
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| app.render_view().render_ansi(frame, frame.area()))
+                .unwrap();
+            let screen = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>();
+            let details = app
+                .approval_rows(app.pending_approval.as_ref().unwrap())
+                .join("\n");
+            (screen, details)
+        };
+        let argv = serde_json::json!({"argv": ["ulttyctl", "--help"]});
+        let (screen, details) = render(serde_json::json!({
+            "params": argv,
+            "reason": "host_execution_request",
+            "execution": "host",
+            "justification": "ulttyctl drives your terminal",
+            "approval_options": ["once", "reject_feedback"],
+        }));
+        assert!(
+            screen.contains("Runs on your machine (outside the project sandbox)"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Why: ulttyctl drives your terminal"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Allow once") && screen.contains("Reject"),
+            "{screen}"
+        );
+        assert!(details.contains("Runs on your machine"), "{details}");
+        assert!(
+            details.contains("Justification: ulttyctl drives your terminal"),
+            "{details}"
+        );
+        assert!(details.contains("Scope: this invocation only"), "{details}");
+
+        // An older daemon sends no execution field: the menu renders as before.
+        let (screen, details) = render(serde_json::json!({
+            "params": argv,
+            "reason": "missing_policy_binding",
+            "approval_options": ["once", "reject_feedback"],
+        }));
+        assert!(screen.contains("Permission required"), "{screen}");
+        assert!(screen.contains("Allow once"), "{screen}");
+        assert!(!screen.contains("Runs on your machine"), "{screen}");
+        assert!(!screen.contains("Why:"), "{screen}");
+        assert!(!details.contains("Runs on your machine"), "{details}");
+
+        // A refreshed pending record keeps the stored reason and arguments.
+        let (screen, _) = render(serde_json::json!({
+            "params": {"argv": ["ulttyctl", "--help"], "host": true, "justification": "drive the terminal"},
+            "reason": "host_execution_request",
+        }));
+        assert!(
+            screen.contains("Runs on your machine (outside the project sandbox)"),
+            "{screen}"
+        );
+        assert!(screen.contains("Why: drive the terminal"), "{screen}");
     }
 
     #[test]

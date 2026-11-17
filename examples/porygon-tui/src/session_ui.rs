@@ -144,7 +144,9 @@ impl PorygonTui {
                 }) {
                     self.tool_calls[index].status = ToolStatus::Pending;
                 }
-                let reasoning = if context["reason"] == "missing_policy_binding" {
+                let reasoning = if context["reason"] == "host_execution_request" {
+                    "Runs on your machine, outside the project sandbox. Approve this exact command, or deny it."
+                } else if context["reason"] == "missing_policy_binding" {
                     "Execution is not enabled. Approve this exact action once, or deny it. This does not enable future commands."
                 } else {
                     "Approve the exact action shown once, or deny it. Execution has not happened yet."
