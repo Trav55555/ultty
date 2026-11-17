@@ -553,18 +553,7 @@ impl Renderer {
             self.render_ime_preedit(encoder, view, preedit);
         }
 
-        // Render keyboard shortcuts overlay if visible
-        if overlay.shortcuts_visible {
-            if let Some(keybindings) = overlay.keybindings {
-                self.render_shortcuts_overlay(encoder, view, keybindings);
-            }
-        }
-        if let Some(rows) = overlay.protocol_status {
-            self.render_protocol_status_overlay(encoder, view, rows);
-        }
-        if let Some(tab_bar) = overlay.tab_bar {
-            self.render_main_menu(encoder, view, tab_bar);
-        }
+        self.render_modal_overlays(encoder, view, overlay);
     }
 
     /// Build background vertices with pane offset.

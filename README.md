@@ -104,6 +104,7 @@ The release also has a Linux x86_64 tarball, `.deb` and `.rpm` packages, and
 
 Useful runtime overlays:
 
+- `Ctrl+Shift+P` opens the command palette: type to find an action and press Enter to run it.
 - `Ctrl+Shift+?` opens the keyboard shortcuts overlay.
 - `Ctrl+Shift+I` opens the native protocol status overlay with socket, session, dirty-state, layout, and recent-error details.
 

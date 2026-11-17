@@ -431,9 +431,7 @@ impl Renderer {
         );
 
         self.render_screenshot_overlays(&mut encoder, &view, terminal, overlay);
-        if let Some(tab_bar) = overlay.tab_bar {
-            self.render_main_menu(&mut encoder, &view, tab_bar);
-        }
+        self.render_modal_overlays(&mut encoder, &view, overlay);
 
         let png_data = self.read_back_png(encoder, &texture)?;
         std::fs::write(path, &png_data)?;
@@ -553,9 +551,7 @@ impl Renderer {
         );
 
         self.render_screenshot_overlays(&mut encoder, &view, terminal, overlay);
-        if let Some(tab_bar) = overlay.tab_bar {
-            self.render_main_menu(&mut encoder, &view, tab_bar);
-        }
+        self.render_modal_overlays(&mut encoder, &view, overlay);
 
         self.read_back_png(encoder, &texture)
     }

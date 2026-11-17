@@ -11,7 +11,11 @@ use std::time::Instant;
 
 use accesskit::Rect;
 use ultty::a11y::scene::{Placement, SceneSnapshot};
-use ultty::a11y::tree::{GridSnapshot, PaneSnapshot, Snapshot, SurfaceSnapshot, TabSnapshot};
+use ultty::a11y::tree::{
+    GridSnapshot, PaletteItemSnapshot, PaletteSnapshot, PaneSnapshot, Snapshot, SurfaceSnapshot,
+    TabSnapshot,
+};
+use ultty::command_palette::CommandPalette;
 use ultty::protocol::session::LiveChange;
 use ultty::protocol::{NativeSession, ProtocolServer};
 use ultty::terminal_manager::ManagedTerminal;
@@ -97,6 +101,7 @@ impl App {
                 self.renderer.surface_size(),
                 self.renderer.tab_bar_height(),
                 self.renderer.cell_dimensions(),
+                &self.command_palette,
             )
         };
         adapter.update(now, snapshot);
@@ -142,6 +147,11 @@ impl App {
         if let Some(terminal) = self.runtime.manager.focused_terminal() {
             scrolled_back(&terminal.event_loop.terminal()).hash(&mut hasher);
         }
+        if self.command_palette.is_open() {
+            self.command_palette.query().hash(&mut hasher);
+            self.command_palette.selected().hash(&mut hasher);
+            self.command_palette.rows().len().hash(&mut hasher);
+        }
         if let Some(server) = &self.runtime.protocol {
             let mut sessions: Vec<(u64, u64)> = server
                 .active_tab_sessions()
@@ -173,6 +183,7 @@ fn accessibility_snapshot(
     (window_width, window_height): (u32, u32),
     tab_bar_height: f32,
     (cell_width, cell_height): (f32, f32),
+    palette: &CommandPalette,
 ) -> Snapshot {
     let tabs = bar
         .iter()
@@ -261,7 +272,31 @@ fn accessibility_snapshot(
             })
         })
         .collect();
-    Snapshot { tabs, panes }
+    Snapshot {
+        tabs,
+        panes,
+        palette: palette_snapshot(palette),
+    }
+}
+
+/// The palette's query and listed actions, while it is open.
+fn palette_snapshot(palette: &CommandPalette) -> Option<PaletteSnapshot> {
+    if !palette.is_open() {
+        return None;
+    }
+    let items: Vec<PaletteItemSnapshot> = palette
+        .rows()
+        .map(|row| PaletteItemSnapshot {
+            label: row.entry.label.to_owned(),
+            key: row.entry.key.clone(),
+        })
+        .collect();
+    let selected = (!items.is_empty()).then(|| palette.selected());
+    Some(PaletteSnapshot {
+        query: palette.query().to_owned(),
+        items,
+        selected,
+    })
 }
 
 /// Whether `terminal`'s view is scrolled back into its history.

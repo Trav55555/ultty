@@ -229,6 +229,10 @@ impl App {
                     x: cell.x,
                     y: cell.y,
                 }),
+            command_palette: self
+                .command_palette
+                .is_open()
+                .then_some(&self.command_palette),
         };
 
         // Only the visible tab's native sessions are drawn, and only the
@@ -340,6 +344,10 @@ impl App {
                     x: cell.x,
                     y: cell.y,
                 }),
+            command_palette: self
+                .command_palette
+                .is_open()
+                .then_some(&self.command_palette),
         };
 
         self.renderer.render_panes(view, &panes, &overlay);

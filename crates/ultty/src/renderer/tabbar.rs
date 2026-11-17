@@ -151,7 +151,7 @@ fn dim(color: Rgba, amount: f32) -> Rgba {
     )
 }
 
-fn mix(a: Rgba, b: Rgba, amount: f32) -> Rgba {
+pub(super) fn mix(a: Rgba, b: Rgba, amount: f32) -> Rgba {
     let amount = amount.clamp(0.0, 1.0);
     Rgba::new(
         a.r + (b.r - a.r) * amount,

@@ -3,6 +3,7 @@
 mod accessibility;
 mod actions;
 mod blink;
+mod command_palette;
 mod control;
 mod control_events;
 mod control_resize;
@@ -224,6 +225,8 @@ pub struct App {
     divider_dragging: Option<(ultty::pane_layout::Divider, f32)>,
     /// Keyboard shortcuts overlay visible
     shortcuts_visible: bool,
+    /// The command palette; open, it takes every key.
+    command_palette: ultty::command_palette::CommandPalette,
     /// Native protocol status overlay visible
     protocol_status_visible: bool,
     /// Cached list of keybindings for display
@@ -499,6 +502,7 @@ impl App {
             bell_active_until: None,
             divider_dragging: None,
             shortcuts_visible: false,
+            command_palette: Default::default(),
             protocol_status_visible: false,
             shortcuts_list,
             cursor_blink: blink::CursorBlink::new(),
