@@ -403,7 +403,8 @@ bold_italic_family = "Victor Mono Bold"
 `bold_family`, `italic_family` and `bold_italic_family` name the font for
 bold, italic and bold italic text. Each is empty by default. An empty entry
 uses `family`: its own bold or italic face if it has one, and otherwise the
-regular face with a brighter color for bold and a slant for italic.
+regular face with a slant for italic and, for bold, a color brighter on a
+dark background or darker on a light one.
 `bold_italic_family` does not fall back to `bold_family` or `italic_family`.
 A style family is asked for the bold weight and italic slant too, so a family
 with several weights gives its bold one. Cells are sized from `family`, so a
