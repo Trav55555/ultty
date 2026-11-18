@@ -213,8 +213,11 @@ mod tests {
                     &mut master,
                     &mut slave,
                     std::ptr::null_mut(),
-                    std::ptr::null(),
-                    &size,
+                    // libc declares these two `*mut` on Apple targets and
+                    // `*const` on Linux; `*mut` coerces to `*const`. `&raw
+                    // mut` keeps clippy from asking for `&` on Linux.
+                    std::ptr::null_mut(),
+                    &raw mut size,
                 )
             },
             0
