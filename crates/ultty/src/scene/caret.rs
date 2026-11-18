@@ -3,7 +3,6 @@
 use std::borrow::Cow;
 
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use ultty_protocol::InputWidget;
 
@@ -22,8 +21,9 @@ pub(crate) fn shown_text(input: &InputWidget) -> Cow<'_, str> {
 /// The cells a grapheme cluster takes on a line: its width by Unicode, and
 /// at least one, so a cluster of marks alone still has a cell. Both the
 /// layout of an input's text and its caret count with this.
+#[cfg(feature = "gui")]
 pub(crate) fn grapheme_cells(grapheme: &str) -> usize {
-    UnicodeWidthStr::width(grapheme).max(1)
+    unicode_width::UnicodeWidthStr::width(grapheme).max(1)
 }
 
 /// Visible wrapped rows and a caret kept inside the input's viewport.

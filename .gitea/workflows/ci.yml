@@ -57,6 +57,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-runner-step.sh cargo clippy --workspace --all-targets -- -D warnings
+      # The headless build ultty-session uses (docs/SESSION_ATTACHMENT.md).
+      - run: scripts/ci-runner-step.sh cargo check -p ultty --no-default-features
 
   test:
     name: Test
