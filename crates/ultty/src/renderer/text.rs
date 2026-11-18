@@ -169,7 +169,7 @@ fn could_ligate(text: &str) -> bool {
 ///
 /// Returns `(synthetic_bold, fake_italic)`. cosmic-text falls back to the
 /// nearest weight/style when the family lacks a bold or italic face, so the
-/// face it picked tells us whether to brighten the color (bold) or skew the
+/// face it picked tells us whether to emphasize the color (bold) or skew the
 /// glyph via [`CacheKeyFlags::FAKE_ITALIC`] (italic).
 fn synthesized_styles(style: CellStyle, face: Option<(Weight, Style)>) -> (bool, bool) {
     let has_bold_face = face.is_some_and(|(weight, _)| weight >= Weight::BOLD);
@@ -180,13 +180,17 @@ fn synthesized_styles(style: CellStyle, face: Option<(Weight, Style)>) -> (bool,
     )
 }
 
-/// Brighten a color for cells that asked for bold when no bold face exists.
-fn brighten(color: Rgba) -> Rgba {
+/// Emphasize a color for cells that asked for bold when no bold face
+/// exists: brighter on a dark background, darker on a light one, so bold
+/// text stands out from the background more than plain text does, not less.
+fn emphasize(color: Rgba, background: Rgba) -> Rgba {
     const LIFT: f32 = 0.3;
+    let luma = 0.2126 * background.r + 0.7152 * background.g + 0.0722 * background.b;
+    let target = if luma > 0.5 { 0.0 } else { 1.0 };
     Rgba::new(
-        color.r + (1.0 - color.r) * LIFT,
-        color.g + (1.0 - color.g) * LIFT,
-        color.b + (1.0 - color.b) * LIFT,
+        color.r + (target - color.r) * LIFT,
+        color.g + (target - color.g) * LIFT,
+        color.b + (target - color.b) * LIFT,
         color.a,
     )
 }
@@ -682,7 +686,7 @@ impl TextRenderer {
     /// Shape a single cell's text with the given style.
     ///
     /// Requests a bold/italic face when asked; when the family has none, the
-    /// result is flagged for the synthetic fallbacks (brightened color for
+    /// result is flagged for the synthetic fallbacks (emphasized color for
     /// bold, skewed glyph for italic).
     fn shape_cell(
         &mut self,
@@ -796,8 +800,8 @@ impl TextRenderer {
     }
 
     /// Rasterize (or fetch) `shaped` and emit its quad for the cell at
-    /// `cell`, in `color` (brightened for synthetic bold unless the cell is
-    /// under the block cursor).
+    /// `cell`, in `color` (emphasized against `background` for synthetic
+    /// bold unless the cell is under the block cursor).
     #[allow(clippy::too_many_arguments)]
     fn push_glyph(
         &mut self,
@@ -807,6 +811,7 @@ impl TextRenderer {
         cell_size: (f32, f32),
         render_offset: (f32, f32),
         color: Rgba,
+        background: Rgba,
         under_block_cursor: bool,
     ) {
         let Some(glyph_info) = self
@@ -820,9 +825,9 @@ impl TextRenderer {
         }
         let (x, y) = cell_glyph_origin(cell, cell_size, render_offset, shaped, &glyph_info);
         // Under the cursor the color is already the inverted background;
-        // brightening it would reduce contrast.
+        // emphasizing it would reduce contrast.
         let color = if shaped.synthetic_bold && !under_block_cursor {
-            brighten(color)
+            emphasize(color, background)
         } else {
             color
         };
@@ -1505,6 +1510,7 @@ impl TextRenderer {
                                 (cell_width, cell_height),
                                 (x_offset, y_offset),
                                 color,
+                                color_scheme.background,
                                 under_cursor,
                             );
                         }
@@ -1556,6 +1562,7 @@ impl TextRenderer {
                     (cell_width, cell_height),
                     (x_offset, y_offset),
                     base_color,
+                    color_scheme.background,
                     under_block_cursor,
                 );
             }
@@ -2251,7 +2258,7 @@ mod tests {
             synthesized_styles(bold_italic, Some((Weight::BOLD, Style::Italic))),
             (false, false)
         );
-        // Regular face matched: brighten and skew.
+        // Regular face matched: emphasize and skew.
         assert_eq!(
             synthesized_styles(bold_italic, Some((Weight::NORMAL, Style::Normal))),
             (true, true)
@@ -2271,14 +2278,28 @@ mod tests {
     }
 
     #[test]
-    fn brighten_moves_towards_white_without_overflow() {
+    fn emphasize_brightens_on_a_dark_background_without_overflow() {
+        let dark = Rgba::rgb(0.1, 0.1, 0.12);
         let dim = Rgba::new(0.2, 0.4, 0.0, 0.5);
-        let bright = brighten(dim);
+        let bright = emphasize(dim, dark);
         assert!(bright.r > dim.r && bright.g > dim.g && bright.b > dim.b);
         assert_eq!(bright.a, dim.a);
 
-        let white = brighten(Rgba::rgb(1.0, 1.0, 1.0));
+        let white = emphasize(Rgba::rgb(1.0, 1.0, 1.0), dark);
         assert_eq!(white, Rgba::rgb(1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn emphasize_darkens_on_a_light_background() {
+        // Brightening dark text on a light theme made synthetic bold paler
+        // than plain text.
+        let light = Rgba::rgb(0.98, 0.98, 0.98);
+        let text = Rgba::rgb(0.2, 0.2, 0.2);
+        let bold = emphasize(text, light);
+        assert!(bold.r < text.r && bold.g < text.g && bold.b < text.b);
+
+        let black = emphasize(Rgba::rgb(0.0, 0.0, 0.0), light);
+        assert_eq!(black, Rgba::rgb(0.0, 0.0, 0.0));
     }
 
     #[test]
