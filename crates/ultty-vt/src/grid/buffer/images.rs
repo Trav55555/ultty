@@ -6,10 +6,20 @@
 //! operations that move rows on the screen without saving them, and reflow,
 //! renumber or remove the images; this module holds those rules.
 
+use std::collections::HashSet;
 use std::ops::{Range, RangeInclusive};
 
 use super::{Buffer, Rewrap, ScrollRegion};
+use crate::grid::image::{MAX_IMAGE_STORE_COUNT, MAX_PLACEMENTS};
 use crate::grid::{ImageId, TerminalImage};
+
+/// What [`Buffer::enforce_image_limits`] evicts next.
+enum Victim {
+    /// A Kitty image, with its placements.
+    Kitty(ImageId),
+    /// A sixel image.
+    Sixel(ImageId),
+}
 
 impl Buffer {
     /// The line number of screen row `row`.
@@ -25,6 +35,145 @@ impl Buffer {
     /// The screen row of `line`, negative above the screen (in scrollback).
     pub fn screen_row_of_line(&self, line: usize) -> isize {
         line as isize - self.screen_top_line() as isize
+    }
+
+    /// Evict images until the screen is within its quota,
+    /// [`MAX_IMAGE_STORE_COUNT`] images and [`MAX_PLACEMENTS`] placements,
+    /// never choosing an id in `keep` (the image just added). Returns
+    /// `false` if that was not enough: the caller must then drop what it
+    /// added. The order is ADR 0026's:
+    ///
+    /// 1. Kitty images with no placement, transient (`N=1`) first, oldest
+    ///    first (spec: images without placements go first);
+    /// 2. images whose placements are all in scrollback, oldest first;
+    /// 3. the oldest image.
+    pub fn enforce_image_limits(&mut self, keep: &[ImageId]) -> bool {
+        self.prune_orphan_kitty_images();
+        loop {
+            let bytes = self.images.total_bytes() + self.kitty.bytes();
+            let count = self.images.sixel_count() + self.kitty.len();
+            if bytes <= self.image_quota
+                && count <= MAX_IMAGE_STORE_COUNT
+                && self.images.len() <= MAX_PLACEMENTS
+            {
+                return true;
+            }
+            match self.next_image_to_evict(keep) {
+                Some(Victim::Kitty(id)) => self.remove_kitty_image(id),
+                Some(Victim::Sixel(id)) => {
+                    self.images.remove(id);
+                }
+                None => return false,
+            }
+        }
+    }
+
+    fn next_image_to_evict(&self, keep: &[ImageId]) -> Option<Victim> {
+        let top = self.screen_top_line();
+        // Per Kitty image: whether it has a placement, and one on screen.
+        let mut placed = HashSet::new();
+        let mut on_screen = HashSet::new();
+        for image in self.images.images() {
+            if let Some(kitty) = &image.kitty {
+                placed.insert(kitty.image);
+                if image.line + usize::from(image.cell_height) > top {
+                    on_screen.insert(kitty.image);
+                }
+            }
+        }
+        let kitty = || self.kitty.iter().filter(|image| !keep.contains(&image.id));
+        if let Some(image) = kitty()
+            .filter(|image| !placed.contains(&image.id))
+            .min_by_key(|image| (!image.transient, image.id))
+        {
+            return Some(Victim::Kitty(image.id));
+        }
+        // Both kinds draw ids from one counter, so ids order them by age.
+        let sixels = || {
+            self.images
+                .images()
+                .filter(|image| image.kitty.is_none() && !keep.contains(&image.id))
+        };
+        let in_scrollback = kitty()
+            .filter(|image| !on_screen.contains(&image.id))
+            .map(|image| (image.id, true))
+            .chain(
+                sixels()
+                    .filter(|image| image.line + usize::from(image.cell_height) <= top)
+                    .map(|image| (image.id, false)),
+            )
+            .min();
+        let (id, is_kitty) = in_scrollback.or_else(|| {
+            kitty()
+                .map(|image| (image.id, true))
+                .chain(sixels().map(|image| (image.id, false)))
+                .min()
+        })?;
+        Some(if is_kitty {
+            Victim::Kitty(id)
+        } else {
+            Victim::Sixel(id)
+        })
+    }
+
+    /// Remove Kitty image `id` and its placements.
+    pub fn remove_kitty_image(&mut self, id: ImageId) {
+        self.kitty.remove(id);
+        self.images
+            .retain_mut(|image| image.kitty.as_ref().is_none_or(|kitty| kitty.image != id));
+    }
+
+    /// Free the anonymous Kitty images (sent with no id) that have lost
+    /// their last placement: nothing can place them again.
+    pub fn prune_orphan_kitty_images(&mut self) {
+        if !self.kitty.iter().any(|image| image.client_id == 0) {
+            return;
+        }
+        let placed: HashSet<ImageId> = self
+            .images
+            .images()
+            .filter_map(|image| image.kitty.as_ref().map(|kitty| kitty.image))
+            .collect();
+        let orphans: Vec<ImageId> = self
+            .kitty
+            .iter()
+            .filter(|image| image.client_id == 0 && !placed.contains(&image.id))
+            .map(|image| image.id)
+            .collect();
+        for id in orphans {
+            self.kitty.remove(id);
+        }
+    }
+
+    /// The image invariants: within the limits, byte counts that add up,
+    /// and every Kitty placement showing a stored image.
+    pub(super) fn check_image_integrity(&self) -> Result<(), String> {
+        let bytes = self.images.total_bytes() + self.kitty.bytes();
+        let count = self.images.sixel_count() + self.kitty.len();
+        if bytes > self.image_quota
+            || count > MAX_IMAGE_STORE_COUNT
+            || self.images.len() > MAX_PLACEMENTS
+        {
+            return Err(format!(
+                "screen holds {count} images, {} placements and {bytes} image bytes, beyond its limits",
+                self.images.len()
+            ));
+        }
+        let owned: usize = self.images.images().map(TerminalImage::owned_bytes).sum();
+        if owned != self.images.total_bytes() || !self.kitty.is_consistent() {
+            return Err("image byte counts disagree".into());
+        }
+        if self.kitty.upload_bytes() > crate::grid::graphics::decode::MAX_TRANSMITTED_BYTES {
+            return Err("graphics upload past its cap".into());
+        }
+        for image in self.images.images() {
+            if let Some(kitty) = &image.kitty {
+                if self.kitty.get(kitty.image).is_none() {
+                    return Err(format!("placement {:?} shows a missing image", image.id));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Cells `cols` of the screen rows `rows` are being erased or written
@@ -44,7 +193,11 @@ impl Buffer {
             .images
             .images()
             .filter(|image| {
-                image.line <= last
+                // Kitty placements are not cut: only delete commands
+                // remove them (spec, "Interaction with other terminal
+                // actions").
+                image.kitty.is_none()
+                    && image.line <= last
                     && image.line + usize::from(image.cell_height) > first
                     && image.start_col < cols.end
                     && u32::from(image.start_col) + u32::from(image.cell_width)

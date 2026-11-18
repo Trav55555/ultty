@@ -185,12 +185,39 @@ fn validate_images<'a>(
             || !identities.insert(image.id)
             || bytes != image.data.len() as u64
             || bytes > *budget as u64
+            || image
+                .kitty
+                .as_ref()
+                .is_some_and(|kitty| !kitty_placement_ok(image, kitty))
         {
             return Err("invalid snapshot image".into());
         }
         *budget -= bytes as usize;
     }
     Ok(())
+}
+
+/// Whether a Kitty placement's source lies in its pixels and its
+/// destination in its cells.
+fn kitty_placement_ok(image: &TerminalImage, kitty: &crate::grid::KittyPlacement) -> bool {
+    let [x, y, w, h] = kitty.source;
+    let [dx, dy, dw, dh] = kitty.dest;
+    let within = |start: f32, size: f32, cells: u16| {
+        start.is_finite()
+            && size.is_finite()
+            && start >= 0.0
+            && size > 0.0
+            && start + size <= f32::from(cells) + 1.0
+    };
+    kitty.image != image.id
+        && kitty.image.0 != u32::MAX
+        && w > 0
+        && h > 0
+        && x.checked_add(w).is_some_and(|right| right <= image.width)
+        && y.checked_add(h)
+            .is_some_and(|bottom| bottom <= image.height)
+        && within(dx, dw, image.cell_width)
+        && within(dy, dh, image.cell_height)
 }
 
 impl TerminalSnapshot {
@@ -541,6 +568,24 @@ impl BufferSnapshot {
         }
         buffer.restore_view_anchors(&anchors);
         for image in &self.images {
+            // A viewer keeps the Kitty images its placements show, so the
+            // screen's invariants hold; they are anonymous, as a viewer
+            // never takes graphics commands.
+            if let Some(kitty) = &image.kitty {
+                if buffer.kitty_images().get(kitty.image).is_none() {
+                    buffer
+                        .kitty_images_mut()
+                        .insert(crate::grid::graphics::KittyImage {
+                            id: kitty.image,
+                            client_id: 0,
+                            number: 0,
+                            width: image.width,
+                            height: image.height,
+                            rgba: image.data.clone(),
+                            transient: false,
+                        });
+                }
+            }
             buffer.images_mut().add(image.clone());
         }
         buffer.scroll_up(self.scroll_offset.min(history));
@@ -565,11 +610,13 @@ mod tests {
             id,
             width: 1,
             height: 1,
-            data: color.to_vec(),
+            data: color.to_vec().into(),
             start_col: 0,
             line,
             cell_width: 1,
             cell_height: height,
+            z: crate::grid::SIXEL_Z,
+            kitty: None,
         }
     }
 
@@ -614,7 +661,7 @@ mod tests {
         assert_ne!(view.uid(), terminal.uid());
         assert!(view.is_alternate_screen());
         assert_eq!(
-            view.images().get(alternate_id).unwrap().data,
+            *view.images().get(alternate_id).unwrap().data,
             [0, 0, 255, 255]
         );
         assert_eq!(view.main.evicted_lines(), origin);
@@ -624,7 +671,7 @@ mod tests {
         assert_eq!(view.main.scroll_offset(), terminal.main.scroll_offset());
         view.leave_alternate_screen();
         assert!(view.alternate.images().is_empty());
-        assert_eq!(view.images().get(main_id).unwrap().data, [255, 0, 0, 255]);
+        assert_eq!(*view.images().get(main_id).unwrap().data, [255, 0, 0, 255]);
     }
 
     #[test]
@@ -765,11 +812,13 @@ mod tests {
                 id,
                 width: 1024,
                 height: 2304,
-                data: vec![255; 1024 * 2304 * 4],
+                data: vec![255; 1024 * 2304 * 4].into(),
                 start_col: 0,
                 line: 0,
                 cell_width: 8,
                 cell_height: 3,
+                z: crate::grid::SIXEL_Z,
+                kitty: None,
             });
         }
         assert!(TerminalSnapshot::capture(&terminal).is_err());
@@ -789,11 +838,13 @@ mod tests {
             id: ImageId(9),
             width: 1,
             height: 1,
-            data: vec![1, 2, 3, 255],
+            data: vec![1, 2, 3, 255].into(),
             start_col: 2,
             line: 1,
             cell_width: 1,
             cell_height: 1,
+            z: crate::grid::SIXEL_Z,
+            kitty: None,
         });
         let snapshot = TerminalSnapshot::capture(&terminal).unwrap();
         let mut view = snapshot.to_view().unwrap();
@@ -810,10 +861,7 @@ mod tests {
         }
         assert_eq!(view.palette().color(1), [0x12, 0x34, 0x56]);
         assert_eq!(view.hyperlinks, terminal.hyperlinks);
-        assert_eq!(
-            view.images().images().next().unwrap().data,
-            vec![1, 2, 3, 255]
-        );
+        assert_eq!(*view.images().images().next().unwrap().data, [1, 2, 3, 255]);
         assert!(view.take_responses().is_empty());
     }
 
@@ -851,11 +899,13 @@ mod tests {
             id: ImageId(9),
             width: u32::MAX,
             height: u32::MAX,
-            data: vec![],
+            data: vec![].into(),
             start_col: 0,
             line: 0,
             cell_width: 0,
             cell_height: 0,
+            z: crate::grid::SIXEL_Z,
+            kitty: None,
         });
         assert!(snapshot.to_view().is_err());
         let mut snapshot = TerminalSnapshot::capture(&terminal).unwrap();
@@ -880,11 +930,13 @@ mod tests {
             id: ImageId(9),
             width: MAX_SIXEL_DIM,
             height: 1,
-            data: vec![255; MAX_SIXEL_DIM as usize * 4],
+            data: vec![255; MAX_SIXEL_DIM as usize * 4].into(),
             start_col: 0,
             line: 0,
             cell_width: 10,
             cell_height: 1,
+            z: crate::grid::SIXEL_Z,
+            kitty: None,
         };
         let mut valid = baseline.clone();
         valid.main.images.push(image.clone());
@@ -895,7 +947,7 @@ mod tests {
         let mut oversized = baseline.clone();
         let mut wide = image.clone();
         wide.width += 1;
-        wide.data.extend_from_slice(&[255; 4]);
+        wide.data = [&wide.data[..], &[255; 4]].concat().into();
         oversized.main.images.push(wide);
         assert!(
             oversized.to_view().is_err(),
@@ -904,7 +956,7 @@ mod tests {
         let mut tall = image.clone();
         tall.width = 1;
         tall.height = MAX_SIXEL_DIM + 1;
-        tall.data.extend_from_slice(&[255; 4]);
+        tall.data = [&tall.data[..], &[255; 4]].concat().into();
         let mut oversized = baseline.clone();
         oversized.main.images.push(tall);
         assert!(oversized.to_view().is_err());

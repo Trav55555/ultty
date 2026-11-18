@@ -10,6 +10,8 @@ use super::{
 
 mod images;
 
+use super::graphics::store::KittyImages;
+
 /// Default scrollback buffer size (lines).
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
 
@@ -87,9 +89,16 @@ pub struct Buffer {
     /// number (`evicted` plus absolute index). Lines evicted since are
     /// pruned.
     rewritten_lines: BTreeMap<usize, u64>,
-    /// Inline images (Sixel) placed on this screen. Each screen keeps its
-    /// own, as foot does (`normal.sixel_images`, `alt.sixel_images`).
+    /// Pictures placed on this screen: sixel images and Kitty placements.
+    /// Each screen keeps its own, as foot does (`normal.sixel_images`,
+    /// `alt.sixel_images`) and kitty does (one graphics manager per
+    /// screen).
     images: ImageStore,
+    /// The Kitty images transmitted to this screen (ADR 0026).
+    kitty: KittyImages,
+    /// Decoded image bytes this screen may hold, sixel and Kitty together;
+    /// 0 turns images off.
+    image_quota: usize,
     /// Where the ids of images split off by overwriting come from.
     image_ids: ImageIds,
     /// Rows looked at for anchor bookkeeping, so tests can bound its cost.
@@ -474,6 +483,7 @@ impl Buffer {
     /// offset that points into history, and consistent history rows.
     pub fn check_integrity(&self) -> Result<(), String> {
         self.grid.check_integrity()?;
+        self.check_image_integrity()?;
         if self.history.len() > self.max_history {
             return Err(format!(
                 "history holds {} rows, limit is {}",
@@ -551,6 +561,8 @@ impl Buffer {
             rewrites: 0,
             rewritten_lines: BTreeMap::new(),
             images: ImageStore::new(),
+            kitty: KittyImages::default(),
+            image_quota: crate::grid::image::MAX_IMAGE_STORE_BYTES,
             image_ids: ImageIds::default(),
             #[cfg(test)]
             anchor_visits: std::cell::Cell::new(0),
@@ -571,6 +583,34 @@ impl Buffer {
     /// Mutable access to this screen's inline images.
     pub fn images_mut(&mut self) -> &mut ImageStore {
         &mut self.images
+    }
+
+    /// This screen's Kitty images.
+    pub fn kitty_images(&self) -> &KittyImages {
+        &self.kitty
+    }
+
+    /// Mutable access to this screen's Kitty images.
+    pub fn kitty_images_mut(&mut self) -> &mut KittyImages {
+        &mut self.kitty
+    }
+
+    /// Drop every picture on this screen, and every Kitty image and upload
+    /// with them: for RIS and the alternate screen's entry and exit.
+    pub fn clear_all_images(&mut self) {
+        self.images.clear();
+        self.kitty.clear();
+    }
+
+    /// Decoded image bytes this screen may hold; 0 means images are off.
+    pub fn image_quota(&self) -> usize {
+        self.image_quota
+    }
+
+    /// Set the image quota, evicting images past it.
+    pub fn set_image_quota(&mut self, bytes: usize) {
+        self.image_quota = bytes;
+        self.enforce_image_limits(&[]);
     }
 
     /// How many rows have been evicted from the front of history so far.
@@ -1684,11 +1724,13 @@ mod tests {
             id: ImageId(0),
             width: 8,
             height: 32,
-            data: vec![0; 8 * 32 * 4],
+            data: vec![0; 8 * 32 * 4].into(),
             start_col: 0,
             line: 0,
             cell_width: 1,
             cell_height: 2,
+            z: crate::grid::SIXEL_Z,
+            kitty: None,
         });
         buf.grid_mut().cursor_mut().position.row = 2;
         // Lines 0 and 1 leave the screen, into scrollback that holds two.

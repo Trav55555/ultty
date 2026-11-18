@@ -30,6 +30,8 @@ pub struct Config {
     pub profiles: ProfilesConfig,
     /// Scrollback search
     pub search: crate::vim::search::SearchOptions,
+    /// Inline images (sixel and Kitty graphics)
+    pub images: ImagesConfig,
 }
 
 impl Config {
@@ -1065,6 +1067,33 @@ impl Default for BehaviorConfig {
     }
 }
 
+/// Inline images that programs draw: sixel and Kitty graphics.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ImagesConfig {
+    /// Decoded image memory each screen of a pane may hold, in MiB, sixel
+    /// and Kitty images together; the oldest images are evicted past it.
+    /// 0 turns images off: both protocols are ignored, and Kitty graphics
+    /// queries get no reply, so programs fall back to text.
+    pub storage_limit: usize,
+}
+
+impl Default for ImagesConfig {
+    fn default() -> Self {
+        Self {
+            storage_limit: crate::grid::MAX_IMAGE_STORE_BYTES >> 20,
+        }
+    }
+}
+
+impl ImagesConfig {
+    /// The per-screen limit in bytes; values too large to count are
+    /// clamped.
+    pub fn storage_limit_bytes(&self) -> usize {
+        self.storage_limit.saturating_mul(1 << 20)
+    }
+}
+
 /// What programs in the terminal are told about it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -1590,6 +1619,18 @@ copy = "ctrl+c"
         let config = Config::load_from_path(&path).unwrap();
 
         assert_eq!(config.font.size, MIN_FONT_SIZE);
+    }
+
+    #[test]
+    fn image_storage_limit_is_in_mib_and_defaults_to_256() {
+        assert_eq!(
+            Config::default().images.storage_limit_bytes(),
+            crate::grid::MAX_IMAGE_STORE_BYTES
+        );
+        let config: Config = toml::from_str("[images]\nstorage_limit = 0\n").unwrap();
+        assert_eq!(config.images.storage_limit_bytes(), 0);
+        let config: Config = toml::from_str("[images]\nstorage_limit = 64\n").unwrap();
+        assert_eq!(config.images.storage_limit_bytes(), 64 << 20);
     }
 
     #[test]
