@@ -1345,6 +1345,25 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                 out
             }
             ControlData::Regions { scenes } => format_regions(scenes),
+            ControlData::Images { placements } => {
+                let mut out = String::new();
+                for p in placements {
+                    out.push_str(&format!(
+                        "{} image={} placement={} row={} col={} {}x{} cells z={} {}x{} px\n",
+                        p.protocol,
+                        p.image,
+                        p.placement,
+                        p.row,
+                        p.col,
+                        p.cols,
+                        p.rows,
+                        p.z,
+                        p.width,
+                        p.height
+                    ));
+                }
+                out
+            }
         },
         ControlResponse::Error { code, message } => {
             format!("ERROR {}: {}\n", code, message)

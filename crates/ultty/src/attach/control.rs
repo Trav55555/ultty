@@ -344,6 +344,18 @@ impl HostControl {
                     output_available: last.output_available,
                 })
             }
+            ControlRequest::Images { target } => {
+                let pane = resolve_control_target(&host.runtime.manager, target)?;
+                let placements = host
+                    .runtime
+                    .manager
+                    .terminal(pane)
+                    .map(|terminal| {
+                        crate::control::common::image_placements(&terminal.event_loop.terminal())
+                    })
+                    .unwrap_or_default();
+                ControlResponse::Data(ControlData::Images { placements })
+            }
             ControlRequest::Regions { target } => {
                 let pane = resolve_control_target(&host.runtime.manager, target)?;
                 let tab = host

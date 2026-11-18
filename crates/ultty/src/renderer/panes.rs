@@ -228,6 +228,21 @@ impl Renderer {
             let cursor_blink_visible =
                 pane_cursor_blink_visible(overlay.cursor_blink_visible, info.is_focused);
 
+            // Images under cell backgrounds draw first; the frame was
+            // cleared to the default background.
+            if !pane.sessions.iter().any(|session| session.is_full_scene()) {
+                if let Some(scissor) = scissor_for(pane_bounds(info), surface) {
+                    self.render_images(
+                        encoder,
+                        view,
+                        terminal,
+                        (self.pane_offset_x, self.pane_offset_y),
+                        Some(scissor),
+                        super::image::ImageLayer::BelowBackgrounds,
+                    );
+                }
+            }
+
             // Render pane backgrounds
             let (bg_v, bg_i) =
                 self.build_background_vertices_with_offset(terminal, cursor_blink_visible);
@@ -285,6 +300,7 @@ impl Renderer {
                         terminal,
                         (self.pane_offset_x, self.pane_offset_y),
                         Some(scissor),
+                        super::image::ImageLayer::BelowText,
                     );
                 }
                 // Render pane text
@@ -302,6 +318,16 @@ impl Renderer {
                     cursor_blink_visible,
                     &self.uniform_bind_group,
                 );
+                if let Some(scissor) = scissor_for(pane_bounds(info), surface) {
+                    self.render_images(
+                        encoder,
+                        view,
+                        terminal,
+                        (self.pane_offset_x, self.pane_offset_y),
+                        Some(scissor),
+                        super::image::ImageLayer::AboveText,
+                    );
+                }
                 let bounds = pane_bounds(info);
                 let mut surfaces = self.visible_surfaces(terminal, &pane.sessions);
                 for (_, origin) in &mut surfaces {

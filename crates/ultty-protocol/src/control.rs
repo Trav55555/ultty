@@ -267,6 +267,14 @@ pub enum ControlRequest {
         target: Option<u64>,
     },
 
+    /// The inline images (sixel and Kitty graphics) placed on a pane's
+    /// active screen, scrollback included. Read-only; no pixel data.
+    Images {
+        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<u64>,
+    },
+
     /// The native apps drawing in a pane's tab: each one's region tree
     /// with computed layout, content and focus. Read-only.
     Regions {
@@ -731,6 +739,10 @@ pub enum ControlData {
     Regions {
         scenes: Vec<NativeScene>,
     },
+    /// A pane's image placements; see `ControlRequest::Images`.
+    Images {
+        placements: Vec<ImagePlacement>,
+    },
     /// A pane's last command; see `ControlRequest::LastCommand`.
     LastCommand {
         command: String,
@@ -848,6 +860,32 @@ pub struct TabInfo {
     pub pid: Option<u32>,
     /// Working directory for the tab, if known.
     pub cwd: Option<String>,
+}
+
+/// One image placement, as `ControlRequest::Images` reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImagePlacement {
+    /// `"kitty"` or `"sixel"`.
+    pub protocol: String,
+    /// The Kitty client's image id (`i=`); 0 for sixel and anonymous images.
+    pub image: u32,
+    /// The Kitty placement id (`p=`); 0 for none.
+    pub placement: u32,
+    /// The line of its top row, numbered for good: it does not change as
+    /// the screen scrolls.
+    pub line: u64,
+    /// The screen row of its top row; negative in scrollback.
+    pub row: i64,
+    /// The column of its left edge.
+    pub col: u16,
+    /// Its size in cells.
+    pub cols: u16,
+    pub rows: u16,
+    /// Stacking order relative to text; sixel images are at -1.
+    pub z: i32,
+    /// The pixel size of the image it shows.
+    pub width: u32,
+    pub height: u32,
 }
 
 /// One native app's scene, as `ControlRequest::Regions` reports it.

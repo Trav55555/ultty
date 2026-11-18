@@ -98,6 +98,7 @@ pub fn control_request_requires_auth(request: &ultty_protocol::control::ControlR
         | ControlRequest::GetSelection { .. }
         | ControlRequest::LastCommand { .. }
         | ControlRequest::Regions { .. }
+        | ControlRequest::Images { .. }
         | ControlRequest::InvokeAction { .. }
         | ControlRequest::Search { .. }
         | ControlRequest::WaitFor { .. }
