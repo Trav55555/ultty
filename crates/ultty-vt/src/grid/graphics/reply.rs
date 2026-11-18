@@ -48,6 +48,7 @@ impl Error {
     pub const PNG: Self = Self::new("EBADPNG", "Failed to decode PNG data");
     pub const NO_SPACE: Self = Self::new("ENOSPC", "Image does not fit in the storage quota");
     pub const NOT_FOUND: Self = Self::new("ENOENT", "Image not found");
+    pub const EMPTY_SOURCE: Self = Self::new("EINVAL", "Source rectangle is outside the image");
     pub const ORPHAN_CHUNK: Self = Self::new(
         "EILSEQ",
         "More payload loading refers to non-existent image",
@@ -170,6 +171,7 @@ mod tests {
             Error::PNG,
             Error::NO_SPACE,
             Error::NOT_FOUND,
+            Error::EMPTY_SOURCE,
             Error::ORPHAN_CHUNK,
         ];
         for error in all {

@@ -362,6 +362,18 @@ impl Renderer {
         // Render pass for backgrounds
         {
             let linear_bg = self.color_scheme.background.to_linear();
+            let bg_load = self.images_under_backgrounds(
+                &mut encoder,
+                &view,
+                terminal,
+                (0.0, self.tab_bar_height),
+                wgpu::Color {
+                    r: linear_bg.r as f64 * self.opacity as f64,
+                    g: linear_bg.g as f64 * self.opacity as f64,
+                    b: linear_bg.b as f64 * self.opacity as f64,
+                    a: self.opacity as f64,
+                },
+            );
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("screenshot_bg_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -369,12 +381,7 @@ impl Renderer {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: linear_bg.r as f64 * self.opacity as f64,
-                            g: linear_bg.g as f64 * self.opacity as f64,
-                            b: linear_bg.b as f64 * self.opacity as f64,
-                            a: self.opacity as f64,
-                        }),
+                        load: bg_load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -403,6 +410,7 @@ impl Renderer {
                 terminal,
                 (0.0, self.tab_bar_height),
                 None,
+                super::image::ImageLayer::BelowText,
             );
         }
         // Render text
@@ -419,6 +427,19 @@ impl Renderer {
             overlay.cursor_blink_visible,
             &self.uniform_bind_group,
         );
+        if !native_sessions
+            .iter()
+            .any(|session| session.is_full_scene())
+        {
+            self.render_images(
+                &mut encoder,
+                &view,
+                terminal,
+                (0.0, self.tab_bar_height),
+                None,
+                super::image::ImageLayer::AboveText,
+            );
+        }
 
         let surfaces = self.visible_surfaces(terminal, native_sessions);
         self.draw_native_scenes(
@@ -487,6 +508,18 @@ impl Renderer {
 
         {
             let linear_bg = self.color_scheme.background.to_linear();
+            let bg_load = self.images_under_backgrounds(
+                &mut encoder,
+                &view,
+                terminal,
+                (0.0, self.tab_bar_height),
+                wgpu::Color {
+                    r: linear_bg.r as f64,
+                    g: linear_bg.g as f64,
+                    b: linear_bg.b as f64,
+                    a: 1.0,
+                },
+            );
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("screenshot_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -494,12 +527,7 @@ impl Renderer {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: linear_bg.r as f64,
-                            g: linear_bg.g as f64,
-                            b: linear_bg.b as f64,
-                            a: 1.0,
-                        }),
+                        load: bg_load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -525,6 +553,7 @@ impl Renderer {
                 terminal,
                 (0.0, self.tab_bar_height),
                 None,
+                super::image::ImageLayer::BelowText,
             );
         }
         self.text_renderer.render(
@@ -540,6 +569,19 @@ impl Renderer {
             overlay.cursor_blink_visible,
             &self.uniform_bind_group,
         );
+        if !native_sessions
+            .iter()
+            .any(|session| session.is_full_scene())
+        {
+            self.render_images(
+                &mut encoder,
+                &view,
+                terminal,
+                (0.0, self.tab_bar_height),
+                None,
+                super::image::ImageLayer::AboveText,
+            );
+        }
 
         let surfaces = self.visible_surfaces(terminal, native_sessions);
         self.draw_native_scenes(

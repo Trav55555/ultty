@@ -577,3 +577,377 @@ mod chunking {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Placement
+// ---------------------------------------------------------------------------
+
+/// A 20 x 5 terminal with 10 x 20 pixel cells.
+fn sized() -> Terminal {
+    let mut term = term();
+    term.set_cell_pixel_size(10, 20);
+    term
+}
+
+/// Each Kitty placement as (client id, placement id, screen row, col,
+/// cols, rows, z), sorted.
+fn placements(term: &Terminal) -> Vec<(u32, u32, isize, u16, u16, u16, i32)> {
+    let buffer = term.buffer();
+    let mut out: Vec<_> = term
+        .images()
+        .images()
+        .filter_map(|image| {
+            let kitty = image.kitty.as_ref()?;
+            Some((
+                kitty.client_id,
+                kitty.placement_id,
+                buffer.screen_row_of_line(image.line),
+                image.start_col,
+                image.cell_width,
+                image.cell_height,
+                image.z,
+            ))
+        })
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+/// An opaque `width` x `height` RGBA image, as base64.
+fn pixels(width: u32, height: u32) -> String {
+    b64(&vec![200; (width * height * 4) as usize])
+}
+
+fn cursor(term: &Terminal) -> (u16, u16) {
+    let position = term.grid().cursor().position;
+    (position.row, position.col)
+}
+
+#[test]
+fn transmit_then_place_and_the_cursor_moves_past_the_image() {
+    let mut term = sized();
+    assert_eq!(
+        replies(&mut term, &apc("i=1,s=25,v=30", &pixels(25, 30))),
+        "<i=1;OK>"
+    );
+    assert!(placements(&term).is_empty(), "a=t only stores");
+    feed(&mut term, b"\x1b[2;3H");
+    assert_eq!(replies(&mut term, &apc("a=p,i=1,p=4", "")), "<i=1,p=4;OK>");
+    assert_eq!(placements(&term), [(1, 4, 1, 2, 3, 2, 0)]);
+    // Right by its 3 columns, down by its 2 rows less one.
+    assert_eq!(cursor(&term), (2, 5));
+}
+
+#[test]
+fn transmit_and_place_in_one_command() {
+    let mut term = sized();
+    assert_eq!(
+        replies(&mut term, &apc("a=T,i=2,s=10,v=20,z=-3", &pixels(10, 20))),
+        "<i=2;OK>"
+    );
+    assert_eq!(placements(&term), [(2, 0, 0, 0, 1, 1, -3)]);
+    assert_eq!(cursor(&term), (0, 1));
+}
+
+#[test]
+fn a_chunked_transmit_and_place_shows_at_the_cursor_of_the_last_chunk() {
+    let mut term = sized();
+    let data = pixels(10, 20);
+    feed(&mut term, &apc("a=T,i=2,s=10,v=20,m=1", &data[..400]));
+    feed(&mut term, b"\x1b[3;4H");
+    feed(&mut term, &apc("m=0", &data[400..]));
+    assert_eq!(placements(&term), [(2, 0, 2, 3, 1, 1, 0)]);
+}
+
+#[test]
+fn c_1_leaves_the_cursor_alone() {
+    let mut term = sized();
+    feed(&mut term, &apc("a=T,i=1,s=30,v=40,C=1", &pixels(30, 40)));
+    assert_eq!(cursor(&term), (0, 0));
+}
+
+#[test]
+fn placing_past_the_bottom_scrolls_the_screen() {
+    let mut term = sized();
+    feed(&mut term, b"\x1b[5;1H");
+    feed(&mut term, &apc("a=T,i=1,s=10,v=60", &pixels(10, 60)));
+    // Three rows tall from the last row: the screen scrolled two lines and
+    // the image scrolled with it.
+    assert_eq!(placements(&term), [(1, 0, 2, 0, 1, 3, 0)]);
+    assert_eq!(cursor(&term), (4, 1));
+}
+
+#[test]
+fn the_same_image_and_placement_id_replaces_the_placement() {
+    let mut term = sized();
+    feed(&mut term, &apc("i=1,s=10,v=20", &pixels(10, 20)));
+    feed(&mut term, &apc("a=p,i=1,p=7", ""));
+    feed(&mut term, b"\x1b[3;3H");
+    feed(&mut term, &apc("a=p,i=1,p=7", ""));
+    assert_eq!(placements(&term), [(1, 7, 2, 2, 1, 1, 0)]);
+    // Without a placement id, each put adds a placement.
+    feed(&mut term, &apc("a=p,i=1", ""));
+    feed(&mut term, &apc("a=p,i=1", ""));
+    assert_eq!(placements(&term).len(), 3);
+}
+
+#[test]
+fn placing_a_missing_image_is_enoent() {
+    let mut term = sized();
+    assert_eq!(
+        replies(&mut term, &apc("a=p,i=9,p=2", "")),
+        "<i=9,p=2;ENOENT:Image not found>"
+    );
+    assert_eq!(
+        replies(&mut term, &apc("a=p,I=9", "")),
+        "<I=9;ENOENT:Image not found>"
+    );
+}
+
+#[test]
+fn a_number_places_the_newest_image_with_it() {
+    let mut term = sized();
+    feed(&mut term, &apc("I=5,s=10,v=20", &pixels(10, 20)));
+    feed(&mut term, &apc("I=5,s=20,v=20", &pixels(20, 20)));
+    term.take_responses();
+    assert_eq!(replies(&mut term, &apc("a=p,I=5", "")), "<i=2,I=5;OK>");
+    assert_eq!(placements(&term), [(2, 0, 0, 0, 2, 1, 0)]);
+}
+
+#[test]
+fn retransmitting_an_id_deletes_its_placements() {
+    let mut term = sized();
+    feed(&mut term, &apc("a=T,i=1,s=10,v=20", &pixels(10, 20)));
+    feed(&mut term, &apc("i=1,s=10,v=20", &pixels(10, 20)));
+    assert!(placements(&term).is_empty());
+}
+
+#[test]
+fn an_anonymous_image_lives_as_long_as_its_placements() {
+    let mut term = sized();
+    feed(&mut term, &apc("a=T,s=10,v=20", &pixels(10, 20)));
+    assert_eq!(placements(&term).len(), 1);
+    feed(&mut term, b"\x1b_Ga=d\x1b\\");
+    assert!(placements(&term).is_empty());
+    assert!(stored(&term).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Deleting: every `d=` value
+// ---------------------------------------------------------------------------
+
+/// Image 1 placed at row 0 col 0 (z 0, p=1), image 2 at row 2 col 5 (z 5,
+/// p=2), each one cell, plus unplaced image 3.
+fn scene() -> Terminal {
+    let mut term = sized();
+    feed(&mut term, &apc("i=1,s=10,v=20", &pixels(10, 20)));
+    feed(&mut term, &apc("i=2,s=10,v=20", &pixels(10, 20)));
+    feed(&mut term, &apc("i=3,s=10,v=20", &pixels(10, 20)));
+    feed(&mut term, &apc("a=p,i=1,p=1,C=1", ""));
+    feed(&mut term, b"\x1b[3;6H");
+    feed(&mut term, &apc("a=p,i=2,p=2,z=5,C=1", ""));
+    term
+}
+
+/// The client ids of the placements left after `delete`, and of the
+/// images left.
+fn after_delete(delete: &str) -> (Vec<u32>, Vec<u32>) {
+    let mut term = scene();
+    term.take_responses();
+    assert_eq!(
+        replies(&mut term, format!("\x1b_Ga=d,{delete}\x1b\\").as_bytes()),
+        "",
+        "deletes never reply"
+    );
+    term.check_integrity().unwrap();
+    (
+        placements(&term).iter().map(|p| p.0).collect(),
+        stored(&term).iter().map(|s| s.0).collect(),
+    )
+}
+
+#[test]
+fn every_delete_value_removes_what_the_spec_says() {
+    let cases: [(&str, &[u32], &[u32]); 26] = [
+        ("d=a", &[], &[1, 2, 3]),
+        ("d=A", &[], &[3]),
+        ("q=0", &[], &[1, 2, 3]),
+        ("d=i,i=1", &[2], &[1, 2, 3]),
+        ("d=I,i=1", &[2], &[2, 3]),
+        ("d=I,i=3", &[1, 2], &[1, 2]),
+        ("d=i,i=2,p=9", &[1, 2], &[1, 2, 3]),
+        ("d=I,i=2,p=2", &[1], &[1, 3]),
+        ("d=n,I=7", &[1, 2], &[1, 2, 3]),
+        ("d=c", &[1], &[1, 2, 3]),
+        ("d=C", &[1], &[1, 3]),
+        ("d=p,x=6,y=3", &[1], &[1, 2, 3]),
+        ("d=P,x=6,y=3", &[1], &[1, 3]),
+        ("d=q,x=6,y=3,z=4", &[1, 2], &[1, 2, 3]),
+        ("d=Q,x=6,y=3,z=5", &[1], &[1, 3]),
+        ("d=r,x=1,y=2", &[], &[1, 2, 3]),
+        ("d=R,x=2,y=3", &[1], &[1]),
+        ("d=x,x=6", &[1], &[1, 2, 3]),
+        ("d=X,x=1", &[2], &[2, 3]),
+        ("d=y,y=3", &[1], &[1, 2, 3]),
+        ("d=Y,y=1", &[2], &[2, 3]),
+        ("d=z,z=5", &[1], &[1, 2, 3]),
+        ("d=Z,z=0", &[2], &[2, 3]),
+        ("d=f,i=1", &[1, 2], &[1, 2, 3]),
+        ("d=F,i=1", &[1, 2], &[1, 2, 3]),
+        ("d=?", &[1, 2], &[1, 2, 3]),
+    ];
+    for (delete, left, kept) in cases {
+        assert_eq!(
+            after_delete(delete),
+            (left.to_vec(), kept.to_vec()),
+            "{delete}"
+        );
+    }
+}
+
+#[test]
+fn delete_by_number_takes_the_newest_image_with_it() {
+    let mut term = sized();
+    feed(&mut term, &apc("a=T,I=7,s=10,v=20", &pixels(10, 20)));
+    feed(&mut term, &apc("a=T,I=7,s=10,v=20", &pixels(10, 20)));
+    feed(&mut term, b"\x1b_Ga=d,d=N,I=7\x1b\\");
+    assert_eq!(stored(&term).iter().map(|s| s.0).collect::<Vec<_>>(), [1]);
+}
+
+#[test]
+fn deletes_leave_sixel_images_alone() {
+    let mut term = sized();
+    feed(&mut term, b"\x1bPq#0;2;100;0;0~~\x1b\\");
+    feed(&mut term, b"\x1b_Ga=d,d=A\x1b\\");
+    assert_eq!(term.images().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Interaction with other terminal actions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn placements_scroll_with_text_into_scrollback_and_are_dropped_on_eviction() {
+    let mut term = sized();
+    term.set_scrollback_limit(3);
+    feed(&mut term, &apc("a=T,i=1,s=10,v=20,C=1", &pixels(10, 20)));
+    feed(&mut term, b"\n\n");
+    feed(&mut term, b"\x1b[5;1H\n\n");
+    assert_eq!(placements(&term), [(1, 0, -2, 0, 1, 1, 0)]);
+    feed(&mut term, b"\n\n");
+    assert!(placements(&term).is_empty(), "evicted with its line");
+    assert_eq!(stored(&term).len(), 1, "the image itself stays");
+}
+
+#[test]
+fn erases_and_text_leave_kitty_placements_alone() {
+    let mut term = sized();
+    feed(&mut term, &apc("a=T,i=1,s=30,v=20,C=1", &pixels(30, 20)));
+    feed(&mut term, b"abc\x1b[K\x1b[2K\x1b[1J\x1b[0J\x1b[3X\x1b[2P");
+    assert_eq!(placements(&term), [(1, 0, 0, 0, 3, 1, 0)]);
+}
+
+#[test]
+fn ed_2_clears_screen_placements_and_ed_3_scrollback_ones() {
+    let mut term = sized();
+    feed(&mut term, &apc("a=T,i=1,s=10,v=20,C=1", &pixels(10, 20)));
+    feed(&mut term, b"\x1b[5;1H\n\n\n\n\n");
+    feed(&mut term, &apc("a=T,i=2,s=10,v=20,C=1", &pixels(10, 20)));
+    assert_eq!(placements(&term).len(), 2);
+    feed(&mut term, b"\x1b[2J");
+    assert_eq!(
+        placements(&term).iter().map(|p| p.0).collect::<Vec<_>>(),
+        [1]
+    );
+    feed(&mut term, b"\x1b[3J");
+    assert!(placements(&term).is_empty());
+    assert_eq!(stored(&term).len(), 2, "images with ids stay stored");
+}
+
+#[test]
+fn the_alternate_screen_starts_bare_and_main_placements_survive_it() {
+    let mut term = sized();
+    feed(&mut term, &apc("a=T,i=1,s=10,v=20", &pixels(10, 20)));
+    feed(&mut term, b"\x1b[?1049h");
+    assert!(placements(&term).is_empty());
+    feed(&mut term, &apc("a=T,i=1,s=10,v=20", &pixels(10, 20)));
+    assert_eq!(placements(&term).len(), 1);
+    feed(&mut term, b"\x1b[?1049l");
+    assert_eq!(placements(&term).len(), 1);
+    feed(&mut term, b"\x1b[?1049h");
+    assert!(placements(&term).is_empty());
+}
+
+#[test]
+fn ris_clears_everything() {
+    let mut term = sized();
+    feed(&mut term, &apc("a=T,i=1,s=10,v=20", &pixels(10, 20)));
+    feed(&mut term, b"\x1bc");
+    assert!(placements(&term).is_empty());
+    assert!(stored(&term).is_empty());
+}
+
+#[test]
+fn a_region_scroll_moves_placements_inside_it() {
+    let mut term = sized();
+    feed(&mut term, b"\x1b[3;1H");
+    feed(&mut term, &apc("a=T,i=1,s=10,v=20,C=1", &pixels(10, 20)));
+    feed(&mut term, b"\x1b[2;4r\x1b[4;1H\n");
+    assert_eq!(placements(&term), [(1, 0, 1, 0, 1, 1, 0)]);
+    feed(&mut term, b"\n");
+    assert!(placements(&term).is_empty(), "pushed out of the region");
+}
+
+/// As for sixel images (slice 0), reflow moves a placement to the row its
+/// top-left cell's line went to, and keeps its column.
+#[test]
+fn reflow_keeps_a_placement_on_its_line() {
+    let mut term = sized();
+    feed(&mut term, b"aaaaaaaaaaaaaaaaaaaabbbb");
+    feed(&mut term, &apc("a=T,i=1,s=10,v=20,C=1", &pixels(10, 20)));
+    // On the second row; widened to 40 the two rows join into the first.
+    assert_eq!(placements(&term), [(1, 0, 1, 4, 1, 1, 0)]);
+    term.resize(Dimensions::new(40, 5));
+    assert_eq!(placements(&term), [(1, 0, 0, 4, 1, 1, 0)]);
+    term.check_integrity().unwrap();
+}
+
+#[test]
+fn kitty_placements_and_sixel_images_coexist() {
+    let mut term = sized();
+    feed(&mut term, b"\x1bPq#0;2;100;0;0~~\x1b\\");
+    feed(&mut term, &apc("a=T,i=1,s=10,v=20", &pixels(10, 20)));
+    assert_eq!((term.images().len(), placements(&term).len()), (2, 1));
+    // Text over the sixel cuts it; the Kitty placement is untouched.
+    feed(&mut term, b"\x1b[1;1HXXXX");
+    assert_eq!(placements(&term).len(), 1);
+    term.check_integrity().unwrap();
+}
+
+#[test]
+fn placements_past_the_limit_evict_the_oldest() {
+    let mut term = sized();
+    feed(&mut term, &apc("i=1,s=1,v=1", &pixels(1, 1)));
+    for _ in 0..ultty_vt::grid::MAX_PLACEMENTS + 3 {
+        feed(&mut term, &apc("a=p,i=1,C=1,q=2", ""));
+    }
+    assert!(term.images().len() <= ultty_vt::grid::MAX_PLACEMENTS);
+    term.check_integrity().unwrap();
+}
+
+#[test]
+fn ed_2_keeps_sixel_images_in_scrollback_too() {
+    let mut term = sized();
+    feed(&mut term, b"\x1bPq#0;2;100;0;0~~\x1b\\");
+    feed(&mut term, b"\x1b[5;1H\n\n\n\n\n\n");
+    feed(&mut term, b"\x1bPq#0;2;100;0;0~~\x1b\\");
+    assert_eq!(term.images().len(), 2);
+    feed(&mut term, b"\x1b[2J");
+    assert_eq!(
+        term.images().len(),
+        1,
+        "the scrollback image stays for ED 3"
+    );
+    feed(&mut term, b"\x1b[3J");
+    assert!(term.images().is_empty());
+}

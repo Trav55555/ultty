@@ -1105,6 +1105,13 @@ impl Renderer {
         // Render pass
         {
             // Convert sRGB colors to linear space for correct rendering in sRGB framebuffer
+            let bg_load = self.images_under_backgrounds(
+                &mut encoder,
+                view,
+                terminal,
+                (0.0, self.tab_bar_height),
+                wgpu::Color::TRANSPARENT,
+            );
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminal_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1113,7 +1120,7 @@ impl Renderer {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         // Pre-multiplied alpha for transparency support
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load: bg_load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1138,6 +1145,7 @@ impl Renderer {
             terminal,
             (0.0, self.tab_bar_height),
             None,
+            image::ImageLayer::BelowText,
         );
 
         // Render tab bar if visible
@@ -1245,6 +1253,14 @@ impl Renderer {
             self.tab_bar_height,
             overlay.cursor_blink_visible,
             &self.uniform_bind_group,
+        );
+        self.render_images(
+            &mut encoder,
+            view,
+            terminal,
+            (0.0, self.tab_bar_height),
+            None,
+            image::ImageLayer::AboveText,
         );
 
         // Render overlays (vim cursor, URL underlines)
@@ -1456,6 +1472,13 @@ impl Renderer {
             });
 
         {
+            let bg_load = self.images_under_backgrounds(
+                &mut encoder,
+                view,
+                terminal,
+                (0.0, self.tab_bar_height),
+                wgpu::Color::TRANSPARENT,
+            );
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminal_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1463,7 +1486,7 @@ impl Renderer {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load: bg_load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1492,6 +1515,7 @@ impl Renderer {
                 terminal,
                 (0.0, self.tab_bar_height),
                 None,
+                image::ImageLayer::BelowText,
             );
         }
 
@@ -1548,6 +1572,14 @@ impl Renderer {
                 self.tab_bar_height,
                 overlay.cursor_blink_visible,
                 &self.uniform_bind_group,
+            );
+            self.render_images(
+                &mut encoder,
+                view,
+                terminal,
+                (0.0, self.tab_bar_height),
+                None,
+                image::ImageLayer::AboveText,
             );
         }
 

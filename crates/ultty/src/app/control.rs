@@ -1057,6 +1057,21 @@ impl App {
                 }
             }
 
+            ControlRequest::Images { target } => {
+                let pane = match resolve_control_target(&self.runtime.manager, target) {
+                    Ok(pane) => pane,
+                    Err(response) => return response,
+                };
+                let placements = self
+                    .runtime
+                    .manager
+                    .terminal(pane)
+                    .map(|terminal| {
+                        ultty::control::common::image_placements(&terminal.event_loop.terminal())
+                    })
+                    .unwrap_or_default();
+                ControlResponse::Data(ControlData::Images { placements })
+            }
             ControlRequest::Regions { target } => {
                 let pane = match resolve_control_target(&self.runtime.manager, target) {
                     Ok(pane) => pane,

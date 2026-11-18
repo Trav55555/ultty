@@ -108,6 +108,20 @@ ulttyctl invoke-action 4 12 37 8 inc activate
 MCP exposes `ultty_invoke_action` with the same required identities. It never
 substitutes the focused pane for an omitted action target.
 
+## Inline images
+
+`images {target?}` lists the image placements on a pane's active screen,
+scrollback included, oldest first: sixel images and Kitty graphics placements
+(ADR 0026). It returns no pixel data. Each entry has `protocol` (`kitty` or
+`sixel`), the Kitty client's `image` and `placement` ids (0 when there are
+none), `line` (the top row's line number, which scrolling does not change),
+`row` (its screen row, negative in scrollback), `col`, `cols` and `rows` in
+cells, `z`, and the image's pixel `width` and `height`.
+
+```sh
+ulttyctl --json --pane 2 images
+```
+
 ## V2 subscriptions
 
 `subscribe` remains the original bare-event NDJSON stream. It does not add the

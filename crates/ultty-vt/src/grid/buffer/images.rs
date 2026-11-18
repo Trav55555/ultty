@@ -48,7 +48,7 @@ impl Buffer {
     /// 2. images whose placements are all in scrollback, oldest first;
     /// 3. the oldest image.
     pub fn enforce_image_limits(&mut self, keep: &[ImageId]) -> bool {
-        self.prune_orphan_kitty_images();
+        self.prune_orphan_kitty_images(keep);
         loop {
             let bytes = self.images.total_bytes() + self.kitty.bytes();
             let count = self.images.sixel_count() + self.kitty.len();
@@ -116,6 +116,14 @@ impl Buffer {
         })
     }
 
+    /// Remove the pictures on the screen's rows (ED 2), keeping those
+    /// wholly in scrollback.
+    pub fn clear_screen_images(&mut self) {
+        let top = self.screen_top_line();
+        self.images
+            .retain_mut(|image| image.line + usize::from(image.cell_height) <= top);
+    }
+
     /// Remove Kitty image `id` and its placements.
     pub fn remove_kitty_image(&mut self, id: ImageId) {
         self.kitty.remove(id);
@@ -124,8 +132,9 @@ impl Buffer {
     }
 
     /// Free the anonymous Kitty images (sent with no id) that have lost
-    /// their last placement: nothing can place them again.
-    pub fn prune_orphan_kitty_images(&mut self) {
+    /// their last placement, but those in `keep`: nothing can place them
+    /// again.
+    pub fn prune_orphan_kitty_images(&mut self, keep: &[ImageId]) {
         if !self.kitty.iter().any(|image| image.client_id == 0) {
             return;
         }
@@ -137,7 +146,9 @@ impl Buffer {
         let orphans: Vec<ImageId> = self
             .kitty
             .iter()
-            .filter(|image| image.client_id == 0 && !placed.contains(&image.id))
+            .filter(|image| {
+                image.client_id == 0 && !placed.contains(&image.id) && !keep.contains(&image.id)
+            })
             .map(|image| image.id)
             .collect();
         for id in orphans {
