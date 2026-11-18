@@ -253,9 +253,9 @@ Running `ultty` while an instance is running should open a window in that
 instance, as kitty and Ghostty do. Do this after slice 3, behind
 `behavior.single_instance` (default off at first, on once it is stable):
 `ultty` connects to the newest instance's control socket and sends
-`new-window` with its working directory and `-e` command, then exits. If no instance answers within a
-short timeout, it starts normally. `ultty --new-process` always starts
-one.
+`new-window` with its working directory and `-e` command, then exits. If
+no instance answers within a short timeout, it starts normally.
+`ultty --new-process` always starts one.
 
 ### Config reload
 
