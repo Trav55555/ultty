@@ -23,9 +23,8 @@ crates/
   ultty-client/     # Low-level client SDK (raw protocol access)
 examples/           # 9 workspace example apps: hello-native, counter-app, todo-app,
                     # dashboard, chat, form-app, split-panes, sysmon, async-fetch.
-                    # porygon-tui sits under examples/ but is excluded from the
-                    # workspace; build it with
-                    # `cargo build --manifest-path examples/porygon-tui/Cargo.toml`.
+                    # Porygon's native client (porygon-tui) moved to the
+                    # porygon-ai repository on 2026-11-18.
 docs/               # Project documentation; docs/archive/ holds historical plans
 scripts/            # Smoke gates, screenshot capture, security audit
 ```
@@ -43,9 +42,9 @@ and CI live; GitHub (`github.com/Trav55555/ultty`) is a push mirror. Open PRs
 on Gitea (`tea pulls create`), not GitHub.
 
 **CI** (`.gitea/workflows/ci.yml`, Gitea Actions on Linux, `runs-on: ultty`)
-runs nine jobs: `fmt`, `security-audit`, `clippy` (`--all-targets -D
+runs eight jobs: `fmt`, `security-audit`, `clippy` (`--all-targets -D
 warnings`), `test`, `msrv` (`cargo check --workspace --all-targets` on 1.90),
-`porygon-tui`, `vt-integrity`, `fuzz`, and `gui-smoke` (Ultty under Xvfb with
+`vt-integrity`, `fuzz`, and `gui-smoke` (Ultty under Xvfb with
 software Vulkan). The `ultty` pool's image, defined in the gitea-server
 repository, provides every toolchain and package; jobs install nothing, and a
 toolchain bump means a new image. There is no coverage or

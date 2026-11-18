@@ -124,13 +124,6 @@ cargo run -p sysmon         # System monitor
 cargo run -p async-fetch    # Async command and subscription demo
 ```
 
-`examples/porygon-tui` is not a workspace member. Build and run it from its own
-manifest:
-
-```bash
-cargo run --manifest-path examples/porygon-tui/Cargo.toml
-```
-
 Native apps auto-detect whether they're talking to Ultty. On an Ultty tab's own terminal they use the tab's socket. Anywhere else they probe the terminal, and if it is Ultty they carry the native protocol in-band in the terminal byte stream. That covers ssh, `sudo`, containers, and `script` recordings. In both cases the terminal does layout and rendering. Everywhere else they use ANSI mode via ratatui on supported Unix terminals. That includes tmux, screen, and zellij, where Ultty cannot know where a pane sits, so the probe is skipped or dropped. Set `ULTTY_IN_BAND=0` to skip the probe. See [spec §1.3](docs/PROTOCOL_SPEC.md) and [ADR 0018](docs/adr/0018-in-band-native-transport.md).
 
 ## Privacy
@@ -336,8 +329,7 @@ crates/
                       content types, shared between terminal and apps
 examples/           Nine workspace example apps: hello-native, counter-app,
                     todo-app, dashboard, chat, form-app, split-panes, sysmon,
-                    async-fetch. The porygon-tui example is excluded from the
-                    workspace and built from its own manifest.
+                    async-fetch.
 ```
 
 ## Status & Roadmap

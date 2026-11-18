@@ -29,9 +29,6 @@ cargo bench -p ultty                 # Parser, grid, layout, render benchmarks
 # Run
 cargo run -p ultty                   # Run the terminal emulator
 cargo run -p counter-app             # Run an example app
-
-# porygon-tui is excluded from the workspace; build it from its own manifest
-cargo build --manifest-path examples/porygon-tui/Cargo.toml
 ```
 
 The toolchain is pinned by `rust-toolchain.toml`. CI runs the same version plus
