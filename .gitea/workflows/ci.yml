@@ -1,7 +1,7 @@
 # CI on Gitea Actions (git.traversannan.com), the primary remote; GitHub is
-# a push mirror. Jobs run on the ultty pool: x86_64 Fargate Spot tasks, one
-# job each, defined with their image in the gitea-server repository. The image
-# carries the toolchains (stable, MSRV, RUST_NIGHTLY), cargo-audit, cargo-fuzz,
+# a push mirror. Jobs run on the ultty pool: x86_64 on-demand Fargate tasks,
+# one job each, defined with their image in the gitea-server repository. The
+# image carries the toolchains (stable, MSRV, RUST_NIGHTLY), cargo-audit, cargo-fuzz,
 # the Wayland/X11 headers and Xvfb with lavapipe, so jobs install nothing.
 # Tasks start empty and run on the host (no docker); compiles are cached in S3
 # through sccache. Run steps go through scripts/ci-runner-step.sh, which also
@@ -61,6 +61,9 @@ jobs:
   test:
     name: Test
     runs-on: ultty
+    # A clean run takes 11-14 min. Without a limit a hung test holds its task
+    # until Gitea's 3 h cut-off (jobs 5136, 6382 and 6667 in 2026-11).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Session deployment packaging
@@ -69,6 +72,8 @@ jobs:
         run: python3 -S -m unittest discover -s scripts/themes -p 'test_*.py'
       - name: Installer against current and older releases
         run: scripts/install-sh-test.sh
+      - name: Runner step wrapper
+        run: scripts/ci-runner-step-test.sh
       - run: scripts/ci-runner-step.sh cargo test --workspace
       - name: Protocol roundtrip property tests
         run: scripts/ci-runner-step.sh cargo test -p ultty-protocol --test roundtrip -- --ignored
