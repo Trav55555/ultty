@@ -65,10 +65,15 @@ Ranked by how much a typical user would notice:
 9. **One window per process, and no quick terminal.** "New window" starts a
    second Ultty process. Ghostty has real multiple windows, a quick terminal
    on macOS and Wayland.
+   Proposed designs:
+   [ADR 0027](adr/0027-multiple-windows-per-process.md) (multiple windows)
+   and [ADR 0028](adr/0028-quick-terminal.md) (quick terminal).
 10. **Linux x86_64 only in practice.** Release builds and CI cover Linux
     x86_64 only. macOS code exists but is not built or tested by CI. There
     is no Windows or BSD support. Alacritty runs on Linux, BSD, macOS and
     Windows.
+    Proposed design for macOS CI:
+    [ADR 0029](adr/0029-macos-in-ci.md).
 
 Smaller gaps: no SGR-pixel mouse (1016), no background blur or image, no
 audible bell, cursor and foreground/background colours cannot be set with OSC
