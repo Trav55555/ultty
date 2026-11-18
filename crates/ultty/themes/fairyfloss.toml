@@ -1,0 +1,27 @@
+# Fairyfloss
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/sailorhg/fairyfloss
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Fairyfloss"
+foreground = "#f8f8f2"
+background = "#5a5475"
+cursor = "#f8f8f0"
+selection = "#8077a8c0"
+
+[palette]
+black = "#040303"
+red = "#f92672"
+green = "#c2ffdf"
+yellow = "#e6c000"
+blue = "#c2ffdf"
+magenta = "#ffb8d1"
+cyan = "#c5a3ff"
+white = "#f8f8f0"
+bright_black = "#6090cb"
+bright_red = "#ff857f"
+bright_green = "#c2ffdf"
+bright_yellow = "#ffea00"
+bright_blue = "#c2ffdf"
+bright_magenta = "#ffb8d1"
+bright_cyan = "#c5a3ff"
+bright_white = "#f8f8f0"

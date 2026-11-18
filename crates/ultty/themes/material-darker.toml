@@ -1,0 +1,27 @@
+# Material Darker
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/mbadolato/iTerm2-Color-Schemes/pull/241
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Material Darker"
+foreground = "#eeffff"
+background = "#212121"
+cursor = "#ffffff"
+selection = "#eeffffc0"
+
+[palette]
+black = "#000000"
+red = "#ff5370"
+green = "#c3e88d"
+yellow = "#ffcb6b"
+blue = "#82aaff"
+magenta = "#c792ea"
+cyan = "#89ddff"
+white = "#ffffff"
+bright_black = "#545454"
+bright_red = "#ff5370"
+bright_green = "#c3e88d"
+bright_yellow = "#ffcb6b"
+bright_blue = "#82aaff"
+bright_magenta = "#c792ea"
+bright_cyan = "#89ddff"
+bright_white = "#ffffff"

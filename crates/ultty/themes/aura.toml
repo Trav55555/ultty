@@ -1,0 +1,27 @@
+# Aura
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/daltonmenezes/aura-theme
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Aura"
+foreground = "#edecee"
+background = "#15141b"
+cursor = "#a277ff"
+selection = "#a277ffc0"
+
+[palette]
+black = "#110f18"
+red = "#ff6767"
+green = "#61ffca"
+yellow = "#ffca85"
+blue = "#a277ff"
+magenta = "#a277ff"
+cyan = "#61ffca"
+white = "#edecee"
+bright_black = "#4d4d4d"
+bright_red = "#ffca85"
+bright_green = "#a277ff"
+bright_yellow = "#ffca85"
+bright_blue = "#a277ff"
+bright_magenta = "#a277ff"
+bright_cyan = "#61ffca"
+bright_white = "#edecee"

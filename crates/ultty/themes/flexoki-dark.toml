@@ -1,0 +1,27 @@
+# Flexoki Dark
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/kepano/flexoki
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Flexoki Dark"
+foreground = "#cecdc3"
+background = "#100f0f"
+cursor = "#cecdc3"
+selection = "#403e3cc0"
+
+[palette]
+black = "#100f0f"
+red = "#d14d41"
+green = "#879a39"
+yellow = "#d0a215"
+blue = "#4385be"
+magenta = "#ce5d97"
+cyan = "#3aa99f"
+white = "#878580"
+bright_black = "#575653"
+bright_red = "#af3029"
+bright_green = "#66800b"
+bright_yellow = "#ad8301"
+bright_blue = "#205ea6"
+bright_magenta = "#a02f6f"
+bright_cyan = "#24837b"
+bright_white = "#cecdc3"

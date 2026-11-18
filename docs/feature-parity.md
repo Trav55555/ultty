@@ -56,9 +56,12 @@ Ranked by how much a typical user would notice:
    shells it starts (`terminal.shell_integration`, default `auto`), login
    shells and tabs whose command is a bare shell included. Elvish, nushell,
    and shells reached over ssh still need the scripts sourced by hand. Ghostty also injects into elvish and nushell.
-8. **Only six bundled themes.** Ghostty ships hundreds of themes (1.4 alone
-   added 356) and can switch between a light and a dark theme
-   automatically.
+8. **Fewer bundled themes, and no light/dark switching.** *Mostly fixed.*
+   Ultty bundles 94 themes (`ultty --list-themes`) and loads your own from
+   `~/.config/ultty/themes/`. Ghostty ships hundreds (1.4 alone added 356)
+   and can switch between a light and a dark theme with the system
+   appearance, which Ultty does not read. Themes whose licence is unknown or
+   restrictive upstream are left out.
 9. **One window per process, and no quick terminal.** "New window" starts a
    second Ultty process. Ghostty has real multiple windows, a quick terminal
    on macOS and Wayland.
@@ -199,7 +202,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 |---|---|---|---|---|
 | Format | TOML | key = value | TOML, with imports | `config.rs` |
 | Live reload | partial: file watched; `behavior.accessibility` needs restart | on request (keybind or menu) | yes; `live_config_reload` | `config_watcher.rs`; `tests/config_reload.rs` |
-| Bundled themes | 6 | hundreds (356 added in 1.4); light/dark pairs | none bundled (separate repo) | `config.rs` `ColorConfig::default` |
+| Bundled themes | 94; user themes dir; no light/dark pairs | hundreds (356 added in 1.4); light/dark pairs | none bundled (separate repo) | `themes.rs`; `crates/ultty/themes/`; `ultty --list-themes` |
 | Per-platform options | no | yes; `macos-*`, `gtk-*` | yes | none in `config.rs` |
 | CLI overrides | partial: `-e` only (added after this audit); no config overrides | yes; `--key=value` | yes; `-o`, `-e`, `--working-directory` | `main.rs` `invocation` |
 | Launch profiles | yes; tabs and panes with commands and directories | no | no | `config.rs` `ProfilesConfig` |

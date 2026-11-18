@@ -1,0 +1,27 @@
+# Sonokai
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/sainnhe/sonokai
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Sonokai"
+foreground = "#e2e2e3"
+background = "#2c2e34"
+cursor = "#e2e2e3"
+selection = "#414550c0"
+
+[palette]
+black = "#181819"
+red = "#fc5d7c"
+green = "#9ed072"
+yellow = "#e7c664"
+blue = "#76cce0"
+magenta = "#b39df3"
+cyan = "#f39660"
+white = "#e2e2e3"
+bright_black = "#7f8490"
+bright_red = "#fc5d7c"
+bright_green = "#9ed072"
+bright_yellow = "#e7c664"
+bright_blue = "#76cce0"
+bright_magenta = "#b39df3"
+bright_cyan = "#f39660"
+bright_white = "#e2e2e3"

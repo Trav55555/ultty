@@ -1,0 +1,27 @@
+# Kanagawabones
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/zenbones-theme/zenbones.nvim
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Kanagawabones"
+foreground = "#ddd8bb"
+background = "#1f1f28"
+cursor = "#e6e0c2"
+selection = "#49473ec0"
+
+[palette]
+black = "#1f1f28"
+red = "#e46a78"
+green = "#98bc6d"
+yellow = "#e5c283"
+blue = "#7eb3c9"
+magenta = "#957fb8"
+cyan = "#7eb3c9"
+white = "#ddd8bb"
+bright_black = "#49495e"
+bright_red = "#ec818c"
+bright_green = "#9ec967"
+bright_yellow = "#f1c982"
+bright_blue = "#7bc2df"
+bright_magenta = "#a98fd2"
+bright_cyan = "#7bc2df"
+bright_white = "#a8a48d"

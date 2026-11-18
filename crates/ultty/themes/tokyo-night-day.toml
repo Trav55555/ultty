@@ -1,0 +1,27 @@
+# TokyoNight Day
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: Apache-2.0. Source: https://github.com/folke/tokyonight.nvim
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "TokyoNight Day"
+foreground = "#3760bf"
+background = "#e1e2e7"
+cursor = "#3760bf"
+selection = "#99a7dfc0"
+
+[palette]
+black = "#e9e9ed"
+red = "#f52a65"
+green = "#587539"
+yellow = "#8c6c3e"
+blue = "#2e7de9"
+magenta = "#9854f1"
+cyan = "#007197"
+white = "#6172b0"
+bright_black = "#a1a6c5"
+bright_red = "#f52a65"
+bright_green = "#587539"
+bright_yellow = "#8c6c3e"
+bright_blue = "#2e7de9"
+bright_magenta = "#9854f1"
+bright_cyan = "#007197"
+bright_white = "#3760bf"

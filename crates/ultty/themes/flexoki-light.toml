@@ -1,0 +1,27 @@
+# Flexoki Light
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/kepano/flexoki
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Flexoki Light"
+foreground = "#100f0f"
+background = "#fffcf0"
+cursor = "#100f0f"
+selection = "#cecdc3c0"
+
+[palette]
+black = "#100f0f"
+red = "#af3029"
+green = "#66800b"
+yellow = "#ad8301"
+blue = "#205ea6"
+magenta = "#a02f6f"
+cyan = "#24837b"
+white = "#6f6e69"
+bright_black = "#b7b5ac"
+bright_red = "#d14d41"
+bright_green = "#879a39"
+bright_yellow = "#d0a215"
+bright_blue = "#4385be"
+bright_magenta = "#ce5d97"
+bright_cyan = "#3aa99f"
+bright_white = "#cecdc3"

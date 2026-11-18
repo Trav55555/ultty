@@ -1,0 +1,27 @@
+# Rose Pine Moon
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/rose-pine/build
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Rose Pine Moon"
+foreground = "#e0def4"
+background = "#232136"
+cursor = "#e0def4"
+selection = "#44415ac0"
+
+[palette]
+black = "#393552"
+red = "#eb6f92"
+green = "#3e8fb0"
+yellow = "#f6c177"
+blue = "#9ccfd8"
+magenta = "#c4a7e7"
+cyan = "#ea9a97"
+white = "#e0def4"
+bright_black = "#6e6a86"
+bright_red = "#eb6f92"
+bright_green = "#3e8fb0"
+bright_yellow = "#f6c177"
+bright_blue = "#9ccfd8"
+bright_magenta = "#c4a7e7"
+bright_cyan = "#ea9a97"
+bright_white = "#e0def4"

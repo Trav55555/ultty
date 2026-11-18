@@ -1,0 +1,27 @@
+# Melange Dark
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/savq/melange-nvim
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Melange Dark"
+foreground = "#ece1d7"
+background = "#292522"
+cursor = "#ece1d7"
+selection = "#ece1d7c0"
+
+[palette]
+black = "#34302c"
+red = "#bd8183"
+green = "#78997a"
+yellow = "#e49b5d"
+blue = "#7f91b2"
+magenta = "#b380b0"
+cyan = "#7b9695"
+white = "#c1a78e"
+bright_black = "#867462"
+bright_red = "#d47766"
+bright_green = "#85b695"
+bright_yellow = "#ebc06d"
+bright_blue = "#a3a9ce"
+bright_magenta = "#cf9bc2"
+bright_cyan = "#89b3b6"
+bright_white = "#ece1d7"

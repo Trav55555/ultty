@@ -1,0 +1,27 @@
+# One Half Light
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/sonph/onehalf
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "One Half Light"
+foreground = "#383a42"
+background = "#fafafa"
+cursor = "#a5b4e5"
+selection = "#bfceffc0"
+
+[palette]
+black = "#383a42"
+red = "#e45649"
+green = "#50a14f"
+yellow = "#c18401"
+blue = "#0184bc"
+magenta = "#a626a4"
+cyan = "#0997b3"
+white = "#bababa"
+bright_black = "#4f525e"
+bright_red = "#e06c75"
+bright_green = "#98c379"
+bright_yellow = "#d8b36e"
+bright_blue = "#61afef"
+bright_magenta = "#c678dd"
+bright_cyan = "#56b6c2"
+bright_white = "#ffffff"

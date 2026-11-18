@@ -1,0 +1,27 @@
+# Ayu Mirage
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/ayu-theme/vscode-ayu
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Ayu Mirage"
+foreground = "#cccac2"
+background = "#1f2430"
+cursor = "#ffcc66"
+selection = "#409fffc0"
+
+[palette]
+black = "#171b24"
+red = "#ed8274"
+green = "#87d96c"
+yellow = "#facc6e"
+blue = "#6dcbfa"
+magenta = "#dabafa"
+cyan = "#90e1c6"
+white = "#c7c7c7"
+bright_black = "#686868"
+bright_red = "#f28779"
+bright_green = "#d5ff80"
+bright_yellow = "#ffd173"
+bright_blue = "#73d0ff"
+bright_magenta = "#dfbfff"
+bright_cyan = "#95e6cb"
+bright_white = "#ffffff"

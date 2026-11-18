@@ -1,0 +1,10 @@
+# fixture
+Sample Dark:
+  license: MIT
+  source: https://example.com/sample
+'Copyleft Dark':
+  license: GPL-3.0-or-later
+  source: ''
+Mystery Dark:
+  license: unknown
+  source: ''

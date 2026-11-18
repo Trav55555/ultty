@@ -1,0 +1,27 @@
+# Nord Light
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/nordtheme/iterm2
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Nord Light"
+foreground = "#414858"
+background = "#e5e9f0"
+cursor = "#7bb3c3"
+selection = "#d8dee9c0"
+
+[palette]
+black = "#3b4252"
+red = "#bf616a"
+green = "#96b17f"
+yellow = "#c5a565"
+blue = "#81a1c1"
+magenta = "#b48ead"
+cyan = "#7bb3c3"
+white = "#a5abb6"
+bright_black = "#4c566a"
+bright_red = "#bf616a"
+bright_green = "#96b17f"
+bright_yellow = "#c5a565"
+bright_blue = "#81a1c1"
+bright_magenta = "#b48ead"
+bright_cyan = "#82afae"
+bright_white = "#eceff4"

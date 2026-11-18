@@ -1,0 +1,27 @@
+# Gruvbox Material Dark
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/sainnhe/gruvbox-material
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Gruvbox Material Dark"
+foreground = "#d4be98"
+background = "#282828"
+cursor = "#d4be98"
+selection = "#d4be98c0"
+
+[palette]
+black = "#282828"
+red = "#ea6962"
+green = "#a9b665"
+yellow = "#d8a657"
+blue = "#7daea3"
+magenta = "#d3869b"
+cyan = "#89b482"
+white = "#d4be98"
+bright_black = "#7c6f64"
+bright_red = "#ea6962"
+bright_green = "#a9b665"
+bright_yellow = "#d8a657"
+bright_blue = "#7daea3"
+bright_magenta = "#d3869b"
+bright_cyan = "#89b482"
+bright_white = "#ddc7a1"

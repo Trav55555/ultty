@@ -1,0 +1,27 @@
+# Shades Of Purple
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/ahmadawais/shades-of-purple-iterm2
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Shades Of Purple"
+foreground = "#ffffff"
+background = "#1e1d40"
+cursor = "#fad000"
+selection = "#b362ffc0"
+
+[palette]
+black = "#000000"
+red = "#d90429"
+green = "#3ad900"
+yellow = "#ffe700"
+blue = "#6943ff"
+magenta = "#ff2c70"
+cyan = "#00c5c7"
+white = "#c7c7c7"
+bright_black = "#686868"
+bright_red = "#f92a1c"
+bright_green = "#43d426"
+bright_yellow = "#f1d000"
+bright_blue = "#6871ff"
+bright_magenta = "#ff77ff"
+bright_cyan = "#79e8fb"
+bright_white = "#ffffff"

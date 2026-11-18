@@ -1,0 +1,27 @@
+# Dawnfox
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/EdenEast/nightfox.nvim/tree/main/extra
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Dawnfox"
+foreground = "#575279"
+background = "#faf4ed"
+cursor = "#575279"
+selection = "#d0d8d8c0"
+
+[palette]
+black = "#575279"
+red = "#b4637a"
+green = "#618774"
+yellow = "#ea9d34"
+blue = "#286983"
+magenta = "#907aa9"
+cyan = "#56949f"
+white = "#b2b6bd"
+bright_black = "#5f5695"
+bright_red = "#c26d85"
+bright_green = "#629f81"
+bright_yellow = "#eea846"
+bright_blue = "#2d81a3"
+bright_magenta = "#9a80b9"
+bright_cyan = "#5ca7b4"
+bright_white = "#e6ebf3"

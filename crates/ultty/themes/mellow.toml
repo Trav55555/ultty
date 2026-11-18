@@ -1,0 +1,27 @@
+# Mellow
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/mellow-theme/mellow.nvim
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Mellow"
+foreground = "#c9c7cd"
+background = "#161617"
+cursor = "#cac9dd"
+selection = "#2a2a2dc0"
+
+[palette]
+black = "#27272a"
+red = "#f5a191"
+green = "#90b99f"
+yellow = "#e6b99d"
+blue = "#aca1cf"
+magenta = "#e29eca"
+cyan = "#ea83a5"
+white = "#c1c0d4"
+bright_black = "#424246"
+bright_red = "#ffae9f"
+bright_green = "#9dc6ac"
+bright_yellow = "#f0c5a9"
+bright_blue = "#b9aeda"
+bright_magenta = "#ecaad6"
+bright_cyan = "#f591b2"
+bright_white = "#cac9dd"

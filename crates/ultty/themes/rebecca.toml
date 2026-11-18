@@ -1,0 +1,27 @@
+# Rebecca
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/vic/rebecca-theme
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Rebecca"
+foreground = "#e8e6ed"
+background = "#292a44"
+cursor = "#b89bf9"
+selection = "#663399c0"
+
+[palette]
+black = "#12131e"
+red = "#dd7755"
+green = "#04dbb5"
+yellow = "#f2e7b7"
+blue = "#7aa5ff"
+magenta = "#bf9cf9"
+cyan = "#56d3c2"
+white = "#e4e3e9"
+bright_black = "#666699"
+bright_red = "#ff92cd"
+bright_green = "#01eac0"
+bright_yellow = "#fffca8"
+bright_blue = "#69c0fa"
+bright_magenta = "#c17ff8"
+bright_cyan = "#8bfde1"
+bright_white = "#f4f2f9"

@@ -31,6 +31,21 @@ fn main() -> Result<ExitCode> {
             println!("{}", version_output());
             return Ok(ExitCode::SUCCESS);
         }
+        Ok(Invocation::ListThemes) => {
+            use std::io::IsTerminal;
+            let config = ultty::config::Config::load();
+            let themes: Vec<_> = config
+                .colors
+                .theme_names()
+                .into_iter()
+                .filter_map(|name| config.colors.get_theme(&name).cloned().map(|t| (name, t)))
+                .collect();
+            print!(
+                "{}",
+                ultty::themes::format_listing(&themes, std::io::stdout().is_terminal())
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
         Ok(Invocation::Help) => {
             print!("{}", usage());
             return Ok(ExitCode::SUCCESS);
@@ -72,6 +87,8 @@ enum Invocation {
         command: Option<StartupCommand>,
     },
     Version,
+    /// Print the theme names (with colour swatches on a terminal).
+    ListThemes,
     Help,
 }
 
@@ -84,6 +101,7 @@ enum Invocation {
 fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, String> {
     let mut args = args.into_iter().peekable();
     let mut version = false;
+    let mut list_themes = false;
     let mut unknown = None;
     let mut command = None;
     let mut selection_error = None;
@@ -96,6 +114,7 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
             }
             "--help" | "-h" => return Ok(Invocation::Help),
             "--version" | "-V" => version = true,
+            "--list-themes" => list_themes = true,
             "--profile" | "--workspace" => {
                 if command.is_some() {
                     selection_error =
@@ -142,6 +161,9 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
     if version {
         return Ok(Invocation::Version);
     }
+    if list_themes {
+        return Ok(Invocation::ListThemes);
+    }
     if let Some(arg) = unknown {
         return Err(format!("unknown argument '{arg}'"));
     }
@@ -167,11 +189,13 @@ Options:
                         -- does the same.
   -h, --help            Print this help and exit
   -V, --version         Print the version and exit
+  --list-themes         Print the available colour themes and exit
   --profile NAME        Launch configured tabs and panes instead of restoring.
   --workspace NAME      Open a saved layout in fresh shells; does not resume jobs.
   --attach NAME         Attach to a live session host; close the window to detach.
 
 Configuration: ~/.config/ultty/config.toml
+Your themes:   ~/.config/ultty/themes/NAME.toml
 Logging:       RUST_LOG (default \"{DEFAULT_LOG_FILTER}\")
 Control a running Ultty with ulttyctl (ulttyctl --help).
 
@@ -232,6 +256,26 @@ mod tests {
     fn version_flag_is_detected() {
         assert_eq!(invocation(args(&["--version"])), Ok(Invocation::Version));
         assert_eq!(invocation(args(&["-V"])), Ok(Invocation::Version));
+    }
+
+    #[test]
+    fn list_themes_is_an_information_flag_like_version() {
+        assert_eq!(
+            invocation(args(&["--list-themes"])),
+            Ok(Invocation::ListThemes)
+        );
+        assert_eq!(
+            invocation(args(&["--list-themes", "--bogus"])),
+            Ok(Invocation::ListThemes)
+        );
+        assert_eq!(
+            invocation(args(&["--list-themes", "-h"])),
+            Ok(Invocation::Help)
+        );
+        assert_eq!(
+            invocation(args(&["--list-themes", "-V"])),
+            Ok(Invocation::Version)
+        );
     }
 
     #[test]
@@ -309,7 +353,12 @@ mod tests {
     #[test]
     fn usage_names_every_flag() {
         let usage = usage();
-        for flag in ["-e COMMAND [ARGS]...", "-h, --help", "-V, --version"] {
+        for flag in [
+            "-e COMMAND [ARGS]...",
+            "-h, --help",
+            "-V, --version",
+            "--list-themes",
+        ] {
             assert!(usage.contains(flag), "{usage}");
         }
         assert!(usage.contains("Usage: ultty"), "{usage}");

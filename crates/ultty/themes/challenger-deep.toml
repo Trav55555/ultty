@@ -1,0 +1,27 @@
+# Challenger Deep
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/challenger-deep-theme/vim
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Challenger Deep"
+foreground = "#cbe1e7"
+background = "#1e1c31"
+cursor = "#fbfcfc"
+selection = "#cbe1e7c0"
+
+[palette]
+black = "#141228"
+red = "#ff5458"
+green = "#62d196"
+yellow = "#ffb378"
+blue = "#65b2ff"
+magenta = "#906cff"
+cyan = "#63f2f1"
+white = "#a6b3cc"
+bright_black = "#565575"
+bright_red = "#ff8080"
+bright_green = "#95ffa4"
+bright_yellow = "#ffe9aa"
+bright_blue = "#91ddff"
+bright_magenta = "#c991e1"
+bright_cyan = "#aaffe4"
+bright_white = "#cbe3e7"

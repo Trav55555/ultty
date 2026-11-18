@@ -1,0 +1,27 @@
+# Gruvbox Light Hard
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/morhetz/gruvbox/blob/697c00291db857ca0af00ec154e5bd514a79191f/package.json#L6
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Gruvbox Light Hard"
+foreground = "#3c3836"
+background = "#f9f5d7"
+cursor = "#3c3836"
+selection = "#3c3836c0"
+
+[palette]
+black = "#f9f5d7"
+red = "#cc241d"
+green = "#98971a"
+yellow = "#d79921"
+blue = "#458588"
+magenta = "#b16286"
+cyan = "#689d6a"
+white = "#7c6f64"
+bright_black = "#928374"
+bright_red = "#9d0006"
+bright_green = "#79740e"
+bright_yellow = "#b57614"
+bright_blue = "#076678"
+bright_magenta = "#8f3f71"
+bright_cyan = "#427b58"
+bright_white = "#3c3836"

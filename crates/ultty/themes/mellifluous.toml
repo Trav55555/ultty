@@ -1,0 +1,27 @@
+# Mellifluous
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/ramojus/mellifluous.nvim
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Mellifluous"
+foreground = "#dadada"
+background = "#1a1a1a"
+cursor = "#bfad9e"
+selection = "#2d2d2dc0"
+
+[palette]
+black = "#1a1a1a"
+red = "#d29393"
+green = "#b3b393"
+yellow = "#cbaa89"
+blue = "#a8a1be"
+magenta = "#b39fb0"
+cyan = "#c0af8c"
+white = "#dadada"
+bright_black = "#5b5b5b"
+bright_red = "#c95954"
+bright_green = "#828040"
+bright_yellow = "#a6794c"
+bright_blue = "#5a6599"
+bright_magenta = "#9c6995"
+bright_cyan = "#74a39e"
+bright_white = "#ffffff"

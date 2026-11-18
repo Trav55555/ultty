@@ -1,0 +1,27 @@
+# TokyoNight Moon
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: Apache-2.0. Source: https://github.com/folke/tokyonight.nvim
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "TokyoNight Moon"
+foreground = "#c8d3f5"
+background = "#222436"
+cursor = "#c8d3f5"
+selection = "#2d3f76c0"
+
+[palette]
+black = "#1b1d2b"
+red = "#ff757f"
+green = "#c3e88d"
+yellow = "#ffc777"
+blue = "#82aaff"
+magenta = "#c099ff"
+cyan = "#86e1fc"
+white = "#828bb8"
+bright_black = "#444a73"
+bright_red = "#ff757f"
+bright_green = "#c3e88d"
+bright_yellow = "#ffc777"
+bright_blue = "#82aaff"
+bright_magenta = "#c099ff"
+bright_cyan = "#86e1fc"
+bright_white = "#c8d3f5"

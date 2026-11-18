@@ -70,6 +70,7 @@ pub mod session;
 pub mod tabs;
 pub mod terminal_manager;
 pub mod testing;
+pub mod themes;
 #[cfg(feature = "gui")]
 pub mod url;
 pub mod vim;

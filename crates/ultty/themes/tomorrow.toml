@@ -1,0 +1,27 @@
+# Tomorrow
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/chriskempson/tomorrow-theme
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Tomorrow"
+foreground = "#4d4d4c"
+background = "#ffffff"
+cursor = "#4d4d4c"
+selection = "#d6d6d6c0"
+
+[palette]
+black = "#000000"
+red = "#c82829"
+green = "#718c00"
+yellow = "#eab700"
+blue = "#4271ae"
+magenta = "#8959a8"
+cyan = "#3e999f"
+white = "#bfbfbf"
+bright_black = "#000000"
+bright_red = "#c82829"
+bright_green = "#718c00"
+bright_yellow = "#eab700"
+bright_blue = "#4271ae"
+bright_magenta = "#8959a8"
+bright_cyan = "#3e999f"
+bright_white = "#ffffff"

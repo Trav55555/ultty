@@ -9,6 +9,100 @@ keys keep their defaults. The full set of keys is defined in
 This page covers what programs running in a pane are told and allowed to do,
 and the settings that change how panes behave.
 
+## Themes
+
+Ultty bundles 94 colour themes: its original six (`everforest-dark`,
+`tokyo-night`, `gruvbox-dark`, `catppuccin-mocha`, `dark`, `light`) and 88
+more converted from the [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes)
+collection, among them Catppuccin, Dracula, Gruvbox, Nord, Solarized, Tokyo
+Night, One, Rose Pine, Kanagawa, Everforest, GitHub and the Nightfox family.
+List them with:
+
+```sh
+ultty --list-themes
+```
+
+On a terminal the list shows a swatch of each theme's background, text and 16
+colours. Piped, it is one name per line.
+
+```toml
+[colors]
+theme = "catppuccin-latte"
+```
+
+Names match without regard to case, and a space or underscore is the same as
+a dash: `Rose Pine`, `rose_pine` and `rose-pine` are one theme. Colours you
+set in `[colors]` (`foreground`, `background`, `cursor`, `selection`, and
+single keys of `[colors.palette]`) win over the theme's. The key combination
+`ctrl+shift+n` (`keybindings.cycle_theme`) steps through the themes in name
+order.
+
+### Your own themes
+
+Put a theme in `themes/NAME.toml` next to `config.toml`
+(`~/.config/ultty/themes/` on Linux). It is found by its file name, and
+replaces a bundled theme of the same name. Foreground, background, cursor and
+all 16 palette colours are required; `name` and `selection` are optional. A
+file that does not parse, or lacks a colour, is skipped with a warning. The
+directory is read when the config is loaded, so a new theme file shows up
+the next time `config.toml` changes or Ultty starts. `[colors.themes.NAME]`
+tables in `config.toml` define themes the same way and win over files.
+
+```toml
+name = "My Theme"
+foreground = "#c0caf5"
+background = "#1a1b26"
+cursor = "#c0caf5"
+selection = "#33467cc0"   # optional; last two digits are opacity
+
+[palette]
+black = "#15161e"
+red = "#f7768e"
+green = "#9ece6a"
+yellow = "#e0af68"
+blue = "#7aa2f7"
+magenta = "#bb9af7"
+cyan = "#7dcfff"
+white = "#a9b1d6"
+bright_black = "#414868"
+bright_red = "#f7768e"
+bright_green = "#9ece6a"
+bright_yellow = "#e0af68"
+bright_blue = "#7aa2f7"
+bright_magenta = "#bb9af7"
+bright_cyan = "#7dcfff"
+bright_white = "#c0caf5"
+```
+
+Ultty does not switch between a light and a dark theme with the system
+appearance (Ghostty's `theme = "light:X,dark:Y"`): it does not read the
+system setting. Choose one theme, or cycle with the keybinding.
+
+### Where the bundled themes come from
+
+The theme files are in `crates/ultty/themes/` and are compiled into the
+binary. `crates/ultty/themes/THIRD_PARTY_THEMES.md` lists each theme's licence
+and source, and every file names its own. Only themes licensed for
+redistribution (MIT, Apache-2.0 and similar) are included; themes marked
+unknown, non-free or copyleft upstream are left out.
+
+To add themes or refresh them, check out iTerm2-Color-Schemes, add names to
+`scripts/themes/selection.txt`, and run:
+
+```sh
+scripts/import-themes.py --upstream /path/to/iTerm2-Color-Schemes
+```
+
+The script reads each named scheme from `ghostty/`, looks up its licence in
+the checkout's `licenses.yml`, and rewrites `crates/ultty/themes/` and the
+notice. It stops with an error for a scheme whose licence is not on its
+allow list. A scheme that `licenses.yml` lists as unknown can be admitted with
+`Name | SPDX | source-url` in the selection file once you have checked the
+licence at the source. Schemes with no upstream file can go in
+`scripts/themes/sources/`, in Ghostty format with `# license:` and
+`# source:` header lines (Solarized does). The script's tests run with
+`python3 -S -m unittest discover -s scripts/themes -p 'test_*.py'`.
+
 ## Terminal type
 
 ```toml

@@ -1,0 +1,27 @@
+# Snazzy
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/sindresorhus/iterm2-snazzy
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Snazzy"
+foreground = "#ebece6"
+background = "#1e1f29"
+cursor = "#e4e4e4"
+selection = "#81aec6c0"
+
+[palette]
+black = "#000000"
+red = "#fc4346"
+green = "#50fb7c"
+yellow = "#f0fb8c"
+blue = "#49baff"
+magenta = "#fc4cb4"
+cyan = "#8be9fe"
+white = "#ededec"
+bright_black = "#555555"
+bright_red = "#fc4346"
+bright_green = "#50fb7c"
+bright_yellow = "#f0fb8c"
+bright_blue = "#49baff"
+bright_magenta = "#fc4cb4"
+bright_cyan = "#8be9fe"
+bright_white = "#ededec"

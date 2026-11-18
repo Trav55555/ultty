@@ -1,0 +1,27 @@
+# One Half Dark
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/sonph/onehalf
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "One Half Dark"
+foreground = "#dcdfe4"
+background = "#282c34"
+cursor = "#a3b3cc"
+selection = "#474e5dc0"
+
+[palette]
+black = "#282c34"
+red = "#e06c75"
+green = "#98c379"
+yellow = "#e5c07b"
+blue = "#61afef"
+magenta = "#c678dd"
+cyan = "#56b6c2"
+white = "#dcdfe4"
+bright_black = "#5d677a"
+bright_red = "#e06c75"
+bright_green = "#98c379"
+bright_yellow = "#e5c07b"
+bright_blue = "#61afef"
+bright_magenta = "#c678dd"
+bright_cyan = "#56b6c2"
+bright_white = "#dcdfe4"

@@ -1,0 +1,27 @@
+# Poimandres
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/drcmda/poimandres-theme
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Poimandres"
+foreground = "#a6accd"
+background = "#1a1e28"
+cursor = "#ffffff"
+selection = "#a6accdc0"
+
+[palette]
+black = "#1a1e28"
+red = "#d0679d"
+green = "#5de4c7"
+yellow = "#fffac2"
+blue = "#89ddff"
+magenta = "#fcc5e9"
+cyan = "#add7ff"
+white = "#ffffff"
+bright_black = "#a6accd"
+bright_red = "#d0679d"
+bright_green = "#5de4c7"
+bright_yellow = "#fffac2"
+bright_blue = "#add7ff"
+bright_magenta = "#fae4fc"
+bright_cyan = "#89ddff"
+bright_white = "#ffffff"

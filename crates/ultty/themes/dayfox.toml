@@ -1,0 +1,27 @@
+# Dayfox
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/edeneast/nightfox.nvim
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Dayfox"
+foreground = "#3d2b5a"
+background = "#f6f2ee"
+cursor = "#3d2b5a"
+selection = "#e7d2bec0"
+
+[palette]
+black = "#352c24"
+red = "#a5222f"
+green = "#396847"
+yellow = "#ac5402"
+blue = "#2848a9"
+magenta = "#6e33ce"
+cyan = "#287980"
+white = "#bfb6ae"
+bright_black = "#534c45"
+bright_red = "#b3434e"
+bright_green = "#577f63"
+bright_yellow = "#b86e28"
+bright_blue = "#4863b6"
+bright_magenta = "#8452d5"
+bright_cyan = "#488d93"
+bright_white = "#f4ece6"

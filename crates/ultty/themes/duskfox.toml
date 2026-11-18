@@ -1,0 +1,27 @@
+# Duskfox
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/EdenEast/nightfox.nvim/tree/main/extra
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Duskfox"
+foreground = "#e0def4"
+background = "#232136"
+cursor = "#e0def4"
+selection = "#433c59c0"
+
+[palette]
+black = "#393552"
+red = "#eb6f92"
+green = "#a3be8c"
+yellow = "#f6c177"
+blue = "#569fba"
+magenta = "#c4a7e7"
+cyan = "#9ccfd8"
+white = "#e0def4"
+bright_black = "#544d8a"
+bright_red = "#f083a2"
+bright_green = "#b1d196"
+bright_yellow = "#f9cb8c"
+bright_blue = "#65b1cd"
+bright_magenta = "#ccb1ed"
+bright_cyan = "#a6dae3"
+bright_white = "#e2e0f7"

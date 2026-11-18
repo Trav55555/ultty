@@ -1,0 +1,27 @@
+# Rose Pine Dawn
+# Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
+# Theme licence: MIT. Source: https://github.com/rose-pine/build
+# See THIRD_PARTY_THEMES.md in this directory.
+name = "Rose Pine Dawn"
+foreground = "#575279"
+background = "#faf4ed"
+cursor = "#575279"
+selection = "#dfdad9c0"
+
+[palette]
+black = "#f2e9e1"
+red = "#b4637a"
+green = "#286983"
+yellow = "#ea9d34"
+blue = "#56949f"
+magenta = "#907aa9"
+cyan = "#d7827e"
+white = "#575279"
+bright_black = "#9893a5"
+bright_red = "#b4637a"
+bright_green = "#286983"
+bright_yellow = "#ea9d34"
+bright_blue = "#56949f"
+bright_magenta = "#907aa9"
+bright_cyan = "#d7827e"
+bright_white = "#575279"
