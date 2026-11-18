@@ -10,6 +10,26 @@ use crate::{Msg, PorygonTui};
 /// Shown whenever the daemon says the approved command leaves the sandbox.
 pub(crate) const HOST_EXECUTION_LINE: &str = "Runs on your machine (outside the project sandbox)";
 
+/// Shown when the daemon says the command runs in the disposable project sandbox.
+pub(crate) const CONTAINED_EXECUTION_LINE: &str =
+    "Runs sandboxed (a disposable copy of the project, no network)";
+
+/// The menu's choices, worded like common terminal-agent approval menus.
+pub(crate) const APPROVE_ONCE_LABEL: &str = "Yes";
+pub(crate) const APPROVE_SESSION_LABEL: &str = "Yes, and don't ask again for this command";
+pub(crate) const REJECT_FEEDBACK_LABEL: &str = "No, and tell Porygon what to do differently";
+pub(crate) const REJECT_LABEL: &str = "No";
+
+/// Whether the daemon marked this request as contained (sandboxed) execution.
+/// Older daemons never send it, and a host request is never contained.
+pub(crate) fn runs_contained(request: &ApprovalRequest) -> bool {
+    let context = &request.params;
+    !runs_on_host(request)
+        && (context.get("execution").and_then(serde_json::Value::as_str) == Some("contained")
+            || context.get("reason").and_then(serde_json::Value::as_str)
+                == Some("contained_project_work"))
+}
+
 /// Whether the daemon marked this request as host execution. Older daemons
 /// omit these fields, so their requests render as before. A refreshed pending
 /// record carries the stored reason and arguments rather than `execution`.
