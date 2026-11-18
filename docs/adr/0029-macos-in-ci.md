@@ -4,7 +4,8 @@
 
 **Proposed** 2026-11-17. Not scheduled. Code and workflow references are
 to `main` at 252c082. Prices were read from public pricing pages on
-2026-11-17 and change; each is marked with how sure I am.
+2026-11-17 and change; each is marked with how sure I am. The open
+questions were settled on 2026-11-17; see "Decisions (2026-11-17)".
 
 ## Context
 
@@ -130,8 +131,9 @@ would not put into a CI image without checking them.
 ## Decision (proposed)
 
 **Option A.** A GitHub Actions workflow on `macos-latest` (arm64), free
-for this public repository, started by a Gitea job on every pull request
-and push to `main`, whose result is the Gitea check.
+for this public repository, started by a Gitea job on every push to `main`
+and every pull request from the owner's own branches, whose result is the
+Gitea check.
 
 What it gates:
 
@@ -152,9 +154,10 @@ What it gates:
 Not gated: the snapshot, fuzz, VT integrity, icount and memory-budget
 jobs, which test platform-independent code that Linux already covers;
 `porygon-tui`; release packaging. The release workflow's macOS targets stay
-optional until a macOS release is decided on.
+optional until the macOS tests are required and green, then become
+required.
 
-Add option D as well only if zig is cheap to add to the runner image: it
+Add option D as well, as long as zig is cheap to add to the runner image: it
 gives a macOS type check in a couple of minutes on the existing pool, and
 it would have caught the `openpty` error. It does not replace A.
 
@@ -162,33 +165,42 @@ Revisit with option B if the repository goes private (A then costs real
 money per run), if GitHub's macOS queue makes PRs wait, or if the GUI
 smoke needs a real GPU.
 
+### Decisions (2026-11-17)
+
+1. **PR branches on GitHub.** Pushing PR heads to the public mirror is
+   accepted, so macOS runs on pull requests as well as `main`. Only PRs
+   from the owner's own branches of `trav/ultty` are pushed (as
+   `ci/pr-<n>`, deleted after the run); PRs from forks or other authors
+   skip the macOS job and are covered on `main` after merge. Nothing is
+   pushed until the owner adds the GitHub token as a Gitea secret and
+   enables the `macos` job.
+2. **Intel Macs.** arm64 only (`macos-latest`) in CI; the release workflow
+   keeps building `x86_64-apple-darwin`. Decided by default; revisit if
+   needed.
+3. **macOS releases.** Yes: once the macOS build, clippy and test checks
+   are required and green, the release workflow's macOS targets drop
+   `optional: true`. Signing and notarisation are separate work. Decided
+   by default; revisit if needed.
+4. **Zig in the runner image.** Yes, as slice 4, if adding zig and
+   `cargo-zigbuild` stays a small image change; drop it otherwise. It
+   complements option A and does not replace it.
+
 ## Slices and rough effort
 
 | Slice | Contents | Effort | Check |
 |---|---|---|---|
 | 1 | `.github/workflows/macos.yml` (`workflow_dispatch` with a ref, and `push` to `main`): clippy, build, test; fix the `openpty` error and whatever the first run finds | 1–3 days, depending on what the tests find | A green run on `main` |
-| 2 | Gitea job `macos` in `.gitea/workflows/ci.yml`: push the head to `ci/pr-<n>` (or use `main`), `gh workflow run`, `gh run watch --exit-status`; delete the branch after; token as a Gitea secret | 1 day | A PR with a deliberate macOS-only error fails the Gitea check |
+| 2 | Gitea job `macos` in `.gitea/workflows/ci.yml`: for PRs from the owner's own branches, push the head to `ci/pr-<n>` (pushes to `main` use `main`; other PRs skip the job), `gh workflow run`, `gh run watch --exit-status`; delete the branch after; token as a Gitea secret | 1 day | A PR with a deliberate macOS-only error fails the Gitea check |
 | 3 | GUI smoke on macOS, advisory | 2–3 days, uncertain | Screenshot artifact uploaded from a passing run |
-| 4 | Optional: zig cross check on the Linux pool | 0.5 day plus image change | Catches a planted macOS-only type error |
+| 4 | zig cross check on the Linux pool, if the image change stays small | 0.5 day plus image change | Catches a planted macOS-only type error |
 
 ## Consequences
 
 - macOS becomes a platform CI keeps working, which ADR 0028's macOS
   slice and any macOS release need.
 - PRs wait on GitHub's macOS queue as well as the Gitea pool.
-- PR branches appear on the public GitHub mirror under `ci/`, and are
-  deleted after the run.
+- The owner's PR branches appear on the public GitHub mirror under `ci/`,
+  and are deleted after the run.
 - The setup depends on the repository staying public; going private moves
   the cost from $0 to tens of dollars a month or to option B.
 - A GitHub token with write access lives in Gitea's secrets.
-
-## Open questions
-
-1. **PR branches on GitHub.** Is pushing PR heads to the public mirror
-   acceptable, or should macOS run on `main` only (cheaper, but
-   regressions land before they are seen)?
-2. **Intel Macs.** Add `macos-15-intel` too, or arm64 only? The release
-   workflow builds both.
-3. **macOS releases.** Should the release workflow's macOS targets become
-   required once this CI is green, closing the rest of gap 10?
-4. **Zig in the runner image** for option D: worth an image change?

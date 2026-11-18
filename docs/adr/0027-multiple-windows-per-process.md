@@ -3,7 +3,8 @@
 ## Status
 
 **Proposed** 2026-11-17. Nothing here is scheduled. Code references are to
-`main` at 252c082.
+`main` at 252c082. The open questions were settled on 2026-11-17; see
+"Decisions (2026-11-17)".
 
 ## Context
 
@@ -250,11 +251,11 @@ AppHandler
 
 Running `ultty` while an instance is running should open a window in that
 instance, as kitty and Ghostty do. Do this after slice 3, behind
-`behavior.single_instance` (default off at first): `ultty` connects to the
-newest instance's control socket and sends `new-window` with its working
-directory and `-e` command, then exits. If no instance answers within a
-short timeout, it starts normally. `ultty --new-process` always starts
-one.
+`behavior.single_instance` (default off at first, on once it is stable):
+`ultty` connects to the newest instance's control socket and sends
+`new-window` with its working directory and `-e` command, then exits. If
+no instance answers within a short timeout, it starts normally.
+`ultty --new-process` always starts one.
 
 ### Config reload
 
@@ -304,6 +305,24 @@ All windows share one fate, as in Ghostty and kitty:
 - **Memory budgets** (`cargo bench -p ultty --bench memory`) measure the
   terminal model and should not move. `heap_trim` stays process-wide.
 
+### Decisions (2026-11-17)
+
+1. **Last window closed.** On macOS the process keeps running with no
+   windows, as macOS apps do; "New window", the dock icon or a second
+   `ultty` opens one, and Quit exits. On Linux closing the last normal
+   window exits, unless a quick terminal (ADR 0028) exists.
+2. **Single instance by default.** Yes. `behavior.single_instance` ships
+   off in slice 6 and becomes the default once it is stable, as in kitty
+   and Ghostty.
+3. **Window-per-process setting.** Kept as the opt-in
+   `behavior.window_per_process`, for users who want a crash to take down
+   only one window; it is not dropped with slice 1.
+4. **Drop onto another window.** Not planned. The move commands and
+   drag-out cover moving tabs; slice 7 is reconsidered only after slice 5
+   ships, and only after an X11 prototype shows it is cheap.
+5. **Saving closed windows.** No. A window closed before the last one is
+   gone from the session, as a closed tab is.
+
 ## Alternatives considered
 
 - **Keep one process per window.** No work, full isolation, but every
@@ -330,13 +349,13 @@ Each slice also needs `cargo test --workspace`, clippy with
 
 | Slice | Contents | Effort | Check |
 |---|---|---|---|
-| 1 | Split `App` into process state and `WindowState`; shared GPU; route events by window id; per-window tab list, active tab and pane area in `TerminalManager`; "New window" opens in-process; last window closing exits | 6–9 days | New `TerminalManager` tests for per-window relayout; GUI smoke opens two windows and types into both; RSS and startup of the second window measured and recorded under `docs/perf/` |
+| 1 | Split `App` into process state and `WindowState`; shared GPU; route events by window id; per-window tab list, active tab and pane area in `TerminalManager`; "New window" opens in-process; last window closing exits on Linux (unless a quick terminal exists), process stays running on macOS | 6–9 days | New `TerminalManager` tests for per-window relayout; GUI smoke opens two windows and types into both; RSS and startup of the second window measured and recorded under `docs/perf/` |
 | 2 | Font grids shared by key; one `FontSystem`; per-window zoom | 3–5 days | Atlas count stays 1 for two same-scale windows (`cache_stats`); render bench unchanged |
 | 3 | Control: `--window`, `windows`, `new-window`, `close-window`, window field in events; target rules | 3–4 days | `ulttyctl` tests; `describe` lists the operations; existing control tests pass unchanged |
 | 4 | Session v2 with windows; restore opens N windows; v1 compatibility | 2–3 days | Round-trip tests for v1 and v2 files |
 | 5 | Move tab: commands, menu, palette, `move-tab`; drag-out to a new window | 4–6 days | Move keeps the PTY (pid unchanged) and resizes it; accessibility trees of both windows updated (AccessKit consumer test) |
-| 6 | Single instance (`behavior.single_instance`) | 2–3 days | Second `ultty` exits after opening a window in the first |
-| 7 | Drop a tab onto another window, X11 and macOS only | 3–5 days, after a prototype | Not planned until slice 5 ships |
+| 6 | Single instance (`behavior.single_instance`), off by default until stable, then on | 2–3 days | Second `ultty` exits after opening a window in the first |
+| 7 | Drop a tab onto another window, X11 and macOS only | 3–5 days, after a prototype | Not planned; reconsider after slice 5 ships and an X11 prototype |
 
 Slices 1 to 4 make "New window" in-process and are the minimum to close
 gap 9's first half. The quick terminal (ADR 0028) needs slices 1 and 3.
@@ -353,17 +372,3 @@ gap 9's first half. The quick terminal (ADR 0028) needs slices 1 and 3.
 - The control schema grows; existing clients keep working.
 - `ultty-session` and the in-process runtime stay two answers to two
   questions: persistence and isolation versus cheap windows.
-
-## Open questions
-
-1. **Last window closed on macOS.** Should the process stay running with
-   no windows, as macOS apps usually do, and as the quick terminal would
-   need? On Linux, exit unless a quick terminal is configured?
-2. **Single instance by default.** Turn `behavior.single_instance` on by
-   default once it is stable, as kitty and Ghostty do?
-3. **Window-per-process setting.** Is anyone likely to want it, or can
-   the old behaviour be dropped with slice 1?
-4. **Drop onto another window.** Worth slice 7 at all, given that it
-   cannot work on Wayland?
-5. **Saving closed windows.** Should a window closed before the last one
-   be kept in the session (as browsers keep "recently closed")?

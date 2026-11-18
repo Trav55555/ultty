@@ -4,7 +4,8 @@
 
 **Proposed** 2026-11-17. Not scheduled. Depends on ADR 0027 slices 1
 and 3. Code references are to `main` at 252c082; winit references are to
-0.30.13, the version in `Cargo.lock`.
+0.30.13, the version in `Cargo.lock`. Four of the five open questions were
+settled on 2026-11-17; see "Decisions (2026-11-17)".
 
 ## Context
 
@@ -105,7 +106,7 @@ to the desktop, as kitty does. Add platform polish one slice at a time.
   anything but GPU buffers.
 - It keeps the process alive while it exists, hidden or not. Closing the
   last normal window does not exit if a quick window exists.
-- Not saved in the session at first, as in Ghostty. Its tabs end with the
+- Not saved in the session, as in Ghostty. Its tabs end with the
   process.
 - Excluded from "last focused window" defaults for `ulttyctl` while
   hidden.
@@ -131,6 +132,9 @@ size = "40%"          # of the monitor along the position axis
 autohide = true
 # hotkey = "ctrl+grave"   # slice 3 onwards; ignored where unsupported
 ```
+
+`hotkey` uses the same key syntax as `[keybindings]` and is parsed by the
+keybinding parser in `config.rs`.
 
 Where a platform cannot honour position (Wayland without layer shell), it
 is a hint and the docs say so.
@@ -213,6 +217,21 @@ with the hotkey left to the desktop, and docs with compositor snippets.
 It needs only winit APIs, works on every Linux desktop including GNOME,
 and is what kitty ships as its whole Linux story.
 
+### Decisions (2026-11-17)
+
+1. **Recreate or keep on Wayland.** Recreate: hide drops the winit
+   window and show creates it again, as designed. Slice 1 measures the
+   show time against 50 ms; minimising is not a fallback, because winit
+   cannot un-minimise on Wayland.
+2. **Saving the quick terminal's tabs.** No, as in Ghostty. Its tabs end
+   with the process. Decided by default; revisit if needed.
+3. **One per process or per monitor.** One per process, as in Ghostty and
+   kitty. It opens on the monitor under the pointer where the platform
+   allows placement.
+4. **Hotkey syntax.** A separate `quick_terminal.hotkey` string, parsed
+   with the keybinding parser of `config.rs`, so there is one key syntax.
+   Decided by default; revisit if needed.
+
 ## Alternatives considered
 
 - **A separate quick-terminal process.** Possible today without ADR 0027:
@@ -236,7 +255,7 @@ Estimates for one engineer who knows the codebase, after ADR 0027 slices
 |---|---|---|---|
 | 1 | Quick role; `ultty --quick`; `toggle-quick`, `show-quick`, `hide-quick`; X11 position, size, always-on-top, hide/show; Wayland toplevel `ultty-quick` dropped and recreated, activation token forwarded; autohide; docs with sway, Hyprland, niri, KDE, GNOME and X11 binding snippets | 4–6 days | GUI smoke under Xvfb: toggle twice, tab survives (pid unchanged), window mapped state flips; manual check on sway and GNOME recorded under `docs/` |
 | 2 | Wayland layer shell: prototype SCTK path (keyboard, frame callbacks), then either finish it or adopt winit's | 2–3 days prototype; 8–12 days to finish | Prototype report with a go/no-go |
-| 3 | X11 global hotkey from `quick_terminal.hotkey` | 2–3 days | Integration test under Xvfb with `xdotool key` |
+| 3 | X11 global hotkey from `quick_terminal.hotkey` (keybinding syntax) | 2–3 days | Integration test under Xvfb with `xdotool key` |
 | 4 | Wayland `GlobalShortcuts` portal | 2–4 days | Manual on KDE and GNOME 48+; graceful message elsewhere |
 | 5 | macOS: level, Spaces, activation, Carbon hotkey | 4–6 days on a Mac | macOS CI build (ADR 0029); manual check recorded |
 | 6 | Slide animation | not planned | |
@@ -253,17 +272,7 @@ Estimates for one engineer who knows the codebase, after ADR 0027 slices
 
 ## Open questions
 
-1. **Recreate or keep on Wayland.** Dropping and recreating the winit
-   window on each toggle costs a surface, swapchain and AccessKit adapter.
-   Is it under 50 ms? Measure in slice 1; if not, the toplevel could be
-   minimised instead (winit cannot un-minimise on Wayland, so probably
-   not).
-2. **Save the quick terminal's tabs** in the session, or not (Ghostty
-   does not)?
-3. **One per process or per monitor?** Ghostty and kitty have one.
-4. **Hotkey syntax.** Reuse the keybinding parser of `config.rs`, or a
-   separate `quick_terminal.hotkey` string?
-5. **Activation tokens.** Do sway, Hyprland and GNOME set
+1. **Activation tokens.** Do sway, Hyprland and GNOME set
    `XDG_ACTIVATION_TOKEN` for commands run from a keybinding? If not, the
    window may appear without focus on compositors that enforce
    activation. Needs testing per compositor.
