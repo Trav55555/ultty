@@ -1624,6 +1624,112 @@ mod tests {
         assert!(app.chat_scroll.scroll_position().1 > anchor.1);
     }
 
+    fn screen(app: &PorygonTui) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut terminal =
+            Terminal::new(TestBackend::new(app.terminal_width, app.terminal_height)).unwrap();
+        terminal
+            .draw(|frame| app.render_view().render_ansi(frame, frame.area()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    /// A run waiting on its answer, with the reader at the bottom.
+    fn waiting_run() -> PorygonTui {
+        use crate::native_stream::Event as Native;
+        use crate::types::ChatMessage;
+        let mut app = PorygonTui::new();
+        app.terminal_width = 80;
+        app.terminal_height = 24;
+        app.messages.push(ChatMessage {
+            role: "user".into(),
+            content: "list everything".into(),
+            timestamp: "now".into(),
+        });
+        app.messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            timestamp: "now".into(),
+        });
+        app.current_response = Some(app.messages.len() - 1);
+        app.current_run = Some("run-a".into());
+        app.run_unresolved = true;
+        app.waiting_response = true;
+        app.auto_scroll_chat();
+        let long: String = (0..300)
+            .map(|line| format!("output line {line}\n"))
+            .collect();
+        app.native_event(
+            "run-a".into(),
+            Native::ToolCall {
+                id: "call-a".into(),
+                name: "list_files".into(),
+                arguments: serde_json::json!({}),
+            },
+        );
+        app.native_event(
+            "run-a".into(),
+            Native::ToolResult {
+                id: "call-a".into(),
+                result: long,
+                success: true,
+            },
+        );
+        app
+    }
+
+    #[test]
+    fn long_tool_output_follows_to_the_final_answer() {
+        let mut app = waiting_run();
+        assert!(screen(&app).contains("output line 299"), "{}", screen(&app));
+        app.native_event(
+            "run-a".into(),
+            crate::native_stream::Event::Token("FINAL ANSWER".into()),
+        );
+        let text = screen(&app);
+        assert!(text.contains("FINAL ANSWER"), "{text}");
+    }
+
+    #[test]
+    fn final_answer_from_run_readback_is_brought_into_view() {
+        let mut app = waiting_run();
+        app.native_event("run-a".into(), crate::native_stream::Event::Disconnected);
+        app.observe_run(
+            "run-a".into(),
+            Ok(crate::connection::RunSnapshot {
+                id: "run-a".into(),
+                status: "completed".into(),
+                result: Some("FINAL ANSWER".into()),
+                error: None,
+                metadata: serde_json::json!({}),
+            }),
+        );
+        let text = screen(&app);
+        assert!(text.contains("FINAL ANSWER"), "{text}");
+    }
+
+    #[test]
+    fn long_tool_output_keeps_a_scrolled_up_reader_in_place() {
+        let mut app = waiting_run();
+        app.handle_event(&composer_key(Key::PageUp, false));
+        let anchor = app.chat_scroll.scroll_position();
+        app.native_event(
+            "run-a".into(),
+            crate::native_stream::Event::Token("FINAL ANSWER".into()),
+        );
+        assert_eq!(app.chat_scroll.scroll_position(), anchor);
+        assert!(app.unread_output);
+        app.handle_event(&composer_key(Key::End, true));
+        assert!(screen(&app).contains("FINAL ANSWER"));
+    }
+
     #[test]
     fn idle_quit_requires_confirmation_to_discard_a_draft() {
         let mut app = PorygonTui::new();

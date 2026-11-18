@@ -17,6 +17,8 @@ pub(crate) struct Transcript {
     entries: Vec<Entry>,
     ends: Vec<usize>,
     logical_ends: Vec<usize>,
+    /// Entry index of each message; tool entries sit between them.
+    message_entries: Vec<usize>,
     revision: u64,
     conversation_id: Option<String>,
 }
@@ -90,6 +92,9 @@ impl Entry {
 }
 
 impl Transcript {
+    /// Rebuild entries from messages and tool calls, placing each tool call
+    /// before the message it is anchored to so the transcript reads in the
+    /// order things happened.
     pub(crate) fn sync(
         &mut self,
         width: usize,
@@ -99,52 +104,28 @@ impl Transcript {
     ) {
         let width_changed = self.width != width;
         self.width = width;
-        let mut changed = self.conversation_id.as_deref() != conversation_id
-            || self.entries.len() != messages.len() + tools.len();
+        let total = messages.len() + tools.len();
+        let mut changed =
+            self.conversation_id.as_deref() != conversation_id || self.entries.len() != total;
         if self.conversation_id.as_deref() != conversation_id {
             self.conversation_id = conversation_id.map(str::to_owned);
         }
-        self.entries.truncate(messages.len() + tools.len());
-        for (index, message) in messages.iter().enumerate() {
-            let (name, color) = match message.role.as_str() {
-                "user" => ("You", Color::Rgb(58, 224, 221)),
-                "assistant" => ("Porygon", Color::Rgb(255, 93, 110)),
-                _ => ("System", Color::Rgb(136, 136, 136)),
-            };
-            let heading = format!("{name}  {}", message.timestamp);
-            changed |= self.update(
-                index,
-                heading,
-                &message.content,
-                color,
-                message.role == "assistant",
-                width_changed,
-            );
+        self.entries.truncate(total);
+        self.message_entries.clear();
+        let mut tools = tools.iter().peekable();
+        let mut index = 0;
+        for (message_index, message) in messages.iter().enumerate() {
+            while let Some(tool) = tools.next_if(|tool| tool.before_message <= message_index) {
+                changed |= self.update_tool(index, tool, width_changed);
+                index += 1;
+            }
+            self.message_entries.push(index);
+            changed |= self.update_message(index, message, width_changed);
+            index += 1;
         }
-        for (index, tool) in tools.iter().enumerate() {
-            let (status, color) = match tool.status {
-                ToolStatus::Pending => ("pending", Color::Rgb(249, 226, 175)),
-                ToolStatus::Approved => ("approved", Color::Rgb(166, 227, 161)),
-                ToolStatus::Rejected => ("rejected", Color::Rgb(255, 93, 110)),
-                ToolStatus::Running => ("running", Color::Rgb(58, 224, 221)),
-                ToolStatus::Completed => ("completed", Color::Rgb(166, 227, 161)),
-                ToolStatus::Failed => ("failed", Color::Rgb(255, 93, 110)),
-            };
-            let mut body = String::new();
-            if !tool.args.is_empty() {
-                body.push_str(&format!("```json\n{}\n```\n", tool.args));
-            }
-            if let Some(result) = &tool.result {
-                body.push_str(&format_tool_result_with_diff(result));
-            }
-            changed |= self.update(
-                messages.len() + index,
-                format!("{}  {status}", tool.name),
-                &body,
-                color,
-                false,
-                width_changed,
-            );
+        for tool in tools {
+            changed |= self.update_tool(index, tool, width_changed);
+            index += 1;
         }
         if changed {
             self.revision = self.revision.wrapping_add(1);
@@ -159,6 +140,48 @@ impl Transcript {
             logical_end += entry.logical_len;
             self.logical_ends.push(logical_end);
         }
+    }
+
+    fn update_message(&mut self, index: usize, message: &ChatMessage, width_changed: bool) -> bool {
+        let (name, color) = match message.role.as_str() {
+            "user" => ("You", Color::Rgb(58, 224, 221)),
+            "assistant" => ("Porygon", Color::Rgb(255, 93, 110)),
+            _ => ("System", Color::Rgb(136, 136, 136)),
+        };
+        self.update(
+            index,
+            format!("{name}  {}", message.timestamp),
+            &message.content,
+            color,
+            message.role == "assistant",
+            width_changed,
+        )
+    }
+
+    fn update_tool(&mut self, index: usize, tool: &ToolCall, width_changed: bool) -> bool {
+        let (status, color) = match tool.status {
+            ToolStatus::Pending => ("pending", Color::Rgb(249, 226, 175)),
+            ToolStatus::Approved => ("approved", Color::Rgb(166, 227, 161)),
+            ToolStatus::Rejected => ("rejected", Color::Rgb(255, 93, 110)),
+            ToolStatus::Running => ("running", Color::Rgb(58, 224, 221)),
+            ToolStatus::Completed => ("completed", Color::Rgb(166, 227, 161)),
+            ToolStatus::Failed => ("failed", Color::Rgb(255, 93, 110)),
+        };
+        let mut body = String::new();
+        if !tool.args.is_empty() {
+            body.push_str(&format!("```json\n{}\n```\n", tool.args));
+        }
+        if let Some(result) = &tool.result {
+            body.push_str(&format_tool_result_with_diff(result));
+        }
+        self.update(
+            index,
+            format!("{}  {status}", tool.name),
+            &body,
+            color,
+            false,
+            width_changed,
+        )
     }
 
     fn update(
@@ -190,6 +213,30 @@ impl Transcript {
         changed
     }
 
+    /// Rows of the assistant message being streamed, if `active_response` is one.
+    fn live_range(&self, active_response: Option<usize>) -> std::ops::Range<usize> {
+        active_response
+            .and_then(|message| self.message_entries.get(message).copied())
+            .filter(|&index| self.entries[index].assistant)
+            .map_or(0..0, |index| {
+                let first = index
+                    .checked_sub(1)
+                    .map_or(0, |previous| self.ends[previous]);
+                first..self.ends[index]
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn plain_text(&self) -> String {
+        String::from_utf8(
+            self.entries
+                .iter()
+                .flat_map(Entry::rendered_bytes)
+                .collect(),
+        )
+        .expect("rendered rows are UTF-8")
+    }
+
     pub(crate) fn height(&self, working: bool) -> usize {
         self.ends.last().copied().unwrap_or(0) + usize::from(working)
     }
@@ -219,21 +266,7 @@ impl Transcript {
             .flex_shrink(0.0)
             .overflow_y_hidden();
         let mut visible = 0;
-        let live_range = if working && follow_output {
-            active_response.and_then(|index| {
-                self.entries
-                    .get(index)
-                    .filter(|entry| entry.assistant)
-                    .map(|_| {
-                        let first = index
-                            .checked_sub(1)
-                            .map_or(0, |previous| self.ends[previous]);
-                        first..self.ends[index]
-                    })
-            })
-        } else {
-            None
-        };
+        let live_range = (working && follow_output).then(|| self.live_range(active_response));
         for (offset, row) in self.rows(start, height).enumerate() {
             let row = row.clone();
             let row = if live_range
@@ -281,6 +314,72 @@ mod tests {
                 timestamp: "12:00".into(),
             })
             .collect()
+    }
+
+    fn message(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.into(),
+            content: content.into(),
+            timestamp: "12:00".into(),
+        }
+    }
+
+    fn tool(result: &str, before_message: usize) -> ToolCall {
+        ToolCall {
+            name: "shell".into(),
+            args: String::new(),
+            status: ToolStatus::Completed,
+            result: Some(result.into()),
+            before_message,
+        }
+    }
+
+    #[test]
+    fn tool_entries_render_between_the_messages_they_happened_between() {
+        let mut transcript = Transcript::default();
+        let source = [
+            message("user", "question"),
+            message("assistant", "Let me look."),
+            message("assistant", "final answer"),
+        ];
+        let tools = [tool("first output", 2), tool("second output", 2)];
+        transcript.sync(80, &source, &tools, None);
+        let text = transcript.plain_text();
+        let order: Vec<_> = [
+            "question",
+            "Let me look.",
+            "first output",
+            "second output",
+            "final answer",
+        ]
+        .iter()
+        .map(|needle| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {text}"))
+        })
+        .collect();
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+        let live = transcript.live_range(Some(2));
+        let live_text: String = transcript
+            .rows(live.start, live.len())
+            .flat_map(|row| &row.content.spans)
+            .map(|span| span.text.as_str())
+            .collect();
+        assert!(live_text.contains("final answer"), "{live_text}");
+        assert!(!live_text.contains("second output"), "{live_text}");
+    }
+
+    #[test]
+    fn tools_after_the_last_message_render_last() {
+        let mut transcript = Transcript::default();
+        transcript.sync(
+            80,
+            &[message("user", "question")],
+            &[tool("output", 1)],
+            None,
+        );
+        let text = transcript.plain_text();
+        assert!(text.find("question") < text.find("output"), "{text}");
     }
 
     #[test]
