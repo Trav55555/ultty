@@ -363,15 +363,15 @@ fn osc_st_terminator() {
 
 #[test]
 fn apc_sequences() {
-    // APC sequences (ESC _) should be consumed without printing anything
-    // Used by Kitty graphics protocol
+    // APC sequences (ESC _) other than Ultty's and Kitty graphics are
+    // consumed without printing anything.
 
     // Simple APC with ST terminator
-    assert_eq!(parse(b"\x1b_G\x1b\\"), vec![]);
+    assert_eq!(parse(b"\x1b_X\x1b\\"), vec![]);
 
     // APC followed by text - text should print
     assert_eq!(
-        parse(b"\x1b_Gi=31337,s=1,v=1,a=q\x1b\\Hello"),
+        parse(b"\x1b_Xi=31337,s=1,v=1,a=q\x1b\\Hello"),
         vec![
             Action::Print('H'),
             Action::Print('e'),
@@ -381,10 +381,10 @@ fn apc_sequences() {
         ]
     );
 
-    // Multiple APC sequences
+    // Multiple APC sequences; Kitty graphics strings are collected.
     assert_eq!(
-        parse(b"\x1b_G1\x1b\\\x1b_G2\x1b\\X"),
-        vec![Action::Print('X')]
+        parse(b"\x1b_X1\x1b\\\x1b_G2\x1b\\X"),
+        vec![Action::Graphics(b"2".to_vec()), Action::Print('X')]
     );
 }
 
