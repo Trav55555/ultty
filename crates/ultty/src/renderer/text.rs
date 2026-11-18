@@ -950,6 +950,7 @@ impl TextRenderer {
     pub fn apply_font_config(&mut self, config: &FontConfig) -> bool {
         let old_cell = (self.cell_width, self.cell_height);
         self.metrics = font_metrics(config);
+        self.styled_text_buffer.set_metrics(self.metrics);
         self.fonts = FontSelection::new(self.font_system.db(), config);
         self.emoji_family = installed_emoji_family(self.font_system.db(), &config.emoji);
         self.ligatures = config.ligatures;
@@ -987,6 +988,7 @@ impl TextRenderer {
         let line_height_ratio = self.metrics.line_height / self.metrics.font_size;
         let new_line_height = (size * line_height_ratio).ceil();
         self.metrics = Metrics::new(size, new_line_height);
+        self.styled_text_buffer.set_metrics(self.metrics);
 
         // Recalculate cell dimensions
         let (width, height, baseline) =
@@ -1971,6 +1973,49 @@ fn cell_glyph_origin(
 mod tests {
     use super::*;
     use crate::grid::Dimensions;
+
+    #[test]
+    fn test_native_text_matches_fresh_glyphs_after_font_changes() {
+        let Ok(mut renderer) = pollster::block_on(super::super::Renderer::new_headless(400, 200))
+        else {
+            eprintln!("no GPU adapter; skipped");
+            return;
+        };
+        let text = &mut renderer.text_renderer;
+
+        fn assert_matching_glyphs(text: &mut TextRenderer) {
+            let color = Rgba::new(1.0, 1.0, 1.0, 1.0);
+            // The simple path shapes a fresh buffer, independently of the
+            // buffer reused by native labels, rich text and editable text.
+            let (fresh, _) = text.build_simple_text_vertices("MM", 0.0, 0.0, color);
+            assert_eq!(fresh.len(), 8, "two visible glyph quads must be shaped");
+            let expected: Vec<_> = fresh.iter().map(|v| v.position).collect();
+            let (styled, _, _) =
+                text.build_styled_text_vertices("MM", 0.0, 0.0, color, false, false);
+            let (cells, _, _) = text.build_cell_text_vertices("MM", 0.0, 0.0, color, false, false);
+            for (path, vertices) in [("styled", styled), ("cell", cells)] {
+                let positions: Vec<_> = vertices.iter().map(|v| v.position).collect();
+                assert_eq!(
+                    positions,
+                    expected,
+                    "{path} glyph size and cell pitch must agree at {}px",
+                    text.font_size()
+                );
+            }
+        }
+
+        assert_matching_glyphs(text);
+        text.set_font_size(28.0);
+        assert_matching_glyphs(text);
+        text.apply_font_config(&FontConfig {
+            size: 17.5,
+            line_height: 1.25,
+            ..FontConfig::default()
+        });
+        assert_matching_glyphs(text);
+        text.set_font_size(14.0);
+        assert_matching_glyphs(text);
+    }
 
     #[test]
     fn cell_style_maps_attribute_flags() {

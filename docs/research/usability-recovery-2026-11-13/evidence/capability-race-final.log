@@ -1,0 +1,22 @@
+{"artifact_dir": "/home/travers/projects/tui-terminal/.worktrees/usability-recovery/target/verification-capability-race-final/receipts/native-1794620058983760796", "messages": ["deny inspection", "approve inspection"], "executions": [["run_argv", {"argv": ["ulttyctl", "--help"]}]], "versioned_decisions": [["/approvals/pending/tool_4a4f804759dc4b16/deny", "53b0a9d5ac9006b317af63cefc9eb7e5"], ["/approvals/pending/tool_e512e424f406426b/approve", "4a6a54f2647a1e14fc0095b2fcbdc4b7"]], "no_policy_binding_created": true, "replay_refused": true, "provider_calls": 0, "real_shell_calls": 0}
+.
+=============================== warnings summary ===============================
+: 62 warnings
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/aiosqlite/core.py:63: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    result = function()
+
+::test_live_capability_native
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+::test_live_capability_native
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/uvicorn/protocols/websockets/websockets_impl.py:17: DeprecationWarning: websockets.server.WebSocketServerProtocol is deprecated
+    from websockets.server import WebSocketServerProtocol
+
+::test_live_capability_native
+::test_live_capability_native
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/websockets/legacy/server.py:1178: DeprecationWarning: remove second argument of ws_handler
+    warnings.warn("remove second argument of ws_handler", DeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 66 warnings in 5.26s

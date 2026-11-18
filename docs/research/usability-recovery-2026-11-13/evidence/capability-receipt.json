@@ -1,0 +1,31 @@
+{
+  "messages": [
+    "deny inspection",
+    "approve inspection"
+  ],
+  "executions": [
+    [
+      "run_argv",
+      {
+        "argv": [
+          "ulttyctl",
+          "--help"
+        ]
+      }
+    ]
+  ],
+  "versioned_decisions": [
+    [
+      "/approvals/pending/tool_ea49c47b3efe48da/deny",
+      "0fc3fac5920f884598c027452a398499"
+    ],
+    [
+      "/approvals/pending/tool_4a7ef02f0f944734/approve",
+      "7d9e4f8542f56b97336ef183c4d68160"
+    ]
+  ],
+  "no_policy_binding_created": true,
+  "replay_refused": true,
+  "provider_calls": 0,
+  "real_shell_calls": 0
+}

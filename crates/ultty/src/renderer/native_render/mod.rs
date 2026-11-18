@@ -109,6 +109,36 @@ pub(super) struct NativeVertices {
     text_vertices: Vec<Vertex>,
     text_indices: Vec<u32>,
     deferred_images: Vec<DeferredImageRender>,
+    order: Vec<NativePrimitive>,
+}
+
+/// Index ranges retain scene painter order while sharing one upload per pipeline.
+pub(super) enum NativePrimitive {
+    Background(std::ops::Range<u32>),
+    Text(std::ops::Range<u32>),
+    Image(usize),
+}
+
+fn push_primitive(order: &mut Vec<NativePrimitive>, primitive: NativePrimitive) {
+    let range = match &primitive {
+        NativePrimitive::Background(range) | NativePrimitive::Text(range) => range,
+        NativePrimitive::Image(_) => {
+            order.push(primitive);
+            return;
+        }
+    };
+    if range.is_empty() {
+        return;
+    }
+    match (order.last_mut(), &primitive) {
+        (Some(NativePrimitive::Background(last)), NativePrimitive::Background(next))
+        | (Some(NativePrimitive::Text(last)), NativePrimitive::Text(next))
+            if last.end == next.start =>
+        {
+            last.end = next.end;
+        }
+        _ => order.push(primitive),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -270,10 +300,11 @@ impl Renderer {
             text_vertices: Vec::with_capacity(Self::next_capacity(self.prev_text_count.0, est, 4)),
             text_indices: Vec::with_capacity(Self::next_capacity(self.prev_text_count.1, est, 6)),
             deferred_images: Vec::new(),
+            order: Vec::new(),
         }
     }
 
-    /// Upload, draw and cache `vertices`, then draw their images, all
+    /// Upload, draw and cache `vertices` in scene painter order, all
     /// within `scissor` when one is given: a pane's rectangle, which clips
     /// widget content too (glyphs and quads are also clipped as built).
     pub(super) fn draw_native_vertices(
@@ -283,16 +314,7 @@ impl Renderer {
         vertices: NativeVertices,
         scissor: Option<Scissor>,
     ) {
-        self.upload_draw_and_cache_native_buffers(
-            encoder,
-            view,
-            &vertices.bg_vertices,
-            &vertices.bg_indices,
-            &vertices.text_vertices,
-            &vertices.text_indices,
-            scissor,
-        );
-        self.render_deferred_native_images(encoder, view, &vertices.deferred_images, scissor);
+        self.upload_draw_and_cache_native_buffers(encoder, view, &vertices, scissor);
     }
 
     /// Whether the cached native buffers still draw the right frame: no
@@ -454,6 +476,7 @@ impl Renderer {
             text_vertices,
             text_indices,
             deferred_images,
+            order,
         } = vertices;
 
         // Build a set of matched region IDs for quick lookup
@@ -494,6 +517,9 @@ impl Renderer {
             if clip_min_x >= clip_max_x || clip_min_y >= clip_max_y {
                 continue;
             }
+            let bg_start = bg_indices.len() as u32;
+            let text_start = text_indices.len() as u32;
+            let image_start = deferred_images.len();
 
             // Clip bg quad to inherited clip rect
             let bg_x0 = x.max(clip_min_x);
@@ -888,6 +914,17 @@ impl Renderer {
                         ]);
                     }
                 }
+            }
+            push_primitive(
+                order,
+                NativePrimitive::Background(bg_start..bg_indices.len() as u32),
+            );
+            push_primitive(
+                order,
+                NativePrimitive::Text(text_start..text_indices.len() as u32),
+            );
+            for image in image_start..deferred_images.len() {
+                push_primitive(order, NativePrimitive::Image(image));
             }
         }
     }

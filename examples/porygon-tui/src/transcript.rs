@@ -54,7 +54,9 @@ impl Entry {
             row.hard_break = true;
             row
         };
-        let markdown = MarkdownView::new(&body).with_visible_link_targets();
+        let markdown = MarkdownView::new(&body)
+            .with_visible_link_targets()
+            .word_wrap_prose();
         let mut rows = vec![header()];
         rows.extend(markdown.prepared_rows(width));
         if let Some(last) = rows.last_mut() {
@@ -408,6 +410,45 @@ mod tests {
         transcript.sync(4, &source, &[], None);
         assert_eq!(flatten(&transcript), expected);
         assert_eq!(transcript.revision, revision);
+    }
+
+    #[test]
+    fn prose_soft_wrap_keeps_words_and_copy_offsets_contiguous() {
+        let mut transcript = Transcript::default();
+        let mut source = messages(1);
+        source[0].content = "Alpha beta gamma".into();
+        transcript.sync(8, &source, &[], None);
+
+        let entry = &transcript.entries[0];
+        let body_rows = &entry.rows[1..entry.rows.len() - 1];
+        let rendered: Vec<_> = body_rows
+            .iter()
+            .map(|row| {
+                row.content
+                    .spans
+                    .iter()
+                    .map(|span| span.text.as_str())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(rendered, ["Alpha ", "beta ", "gamma"]);
+        assert!(body_rows[..body_rows.len() - 1]
+            .iter()
+            .all(|row| !row.hard_break));
+        assert!(body_rows.last().unwrap().hard_break);
+        assert_eq!(rendered.concat(), source[0].content);
+        for (index, pair) in body_rows.windows(2).enumerate() {
+            let current_bytes: usize = pair[0]
+                .content
+                .spans
+                .iter()
+                .map(|span| span.text.len())
+                .sum();
+            assert_eq!(
+                entry.starts[index + 2],
+                entry.starts[index + 1] + current_bytes
+            );
+        }
     }
 
     #[test]

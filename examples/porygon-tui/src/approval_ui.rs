@@ -7,7 +7,67 @@ use crate::approval_client::PendingApproval;
 use crate::types::ApprovalRequest;
 use crate::{Msg, PorygonTui};
 
+/// Shown whenever the daemon says the approved command leaves the sandbox.
+pub(crate) const HOST_EXECUTION_LINE: &str = "Runs on your machine (outside the project sandbox)";
+
+/// Whether the daemon marked this request as host execution. Older daemons
+/// omit these fields, so their requests render as before. A refreshed pending
+/// record carries the stored reason and arguments rather than `execution`.
+pub(crate) fn runs_on_host(request: &ApprovalRequest) -> bool {
+    let context = &request.params;
+    context.get("execution").and_then(serde_json::Value::as_str) == Some("host")
+        || context.get("reason").and_then(serde_json::Value::as_str)
+            == Some("host_execution_request")
+        || context
+            .get("params")
+            .and_then(|params| params.get("host"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
+/// The model's stated reason for host execution, when it gave one.
+pub(crate) fn host_justification(request: &ApprovalRequest) -> Option<&str> {
+    let context = &request.params;
+    context
+        .get("justification")
+        .or_else(|| {
+            context
+                .get("params")
+                .and_then(|params| params.get("justification"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
 impl PorygonTui {
+    pub(crate) fn approval_session_available(&self) -> bool {
+        if self.approval_is_stream || !self.approval_supports("session") {
+            return false;
+        }
+        self.pending_approval.as_ref().is_some_and(|r| {
+            let scope = &r.params["session_scope"];
+            ["conversation_id", "project_root"].iter().all(|key| {
+                scope
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|v| !v.trim().is_empty())
+            }) && scope
+                .get("argv")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|a| !a.is_empty() && a.iter().all(serde_json::Value::is_string))
+                && scope.get("argv") == r.params.get("params").and_then(|p| p.get("argv"))
+        })
+    }
+
+    pub(crate) fn approval_supports(&self, option: &str) -> bool {
+        self.pending_approval
+            .as_ref()
+            .and_then(|r| r.params.get("approval_options"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items.iter().any(|v| v.as_str() == Some(option)))
+    }
+
     pub(crate) fn approval_decision_blocker(&self) -> Option<&'static str> {
         if self.approval_is_stream {
             return None;
@@ -74,13 +134,27 @@ impl PorygonTui {
                 .unwrap_or_else(|| item.source.clone()),
             params: serde_json::to_value(&item.context).unwrap_or_default(),
             risk_score: -1.0,
-            reasoning: item.objective.clone(),
+            reasoning: if item
+                .context
+                .additional
+                .get("reason")
+                .and_then(|value| value.as_str())
+                == Some("missing_policy_binding")
+            {
+                format!("Execution is not enabled. Approve this exact action once, or deny it. This does not enable future commands. {}", item.objective)
+            } else {
+                item.objective.clone()
+            },
             blast_radius: "unknown".into(),
             reversible: None,
         });
         self.approval_is_stream = false;
         self.approval_in_flight = false;
         self.approval_scroll = 0;
+        self.approval_choice = 0;
+        self.approval_details = false;
+        self.approval_stage = 0;
+        self.approval_feedback.set_value("");
         self.show_approval_modal = true;
         Cmd::none()
     }

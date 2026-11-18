@@ -1,0 +1,868 @@
+{
+  "status": "data",
+  "type": "regions",
+  "scenes": [
+    {
+      "session": 1,
+      "shown_generation": 757,
+      "in_band": false,
+      "focused": 181,
+      "regions": [
+        {
+          "id": 0,
+          "parent": null,
+          "depth": 0,
+          "x": 0.0,
+          "y": 0.0,
+          "width": 88.0,
+          "height": 53.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 1,
+          "parent": 0,
+          "depth": 1,
+          "x": 0.0,
+          "y": 0.0,
+          "width": 88.0,
+          "height": 53.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 2,
+          "parent": 1,
+          "depth": 2,
+          "x": 0.0,
+          "y": 0.0,
+          "width": 88.0,
+          "height": 50.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 3,
+          "parent": 2,
+          "depth": 3,
+          "x": 0.0,
+          "y": 0.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 141,
+          "parent": 3,
+          "depth": 4,
+          "x": 0.0,
+          "y": 0.0,
+          "width": 18.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": " Porygon connected",
+          "role": "text",
+          "label": " Porygon connected"
+        },
+        {
+          "id": 142,
+          "parent": 3,
+          "depth": 4,
+          "x": 18.0,
+          "y": 0.0,
+          "width": 26.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 143,
+          "parent": 3,
+          "depth": 4,
+          "x": 44.0,
+          "y": 0.0,
+          "width": 44.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": " F1 help F2 sessions F3 work F4 attention ? ",
+          "role": "text",
+          "label": " F1 help F2 sessions F3 work F4 attention ? "
+        },
+        {
+          "id": 4,
+          "parent": 2,
+          "depth": 3,
+          "x": 0.0,
+          "y": 1.0,
+          "width": 88.0,
+          "height": 49.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 144,
+          "parent": 4,
+          "depth": 4,
+          "x": 0.0,
+          "y": 1.0,
+          "width": 88.0,
+          "height": 49.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 145,
+          "parent": 144,
+          "depth": 5,
+          "x": 0.0,
+          "y": 1.0,
+          "width": 88.0,
+          "height": 43.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "metadata": {
+            "id": "conversation-transcript",
+            "ulttui.actions": "",
+            "ulttui.widget_id": "conversation-transcript"
+          },
+          "role": "group"
+        },
+        {
+          "id": 147,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 1.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "System  20:25",
+          "metadata": {
+            "transcript-row-v1": "11:0:1"
+          },
+          "role": "text",
+          "label": "System  20:25"
+        },
+        {
+          "id": 148,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 2.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "Type a message to start a conversation.",
+          "metadata": {
+            "transcript-row-v1": "11:14:1"
+          },
+          "role": "text",
+          "label": "Type a message to start a conversation."
+        },
+        {
+          "id": 149,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 3.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "Use F1 for keys and commands. Your draft stays here while disconnected.",
+          "metadata": {
+            "transcript-row-v1": "11:54:1"
+          },
+          "role": "text",
+          "label": "Use F1 for keys and commands. Your draft stays here while disconnected."
+        },
+        {
+          "id": 150,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 4.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "",
+          "metadata": {
+            "transcript-row-v1": "11:126:1"
+          },
+          "role": "text"
+        },
+        {
+          "id": 151,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 5.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "You  20:25",
+          "metadata": {
+            "transcript-row-v1": "11:127:1"
+          },
+          "role": "text",
+          "label": "You  20:25"
+        },
+        {
+          "id": 152,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 6.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "deny inspection",
+          "metadata": {
+            "transcript-row-v1": "11:138:1"
+          },
+          "role": "text",
+          "label": "deny inspection"
+        },
+        {
+          "id": 153,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 7.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "",
+          "metadata": {
+            "transcript-row-v1": "11:154:1"
+          },
+          "role": "text"
+        },
+        {
+          "id": 154,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 8.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "System  20:25",
+          "metadata": {
+            "transcript-row-v1": "11:155:1"
+          },
+          "role": "text",
+          "label": "System  20:25"
+        },
+        {
+          "id": 155,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 9.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "Run native-2e54c42915cd601ccb4e80f2ffe7baaf. If disconnected, use /attach ",
+          "metadata": {
+            "transcript-row-v1": "11:169:0"
+          },
+          "role": "text",
+          "label": "Run native-2e54c42915cd601ccb4e80f2ffe7baaf. If disconnected, use /attach "
+        },
+        {
+          "id": 156,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 10.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "native-2e54c42915cd601ccb4e80f2ffe7baaf to inspect it. The prompt will not be ",
+          "metadata": {
+            "transcript-row-v1": "11:243:0"
+          },
+          "role": "text",
+          "label": "native-2e54c42915cd601ccb4e80f2ffe7baaf to inspect it. The prompt will not be "
+        },
+        {
+          "id": 157,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 11.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "resent.",
+          "metadata": {
+            "transcript-row-v1": "11:321:1"
+          },
+          "role": "text",
+          "label": "resent."
+        },
+        {
+          "id": 158,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 12.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "",
+          "metadata": {
+            "transcript-row-v1": "11:329:1"
+          },
+          "role": "text"
+        },
+        {
+          "id": 159,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 13.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "Porygon  20:25",
+          "metadata": {
+            "transcript-row-v1": "11:330:1"
+          },
+          "role": "text",
+          "label": "Porygon  20:25"
+        },
+        {
+          "id": 160,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 14.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "denied; no command ran",
+          "metadata": {
+            "transcript-row-v1": "11:345:1"
+          },
+          "role": "text",
+          "label": "denied; no command ran"
+        },
+        {
+          "id": 161,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 15.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "",
+          "metadata": {
+            "transcript-row-v1": "11:368:1"
+          },
+          "role": "text"
+        },
+        {
+          "id": 162,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 16.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "You  20:25",
+          "metadata": {
+            "transcript-row-v1": "11:369:1"
+          },
+          "role": "text",
+          "label": "You  20:25"
+        },
+        {
+          "id": 163,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 17.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "approve inspection",
+          "metadata": {
+            "transcript-row-v1": "11:380:1"
+          },
+          "role": "text",
+          "label": "approve inspection"
+        },
+        {
+          "id": 164,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 18.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "",
+          "metadata": {
+            "transcript-row-v1": "11:399:1"
+          },
+          "role": "text"
+        },
+        {
+          "id": 165,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 19.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "System  20:25",
+          "metadata": {
+            "transcript-row-v1": "11:400:1"
+          },
+          "role": "text",
+          "label": "System  20:25"
+        },
+        {
+          "id": 166,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 20.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "Run native-2c333811e6c9dcd06f530b8434ac7017. If disconnected, use /attach ",
+          "metadata": {
+            "transcript-row-v1": "11:414:0"
+          },
+          "role": "text",
+          "label": "Run native-2c333811e6c9dcd06f530b8434ac7017. If disconnected, use /attach "
+        },
+        {
+          "id": 167,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 21.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "native-2c333811e6c9dcd06f530b8434ac7017 to inspect it. The prompt will not be ",
+          "metadata": {
+            "transcript-row-v1": "11:488:0"
+          },
+          "role": "text",
+          "label": "native-2c333811e6c9dcd06f530b8434ac7017 to inspect it. The prompt will not be "
+        },
+        {
+          "id": 168,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 22.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "resent.",
+          "metadata": {
+            "transcript-row-v1": "11:566:1"
+          },
+          "role": "text",
+          "label": "resent."
+        },
+        {
+          "id": 169,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 23.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "",
+          "metadata": {
+            "transcript-row-v1": "11:574:1"
+          },
+          "role": "text"
+        },
+        {
+          "id": 170,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 24.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "Porygon  20:25",
+          "metadata": {
+            "transcript-row-v1": "11:575:1"
+          },
+          "role": "text",
+          "label": "Porygon  20:25"
+        },
+        {
+          "id": 171,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 25.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "",
+          "metadata": {
+            "transcript-row-v1": "11:590:1"
+          },
+          "role": "text"
+        },
+        {
+          "id": 172,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 26.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "",
+          "metadata": {
+            "transcript-row-v1": "11:591:1"
+          },
+          "role": "text"
+        },
+        {
+          "id": 173,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 27.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "run_argv  approved",
+          "metadata": {
+            "transcript-row-v1": "11:592:1"
+          },
+          "role": "text",
+          "label": "run_argv  approved"
+        },
+        {
+          "id": 174,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 28.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "{\"argv\":[\"ulttyctl\",\"--help\"]}",
+          "metadata": {
+            "transcript-row-v1": "11:611:1"
+          },
+          "role": "text",
+          "label": "{\"argv\":[\"ulttyctl\",\"--help\"]}"
+        },
+        {
+          "id": 175,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 29.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "",
+          "metadata": {
+            "transcript-row-v1": "11:642:1"
+          },
+          "role": "text"
+        },
+        {
+          "id": 176,
+          "parent": 145,
+          "depth": 6,
+          "x": 0.0,
+          "y": 30.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": "Working...",
+          "role": "text",
+          "label": "Working..."
+        },
+        {
+          "id": 146,
+          "parent": 144,
+          "depth": 5,
+          "x": 0.0,
+          "y": 44.0,
+          "width": 88.0,
+          "height": 7.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 177,
+          "parent": 146,
+          "depth": 6,
+          "x": 0.0,
+          "y": 44.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "text",
+          "text": "-",
+          "role": "text",
+          "label": "-"
+        },
+        {
+          "id": 178,
+          "parent": 146,
+          "depth": 6,
+          "x": 0.0,
+          "y": 45.0,
+          "width": 88.0,
+          "height": 5.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 180,
+          "parent": 178,
+          "depth": 7,
+          "x": 0.0,
+          "y": 45.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "text",
+          "text": "Working | draft kept here | Ctrl+C: stop",
+          "role": "text",
+          "label": "Working | draft kept here | Ctrl+C: stop"
+        },
+        {
+          "id": 181,
+          "parent": 178,
+          "depth": 7,
+          "x": 0.0,
+          "y": 46.0,
+          "width": 88.0,
+          "height": 3.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "input",
+          "text": "",
+          "metadata": {
+            "id": "chat-input",
+            "ulttui.actions": "focus",
+            "ulttui.widget_id": "chat-input"
+          },
+          "role": "input"
+        },
+        {
+          "id": 182,
+          "parent": 178,
+          "depth": 7,
+          "x": 0.0,
+          "y": 49.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "text",
+          "text": "Shift+Enter: newline where supported | / commands",
+          "role": "text",
+          "label": "Shift+Enter: newline where supported | / commands"
+        },
+        {
+          "id": 179,
+          "parent": 146,
+          "depth": 6,
+          "x": 0.0,
+          "y": 50.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 183,
+          "parent": 179,
+          "depth": 7,
+          "x": 0.0,
+          "y": 50.0,
+          "width": 88.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "text",
+          "text": "decision accepted; awaiting run outcome",
+          "role": "text",
+          "label": "decision accepted; awaiting run outcome"
+        },
+        {
+          "id": 39,
+          "parent": 1,
+          "depth": 2,
+          "x": 0.0,
+          "y": 50.0,
+          "width": 88.0,
+          "height": 3.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 40,
+          "parent": 39,
+          "depth": 3,
+          "x": 0.0,
+          "y": 50.0,
+          "width": 88.0,
+          "height": 0.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 41,
+          "parent": 39,
+          "depth": 3,
+          "x": 0.0,
+          "y": 50.0,
+          "width": 88.0,
+          "height": 3.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "none",
+          "role": "group"
+        },
+        {
+          "id": 42,
+          "parent": 41,
+          "depth": 4,
+          "x": 0.0,
+          "y": 50.0,
+          "width": 64.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": " Daemon confirmed the decision; execution may still be pending. ",
+          "role": "status",
+          "label": "Daemon confirmed the decision; execution may still be pending."
+        },
+        {
+          "id": 109,
+          "parent": 41,
+          "depth": 4,
+          "x": 0.0,
+          "y": 52.0,
+          "width": 64.0,
+          "height": 1.0,
+          "scroll_x": 0.0,
+          "scroll_y": 0.0,
+          "content": "rich_text",
+          "text": " Daemon confirmed the decision; execution may still be pending. ",
+          "role": "status",
+          "label": "Daemon confirmed the decision; execution may still be pending."
+        }
+      ]
+    }
+  ]
+}

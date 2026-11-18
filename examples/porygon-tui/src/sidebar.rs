@@ -371,6 +371,10 @@ fn weather_view(app: &PorygonTui) -> Column {
     panel
 }
 
+fn moon_enabled_from_env() -> bool {
+    std::env::var_os("PORYGON_MOON").is_some_and(|value| value == "1")
+}
+
 fn moon_view(_app: &PorygonTui) -> Column {
     // Unicode moon phase emoji (each renders as 2 columns wide)
     let emojis = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"];
@@ -460,12 +464,14 @@ fn activity_label(app: &PorygonTui) -> &'static str {
         "OFFLINE"
     } else if app.pending_approval.is_some() || app.approval_in_flight {
         "REVIEW"
-    } else if app.run_unresolved {
-        "UNKNOWN"
     } else if app.stopping {
         "STOPPING"
-    } else if app.waiting_response || app.current_run.is_some() {
+    } else if app.waiting_response {
         "RUNNING"
+    } else if app.run_can_continue {
+        "WAITING"
+    } else if app.run_unresolved {
+        "UNKNOWN"
     } else {
         "IDLE"
     }
@@ -563,6 +569,12 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
                     activity_label(app),
                     Style::new().fg(Color::Rgb(255, 93, 110)).bold(),
                 )
+                .fill_width(),
+        )
+        .child(
+            RichText::new()
+                .span("STEP:   ", label_style.clone())
+                .span(app.status_step_text(), Style::default())
                 .fill_width(),
         )
         .child(Divider::horizontal())
@@ -663,7 +675,7 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
         );
     }
 
-    let sidebar = Column::new()
+    let mut sidebar = Column::new()
         .width(Dimension::Cells(34.0))
         .flex_shrink(0.0)
         .justify_start()
@@ -684,11 +696,13 @@ pub(crate) fn sidebar_view(app: &PorygonTui) -> Column {
         .overflow_y_hidden()
         .gap(1.0)
         .child(cassette);
-    if app.weather_enabled {
-        sidebar.child(weather_view(app)).child(moon_view(app))
-    } else {
-        sidebar
+    if app.weather_enabled || app.weather.is_some() {
+        sidebar = sidebar.child(weather_view(app));
     }
+    if moon_enabled_from_env() {
+        sidebar = sidebar.child(moon_view(app));
+    }
+    sidebar
 }
 
 #[cfg(test)]
@@ -716,7 +730,18 @@ mod tests {
         assert_eq!(super::activity_label(&app), "REVIEW");
         app.approval_in_flight = false;
         app.run_unresolved = true;
+        assert_eq!(super::activity_label(&app), "RUNNING");
+        app.waiting_response = false;
         assert_eq!(super::activity_label(&app), "UNKNOWN");
+        app.stopping = true;
+        assert_eq!(super::activity_label(&app), "STOPPING");
+        app.stopping = false;
+        app.run_can_continue = true;
+        assert_eq!(super::activity_label(&app), "WAITING");
+        app.run_can_continue = false;
+        app.run_unresolved = false;
+        app.current_run = Some("finished-run".into());
+        assert_eq!(super::activity_label(&app), "IDLE");
     }
 
     use super::*;

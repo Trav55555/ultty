@@ -5,8 +5,9 @@ use taffy::Overflow;
 use ultty_protocol::{
     AlignContent as ProtoAlignContent, AlignItems as ProtoAlignItems, AlignSelf as ProtoAlignSelf,
     Constraints, Dimension as ProtoDimension, Display as ProtoDisplay,
-    FlexDirection as ProtoFlexDirection, FlexWrap as ProtoFlexWrap,
+    FlexDirection as ProtoFlexDirection, FlexWrap as ProtoFlexWrap, GridLine as ProtoGridLine,
     JustifyContent as ProtoJustifyContent, OverflowAxis as ProtoOverflowAxis,
+    TrackSizingFunction as ProtoTrackSizingFunction,
 };
 
 pub(super) fn constraints_to_style(c: &Constraints) -> Style {
@@ -60,6 +61,16 @@ pub(super) fn constraints_to_style(c: &Constraints) -> Style {
             ProtoAlignContent::SpaceEvenly => AlignContent::SPACE_EVENLY,
             ProtoAlignContent::Stretch => AlignContent::STRETCH,
         },
+        grid_column: Line {
+            start: grid_line(&c.grid_column.start),
+            end: grid_line(&c.grid_column.end),
+        },
+        grid_row: Line {
+            start: grid_line(&c.grid_row.start),
+            end: grid_line(&c.grid_row.end),
+        },
+        grid_template_columns: grid_tracks(&c.grid_template_columns),
+        grid_template_rows: grid_tracks(&c.grid_template_rows),
         flex_grow: c.flex_grow,
         flex_shrink: c.flex_shrink,
         flex_basis: dimension_to_taffy(&c.flex_basis),
@@ -152,5 +163,120 @@ pub(super) fn dimension_to_length_pct(d: &ProtoDimension) -> LengthPercentage {
         ProtoDimension::Cells(v) => LengthPercentage::length(*v),
         ProtoDimension::Percent(v) => LengthPercentage::percent(*v / 100.0),
         _ => LengthPercentage::length(0.0),
+    }
+}
+
+fn grid_line(line: &ProtoGridLine) -> GridPlacement {
+    match line {
+        ProtoGridLine::Auto => GridPlacement::Auto,
+        ProtoGridLine::Line(0) => GridPlacement::Auto,
+        ProtoGridLine::Line(n) => GridPlacement::Line((*n).into()),
+        ProtoGridLine::Span(n) => GridPlacement::Span(*n),
+    }
+}
+
+fn grid_track_min(d: &ProtoDimension) -> MinTrackSizingFunction {
+    match d {
+        ProtoDimension::Cells(v) => MinTrackSizingFunction::length(*v),
+        ProtoDimension::Percent(v) | ProtoDimension::Vw(v) | ProtoDimension::Vh(v) => {
+            MinTrackSizingFunction::percent(*v / 100.0)
+        }
+        ProtoDimension::MinContent => MinTrackSizingFunction::min_content(),
+        ProtoDimension::MaxContent => MinTrackSizingFunction::max_content(),
+        ProtoDimension::Auto | ProtoDimension::Fr(_) => MinTrackSizingFunction::auto(),
+    }
+}
+
+fn grid_track_max(d: &ProtoDimension) -> MaxTrackSizingFunction {
+    match d {
+        ProtoDimension::Cells(v) => MaxTrackSizingFunction::length(*v),
+        ProtoDimension::Percent(v) | ProtoDimension::Vw(v) | ProtoDimension::Vh(v) => {
+            MaxTrackSizingFunction::percent(*v / 100.0)
+        }
+        ProtoDimension::MinContent => MaxTrackSizingFunction::min_content(),
+        ProtoDimension::MaxContent => MaxTrackSizingFunction::max_content(),
+        ProtoDimension::Fr(v) => MaxTrackSizingFunction::fr(*v),
+        ProtoDimension::Auto => MaxTrackSizingFunction::auto(),
+    }
+}
+
+fn grid_tracks(tracks: &[ProtoTrackSizingFunction]) -> Vec<GridTemplateComponent<String>> {
+    let mut result = Vec::new();
+    for track in tracks {
+        match track {
+            ProtoTrackSizingFunction::Single(d) => {
+                result.push(GridTemplateComponent::Single(TrackSizingFunction {
+                    min: grid_track_min(d),
+                    max: grid_track_max(d),
+                }))
+            }
+            ProtoTrackSizingFunction::MinMax(min, max) => {
+                result.push(GridTemplateComponent::Single(TrackSizingFunction {
+                    min: grid_track_min(min),
+                    max: grid_track_max(max),
+                }))
+            }
+            ProtoTrackSizingFunction::Repeat(count, pattern) => {
+                for _ in 0..*count {
+                    for dimension in pattern {
+                        if result.len() >= 256 {
+                            break;
+                        }
+                        result.push(GridTemplateComponent::Single(TrackSizingFunction {
+                            min: grid_track_min(dimension),
+                            max: grid_track_max(dimension),
+                        }));
+                    }
+                    if result.len() >= 256 || pattern.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+        if result.len() >= 256 {
+            break;
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::*;
+    use ultty_protocol::GridPlacement as ProtoGridPlacement;
+
+    #[test]
+    fn maps_grid_placement_and_tracks_for_overlays() {
+        let constraints = Constraints {
+            display: ProtoDisplay::Grid,
+            grid_template_columns: vec![ProtoTrackSizingFunction::Single(ProtoDimension::Percent(
+                100.0,
+            ))],
+            grid_template_rows: vec![ProtoTrackSizingFunction::Single(ProtoDimension::Cells(
+                20.0,
+            ))],
+            grid_column: ProtoGridPlacement {
+                start: ProtoGridLine::Line(1),
+                end: ProtoGridLine::Line(2),
+            },
+            grid_row: ProtoGridPlacement {
+                start: ProtoGridLine::Line(1),
+                end: ProtoGridLine::Span(1),
+            },
+            ..Default::default()
+        };
+        let style = constraints_to_style(&constraints);
+        assert_eq!(style.display, Display::Grid);
+        assert_eq!(style.grid_column.start, GridPlacement::Line(1.into()));
+        assert_eq!(style.grid_column.end, GridPlacement::Line(2.into()));
+        assert_eq!(style.grid_row.end, GridPlacement::Span(1));
+        assert_eq!(style.grid_template_columns.len(), 1);
+        assert_eq!(style.grid_template_rows.len(), 1);
+    }
+
+    #[test]
+    fn bounds_repeat_expansion() {
+        let repeated = ProtoTrackSizingFunction::Repeat(u16::MAX, vec![ProtoDimension::Fr(1.0)]);
+        assert!(grid_tracks(&[repeated]).len() <= 256);
     }
 }

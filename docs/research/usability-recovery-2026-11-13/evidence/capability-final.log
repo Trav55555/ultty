@@ -1,0 +1,22 @@
+{"artifact_dir": "/home/travers/projects/tui-terminal/.worktrees/usability-recovery/target/verification-capability-final/receipts/native-1794619504758520693", "messages": ["deny inspection", "approve inspection"], "executions": [["run_argv", {"argv": ["ulttyctl", "--help"]}]], "versioned_decisions": [["/approvals/pending/tool_ea49c47b3efe48da/deny", "0fc3fac5920f884598c027452a398499"], ["/approvals/pending/tool_4a7ef02f0f944734/approve", "7d9e4f8542f56b97336ef183c4d68160"]], "no_policy_binding_created": true, "replay_refused": true, "provider_calls": 0, "real_shell_calls": 0}
+.
+=============================== warnings summary ===============================
+: 62 warnings
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/aiosqlite/core.py:63: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    result = function()
+
+::test_live_capability_native
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+::test_live_capability_native
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/uvicorn/protocols/websockets/websockets_impl.py:17: DeprecationWarning: websockets.server.WebSocketServerProtocol is deprecated
+    from websockets.server import WebSocketServerProtocol
+
+::test_live_capability_native
+::test_live_capability_native
+  /home/travers/projects/porygon-ai/porygon-ai/.venv/lib/python3.12/site-packages/websockets/legacy/server.py:1178: DeprecationWarning: remove second argument of ws_handler
+    warnings.warn("remove second argument of ws_handler", DeprecationWarning)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 66 warnings in 20.48s

@@ -30,6 +30,11 @@ pub(crate) enum Event {
         tool: String,
         arguments: Value,
     },
+    DurableApproval {
+        id: String,
+        decision_version: String,
+        context: Value,
+    },
     DecisionSent(String),
     ToolCall {
         id: String,
@@ -138,6 +143,7 @@ async fn drive(
         "message": submission.message,
         "run_id": submission.run_id,
         "surface": "tui",
+        "execution_context": {"approval_protocol": "versioned-live-v1"},
     });
     if let Some(id) = submission.conversation_id {
         payload["conversation_id"] = Value::String(id);
@@ -209,11 +215,33 @@ fn decode(text: &str) -> Result<Option<Event>, String> {
             if id.is_empty() {
                 return Err("Approval event has no identity".into());
             }
-            Some(Event::Approval {
-                id,
-                tool: field("tool_name"),
-                arguments: value["arguments"].clone(),
-            })
+            if value.get("decision_version").is_some()
+                || value.get("scope").is_some()
+                || value.get("context").is_some()
+            {
+                let decision_version = field("decision_version");
+                let context = &value["context"];
+                if value["scope"] != "tool_call"
+                    || decision_version.trim().is_empty()
+                    || !context["params"].is_object()
+                    || ["tool_name", "run_id", "principal_id", "approval_expires_at"]
+                        .iter()
+                        .any(|key| context[key].as_str().is_none_or(|s| s.trim().is_empty()))
+                {
+                    return Err("Durable approval is missing its scope, version or action context; inspect Attention (F4).".into());
+                }
+                Some(Event::DurableApproval {
+                    id,
+                    decision_version,
+                    context: context.clone(),
+                })
+            } else {
+                Some(Event::Approval {
+                    id,
+                    tool: field("tool_name"),
+                    arguments: value["arguments"].clone(),
+                })
+            }
         }
         Some("tool_call") => Some(Event::ToolCall {
             id: field("call_id"),
@@ -252,6 +280,37 @@ mod tests {
         assert!(decode(r#"{"type":"future_event"}"#).unwrap().is_none());
     }
 
+    #[test]
+    fn test_durable_approval_retains_version_and_complete_context() {
+        let context = json!({
+            "tool_name":"run_argv", "params":{"argv":["git","status","--short"]},
+            "run_id":"run-a", "principal_id":"owner", "approval_expires_at":"2099-01-01T00:00:00Z",
+            "reason":"missing_policy_binding", "call_hash":"bound-hash",
+        });
+        let frame = json!({"type":"approval_required","approval_id":"approval-a","decision_version":"version-a","scope":"tool_call","context":context});
+        assert!(
+            matches!(decode(&frame.to_string()).unwrap(), Some(Event::DurableApproval {id, decision_version, context: received}) if id == "approval-a" && decision_version == "version-a" && received == context)
+        );
+        for missing in ["run_id", "principal_id", "approval_expires_at", "params"] {
+            let mut malformed = frame.clone();
+            malformed["context"]
+                .as_object_mut()
+                .unwrap()
+                .remove(missing);
+            assert!(decode(&malformed.to_string()).is_err(), "missing {missing}");
+        }
+        let mut malformed = frame.clone();
+        malformed.as_object_mut().unwrap().remove("scope");
+        malformed
+            .as_object_mut()
+            .unwrap()
+            .remove("decision_version");
+        assert!(
+            decode(&malformed.to_string()).is_err(),
+            "durable context must never downgrade to a legacy approval"
+        );
+    }
+
     #[tokio::test]
     async fn real_socket_sends_auth_identity_and_approval_without_retry() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -265,6 +324,10 @@ mod tests {
             assert_eq!(request["auth"], "fixture-token");
             assert_eq!(request["message"], "hello");
             assert_eq!(request["run_id"], "fixture-run");
+            assert_eq!(
+                request["execution_context"]["approval_protocol"],
+                "versioned-live-v1"
+            );
             assert!(request.get("prompt").is_none());
             ws.send(Message::Text(json!({"type":"approval_required","approval_id":"a1","tool_name":"shell","arguments":{"command":"true"}}).to_string())).await.unwrap();
             let response: Value =
