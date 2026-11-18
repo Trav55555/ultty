@@ -1,5 +1,6 @@
 //! Terminal state management with alternate screen support.
 
+mod graphics;
 pub mod snapshot;
 
 use super::{

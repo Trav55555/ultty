@@ -33,6 +33,7 @@ mod char_class;
 mod cluster;
 #[cfg(test)]
 mod differential;
+pub mod graphics;
 mod history;
 mod image;
 mod packed;

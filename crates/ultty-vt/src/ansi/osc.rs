@@ -3,7 +3,7 @@
 use super::AnsiParser;
 use super::{
     Action, ApcKind, DynamicColor, Progress, State, StringTerminator, MAX_ANCHOR_APC,
-    MAX_ANCHOR_ROWS, MAX_IN_BAND_APC,
+    MAX_ANCHOR_ROWS, MAX_GRAPHICS_APC, MAX_IN_BAND_APC,
 };
 
 /// Maximum size for OSC/DCS string buffers to prevent unbounded memory growth.
@@ -372,9 +372,9 @@ impl AnsiParser {
         }
     }
 
-    /// APC string state. Ultty in-band strings (`U`) and inline anchors
-    /// (`u`) are collected; others, such as kitty graphics, are consumed and
-    /// ignored.
+    /// APC string state. Ultty in-band strings (`U`), inline anchors (`u`)
+    /// and Kitty graphics commands (`G`) are collected; others are consumed
+    /// and ignored.
     pub(super) fn apc_string(&mut self, byte: u8) {
         if byte == 0x1B {
             // ESC - might be start of ST (String Terminator = ESC \)
@@ -386,6 +386,7 @@ impl AnsiParser {
                 self.apc_kind = match byte {
                     b'U' => ApcKind::InBand,
                     b'u' => ApcKind::Anchor,
+                    b'G' => ApcKind::Graphics,
                     _ => ApcKind::Other,
                 };
             }
@@ -394,11 +395,13 @@ impl AnsiParser {
     }
 
     /// Add payload bytes to a collected string, dropping it if it grows past
-    /// its limit ([`MAX_IN_BAND_APC`] or [`MAX_ANCHOR_APC`]).
+    /// its limit ([`MAX_IN_BAND_APC`], [`MAX_ANCHOR_APC`] or
+    /// [`MAX_GRAPHICS_APC`]).
     pub(super) fn apc_extend(&mut self, bytes: &[u8]) {
         let limit = match self.apc_kind {
             ApcKind::InBand => MAX_IN_BAND_APC,
             ApcKind::Anchor => MAX_ANCHOR_APC,
+            ApcKind::Graphics => MAX_GRAPHICS_APC,
             _ => return,
         };
         if self.apc_buffer.len() + bytes.len() > limit {
@@ -426,6 +429,9 @@ impl AnsiParser {
                             callback(action);
                         }
                         self.apc_buffer.clear();
+                    }
+                    ApcKind::Graphics => {
+                        callback(Action::Graphics(std::mem::take(&mut self.apc_buffer)));
                     }
                     _ => {}
                 }
@@ -1150,8 +1156,29 @@ mod tests {
 
     #[test]
     fn apc_consumed_silently() {
-        let actions = parse(b"\x1b_Gi=31337,s=1,v=1,a=q\x1b\\");
+        let actions = parse(b"\x1b_Xi=31337,s=1,v=1,a=q\x1b\\");
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn graphics_apc_is_collected_without_the_marker() {
+        let actions = parse(b"a\x1b_Ga=q,i=1;AAAA\x1b\\b");
+        assert_eq!(
+            actions,
+            vec![
+                Action::Print('a'),
+                Action::Graphics(b"a=q,i=1;AAAA".to_vec()),
+                Action::Print('b')
+            ]
+        );
+    }
+
+    #[test]
+    fn oversized_graphics_apc_is_dropped_without_printing() {
+        let mut input = b"\x1b_Gm=1;".to_vec();
+        input.resize(input.len() + crate::ansi::MAX_GRAPHICS_APC, b'A');
+        input.extend_from_slice(b"\x1b\\x");
+        assert_eq!(parse(&input), vec![Action::Print('x')]);
     }
 
     #[test]
@@ -1175,7 +1202,7 @@ mod tests {
 
     #[test]
     fn other_apc_strings_are_not_in_band() {
-        assert!(parse(b"\x1b_Ga=q\x1b\\").is_empty());
+        assert!(parse(b"\x1b_Xa=q\x1b\\").is_empty());
         assert!(parse(b"\x1b_\x1b\\").is_empty());
     }
 
@@ -1186,6 +1213,7 @@ mod tests {
             Action::Print('x'),
             Action::InBand(b"abc123def".to_vec()),
             Action::Print('y'),
+            Action::Graphics(b"skip".to_vec()),
             Action::InBand(Vec::new()),
         ];
         for split in 1..wire.len() {

@@ -83,6 +83,8 @@ impl<'a> TerminalHandler<'a> {
             // Protocol data for the embedder; it does not touch the grid.
             Action::InBand(_) => {}
 
+            Action::Graphics(string) => self.terminal.handle_graphics(&string),
+
             Action::InlineAnchor {
                 session_id,
                 surface_id,
