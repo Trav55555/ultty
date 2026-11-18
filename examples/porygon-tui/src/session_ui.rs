@@ -178,13 +178,16 @@ impl PorygonTui {
                 name,
                 arguments,
             } => {
+                let before_message = self.place_tool_entry();
                 self.tool_ids.push(id);
                 self.tool_calls.push(ToolCall {
                     name,
                     args: arguments.to_string(),
                     status: ToolStatus::Running,
                     result: None,
+                    before_message,
                 });
+                self.auto_scroll_chat();
                 Cmd::none()
             }
             Event::ToolResult {
@@ -208,6 +211,7 @@ impl PorygonTui {
                             matches!(tool.status, ToolStatus::Approved)
                         });
                     }
+                    self.auto_scroll_chat();
                 }
                 Cmd::none()
             }
@@ -239,6 +243,31 @@ impl PorygonTui {
                 ])
             }
         }
+    }
+
+    /// Returns the message index a new tool entry goes before. Prose the
+    /// assistant streamed before the call stays above it; later tokens stream
+    /// into a fresh assistant message below it, so the answer reads last.
+    fn place_tool_entry(&mut self) -> usize {
+        let end = self.messages.len();
+        let Some(index) = self.current_response.filter(|&index| {
+            self.messages
+                .get(index)
+                .is_some_and(|m| m.role == "assistant")
+        }) else {
+            return end;
+        };
+        if index + 1 == end && self.messages[index].content.is_empty() {
+            return index;
+        }
+        self.messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: String::new(),
+            timestamp: format_timestamp(),
+        });
+        self.current_response = Some(end);
+        self.streaming_content.clear();
+        end
     }
 
     fn end_native_stream(&mut self) {
@@ -330,6 +359,7 @@ impl PorygonTui {
                             });
                             self.current_response = self.messages.len().checked_sub(1);
                         }
+                        self.auto_scroll_chat();
                     }
                     return Cmd::unsubscribe("agent-stream");
                 }
@@ -1115,5 +1145,133 @@ mod tests {
         app.observe_run("run-a".into(), Ok(snapshot("completed")));
         assert!(!app.approval_execution_pending);
         assert!(!app.run_unresolved);
+    }
+
+    fn transcript_text(app: &mut PorygonTui) -> String {
+        app.update_scroll_dimensions();
+        app.transcript.borrow().plain_text()
+    }
+
+    fn assert_in_order(text: &str, needles: &[&str]) {
+        let mut from = 0;
+        for needle in needles {
+            let found = text[from..]
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} missing after byte {from}: {text}"));
+            from += found + needle.len();
+        }
+    }
+
+    /// Drive one native turn: prose, a tool, more prose, an approved tool, the answer.
+    fn mixed_turn(app: &mut PorygonTui) {
+        app.waiting_response = false;
+        app.run_unresolved = false;
+        app.current_run = None;
+        app.input.set_value("check the repo");
+        app.start_native_turn();
+        let run = app.current_run.clone().expect("turn started");
+        let events = [
+            Event::Token("Let me look.".into()),
+            Event::ToolCall {
+                id: "call-status".into(),
+                name: "git_status".into(),
+                arguments: json!({}),
+            },
+            Event::ToolResult {
+                id: "call-status".into(),
+                result: "status output".into(),
+                success: true,
+            },
+            Event::Token("One more check.".into()),
+            Event::ToolCall {
+                id: "call-a".into(),
+                name: "run_argv".into(),
+                arguments: json!({"argv":["git","status","--short"]}),
+            },
+            Event::DurableApproval {
+                id: "approval-a".into(),
+                decision_version: "version-a".into(),
+                context: durable_context(&run),
+            },
+        ];
+        for event in events {
+            app.native_event(run.clone(), event);
+        }
+        app.decide_approval(true);
+        app.handle_update(Msg::ApprovalSubmitted(
+            "approval-a".into(),
+            "version-a".into(),
+            Ok(()),
+        ));
+        for event in [
+            Event::ToolResult {
+                id: "call-a".into(),
+                result: "argv output".into(),
+                success: true,
+            },
+            Event::Token("All clean.".into()),
+            Event::Done(Some("conv-a".into())),
+        ] {
+            app.native_event(run.clone(), event);
+        }
+        let mut done = snapshot("completed");
+        done.id = run.clone();
+        done.result = Some("All clean.".into());
+        app.observe_run(run, Ok(done));
+    }
+
+    #[test]
+    fn live_turn_interleaves_prose_tools_and_approvals_in_event_order() {
+        let mut app = active();
+        mixed_turn(&mut app);
+        let text = transcript_text(&mut app);
+        assert_in_order(
+            &text,
+            &[
+                "check the repo",
+                "Let me look.",
+                "git_status  completed",
+                "status output",
+                "One more check.",
+                "run_argv  completed",
+                "argv output",
+                "All clean.",
+            ],
+        );
+        assert_eq!(text.matches("All clean.").count(), 1, "{text}");
+        assert_eq!(text.matches("Let me look.").count(), 1, "{text}");
+        assert_eq!(app.messages.last().unwrap().content, "All clean.");
+        assert!(!app.run_unresolved);
+    }
+
+    #[test]
+    fn replayed_history_keeps_stored_order_without_stale_tool_rows() {
+        let mut app = active();
+        mixed_turn(&mut app);
+        // The daemon stores each user turn and its final answer, in order.
+        let stored = [
+            ("user", "check the repo"),
+            ("assistant", "All clean."),
+            ("user", "and the tests?"),
+            ("assistant", "Tests pass."),
+        ]
+        .map(|(role, content)| ChatMessage {
+            role: role.into(),
+            content: content.into(),
+            timestamp: "2026-11-17T12:00:00Z".into(),
+        });
+        app.select_loaded_conversation("conv-a".into(), stored.to_vec());
+        let text = transcript_text(&mut app);
+        assert_in_order(
+            &text,
+            &[
+                "check the repo",
+                "All clean.",
+                "and the tests?",
+                "Tests pass.",
+            ],
+        );
+        assert!(!text.contains("status output"), "{text}");
+        assert!(text.trim_end().ends_with("Tests pass."), "{text}");
     }
 }

@@ -223,6 +223,9 @@ pub struct ToolCall {
     pub args: String,
     pub status: ToolStatus,
     pub result: Option<String>,
+    /// Index of the chat message this entry happened before; equal to the
+    /// message count when nothing has been said after it yet.
+    pub before_message: usize,
 }
 
 #[derive(Debug, Clone)]

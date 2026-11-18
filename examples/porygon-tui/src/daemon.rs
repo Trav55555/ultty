@@ -2313,6 +2313,8 @@ impl PorygonTui {
             CommandAction::ClearChat => {
                 self.current_response = None;
                 self.messages.truncate(1);
+                self.tool_calls.clear();
+                self.tool_ids.clear();
                 self.auto_scroll_chat();
                 Cmd::ShowToast(Toast::success("Chat cleared"))
             }
