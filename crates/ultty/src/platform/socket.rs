@@ -1,6 +1,7 @@
 //! Unix-socket helpers shared by the platform backends: private socket
 //! directories and peer-credential checks for the native protocol server.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -29,13 +30,17 @@ pub fn tab_socket_file_name(tab_id: TabId) -> String {
 
 /// Resolve the directory that holds this process's native protocol sockets.
 ///
-/// Uses `XDG_RUNTIME_DIR` when it is set (it is already private to the
-/// user). Otherwise falls back to `<base>/ultty-<uid>/`, created with mode
+/// Uses `runtime_dir` (the value of `XDG_RUNTIME_DIR`, read by the caller so
+/// this function never touches process environment) when it is set and not
+/// empty; that directory is already private to the user. Otherwise falls back to `<base>/ultty-<uid>/`, created with mode
 /// 0700; if that directory already exists it must be a directory owned by
 /// this user with mode 0700, or the call refuses with an error rather than
 /// listen inside a directory someone else controls.
-pub fn private_socket_dir(fallback_base: &Path) -> io::Result<PathBuf> {
-    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+pub fn private_socket_dir(
+    runtime_dir: Option<OsString>,
+    fallback_base: &Path,
+) -> io::Result<PathBuf> {
+    if let Some(runtime_dir) = runtime_dir {
         let runtime_dir = PathBuf::from(runtime_dir);
         if !runtime_dir.as_os_str().is_empty() {
             return Ok(runtime_dir);
@@ -305,17 +310,30 @@ mod tests {
     fn private_socket_dir_falls_back_under_uid_dir() {
         let base = temp_dir_path("base");
         fs::create_dir(&base).unwrap();
-        // Force the fallback regardless of the test environment.
-        let saved = std::env::var_os("XDG_RUNTIME_DIR");
-        std::env::remove_var("XDG_RUNTIME_DIR");
-        let dir = private_socket_dir(&base);
-        if let Some(saved) = saved {
-            std::env::set_var("XDG_RUNTIME_DIR", saved);
-        }
+        let dir = private_socket_dir(None, &base);
         let dir = dir.unwrap();
         let expected_dir = base.join(format!("ultty-{}", current_uid()));
         assert_eq!(dir, expected_dir);
         assert_eq!(fs::metadata(&expected_dir).unwrap().mode() & 0o777, 0o700);
+        fs::remove_dir(&expected_dir).unwrap();
+        fs::remove_dir(&base).unwrap();
+    }
+
+    #[test]
+    fn private_socket_dir_uses_the_runtime_dir_when_given() {
+        let base = temp_dir_path("unused-base");
+        let dir = private_socket_dir(Some("/run/user/1000".into()), &base).unwrap();
+        assert_eq!(dir, PathBuf::from("/run/user/1000"));
+        assert!(!base.exists(), "the fallback must not be created");
+    }
+
+    #[test]
+    fn private_socket_dir_ignores_an_empty_runtime_dir() {
+        let base = temp_dir_path("empty-runtime");
+        fs::create_dir(&base).unwrap();
+        let dir = private_socket_dir(Some(OsString::new()), &base).unwrap();
+        let expected_dir = base.join(format!("ultty-{}", current_uid()));
+        assert_eq!(dir, expected_dir);
         fs::remove_dir(&expected_dir).unwrap();
         fs::remove_dir(&base).unwrap();
     }
