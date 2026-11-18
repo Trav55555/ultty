@@ -1,0 +1,19 @@
+➜  tui-terminal git:(main)
+➜  tui-terminal git:(main)
+ ✗ echo palette-test\r    
+                          
+                          
+                          
+                          
+                          
+                          
+                          
+                          
+                          
+                          
+                          
+                          
+                          
+                          
+                          
+

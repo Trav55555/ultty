@@ -1068,6 +1068,7 @@ mod tests {
                 scenes,
                 surfaces: Vec::new(),
             }],
+            palette: None,
         }
     }
 

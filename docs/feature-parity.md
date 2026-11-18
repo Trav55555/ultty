@@ -61,7 +61,7 @@ Ranked by how much a typical user would notice:
    automatically.
 9. **One window per process, and no quick terminal.** "New window" starts a
    second Ultty process. Ghostty has real multiple windows, a quick terminal
-   on macOS and Wayland, and a command palette.
+   on macOS and Wayland.
 10. **Linux x86_64 only in practice.** Release builds and CI cover Linux
     x86_64 only. macOS code exists but is not built or tested by CI. There
     is no Windows or BSD support. Alacritty runs on Linux, BSD, macOS and
@@ -189,7 +189,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Vi or copy mode | yes; motions, search, char/line/block selection | no | yes | `vim/mod.rs` (tests in module) |
 | Selection: word, line, block | yes; double-click word, triple-click line, Alt for block | yes; plus select command output | yes; plus `semantic_escape_chars` | `app/input.rs` selection; `grid/terminal.rs` `SelectionMode`; `tests/selection.rs` |
 | Configurable word characters | no | yes; `selection-word-chars` | yes | `app/input.rs` `is_word_char` is fixed |
-| Command palette | no | yes | no | none |
+| Command palette | yes; every bindable action with its key, fuzzy filter, recent first, screen reader dialog | yes | no | `command_palette.rs`; `renderer/command_palette.rs`; `keybindings.command_palette` (Ctrl+Shift+P) |
 | Inspector or debug overlay | partial: native-protocol status overlay, debug dump; no VT inspector | yes; terminal inspector | partial; render timer, damage highlight | `Ctrl+Shift+I`, `keybindings.debug_dump` |
 | Scrollbar | no | yes since 1.3 | no | none in renderer |
 

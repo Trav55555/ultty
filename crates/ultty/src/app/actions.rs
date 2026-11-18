@@ -17,6 +17,7 @@ pub(super) struct ScreenshotOverlayState {
     shortcuts_visible: bool,
     keybindings: Vec<(String, String)>,
     cursor_blink_visible: bool,
+    command_palette: Option<ultty::command_palette::CommandPalette>,
 }
 
 impl ScreenshotOverlayState {
@@ -34,6 +35,7 @@ impl ScreenshotOverlayState {
             protocol_status: None,
             cursor_blink_visible: self.cursor_blink_visible,
             ime_preedit: None,
+            command_palette: self.command_palette.as_ref(),
         }
     }
 }
@@ -59,6 +61,10 @@ impl App {
             shortcuts_visible: self.shortcuts_visible,
             keybindings: self.shortcuts_list.clone(),
             cursor_blink_visible: self.cursor_blink.visible(),
+            command_palette: self
+                .command_palette
+                .is_open()
+                .then(|| self.command_palette.clone()),
         }
     }
 
@@ -95,100 +101,17 @@ impl App {
         }
     }
 
-    /// Build the list of keyboard shortcuts for display.
+    /// The keyboard shortcuts overlay's rows: each bound action's key and
+    /// label, from the same table as the command palette.
     pub(super) fn build_shortcuts_list(
         keybindings: &ultty::config::KeybindingConfig,
     ) -> Vec<(String, String)> {
-        vec![
-            (keybindings.copy.clone(), "Copy selection".to_string()),
-            (
-                keybindings.paste.clone(),
-                "Paste from clipboard".to_string(),
-            ),
-            (keybindings.new_tab.clone(), "New tab".to_string()),
-            (keybindings.close_tab.clone(), "Close tab".to_string()),
-            (keybindings.next_tab.clone(), "Next tab".to_string()),
-            (keybindings.prev_tab.clone(), "Previous tab".to_string()),
-            (
-                keybindings.split_horizontal.clone(),
-                "Split horizontal".to_string(),
-            ),
-            (
-                keybindings.split_vertical.clone(),
-                "Split vertical".to_string(),
-            ),
-            (
-                keybindings.focus_pane_left.clone(),
-                "Focus pane left".to_string(),
-            ),
-            (
-                keybindings.focus_pane_right.clone(),
-                "Focus pane right".to_string(),
-            ),
-            (
-                keybindings.focus_pane_up.clone(),
-                "Focus pane up".to_string(),
-            ),
-            (
-                keybindings.focus_pane_down.clone(),
-                "Focus pane down".to_string(),
-            ),
-            (keybindings.close_pane.clone(), "Close pane".to_string()),
-            (keybindings.vim_mode.clone(), "Toggle vim mode".to_string()),
-            (
-                keybindings.scroll_page_up.clone(),
-                "Scroll back a page".to_string(),
-            ),
-            (
-                keybindings.scroll_page_down.clone(),
-                "Scroll forward a page".to_string(),
-            ),
-            (
-                keybindings.jump_prev_prompt.clone(),
-                "Jump to previous prompt".to_string(),
-            ),
-            (
-                keybindings.jump_next_prompt.clone(),
-                "Jump to next prompt".to_string(),
-            ),
-            (
-                keybindings.select_last_output.clone(),
-                "Select last command output".to_string(),
-            ),
-            (
-                keybindings.reload_config.clone(),
-                "Reload config".to_string(),
-            ),
-            (
-                keybindings.show_shortcuts.clone(),
-                "Show/hide shortcuts".to_string(),
-            ),
-            (
-                keybindings.protocol_status.clone(),
-                "Show/hide protocol status".to_string(),
-            ),
-            (
-                keybindings.cycle_theme.clone(),
-                "Cycle color theme".to_string(),
-            ),
-            (
-                keybindings.font_increase.clone(),
-                "Increase font size".to_string(),
-            ),
-            (
-                keybindings.font_decrease.clone(),
-                "Decrease font size".to_string(),
-            ),
-            (
-                keybindings.font_reset.clone(),
-                "Reset font size".to_string(),
-            ),
-            (
-                keybindings.screenshot.clone(),
-                "Take screenshot".to_string(),
-            ),
-            (keybindings.debug_dump.clone(), "Debug dump".to_string()),
-        ]
+        ultty::action::Action::ALL
+            .iter()
+            .map(|action| (action.binding(keybindings).trim(), action.label()))
+            .filter(|(key, _)| !key.is_empty())
+            .map(|(key, label)| (key.to_string(), label.to_string()))
+            .collect()
     }
 
     /// Build native protocol status rows for the in-terminal status overlay.
@@ -313,6 +236,7 @@ impl App {
         self.url_detector
             .set_enabled(new_config.behavior.url_detection);
 
+        self.shortcuts_list = Self::build_shortcuts_list(&new_config.keybindings);
         self.config = new_config;
         self.needs_redraw = true;
 
@@ -611,6 +535,7 @@ mod tests {
             shortcuts_visible: true,
             keybindings: vec![("ctrl+s".to_string(), "Screenshot".to_string())],
             cursor_blink_visible: false,
+            command_palette: None,
         };
 
         let overlay = snapshot.as_overlay();
@@ -623,6 +548,28 @@ mod tests {
             &[("ctrl+s".to_string(), "Screenshot".to_string())]
         );
         assert!(!overlay.cursor_blink_visible);
+    }
+
+    #[test]
+    fn shortcuts_overlay_uses_the_action_labels_and_skips_unbound_keys() {
+        use ultty::action::Action;
+        let keys = ultty::config::KeybindingConfig {
+            debug_dump: String::new(),
+            ..Default::default()
+        };
+        let rows = App::build_shortcuts_list(&keys);
+        let expected: Vec<(String, String)> = Action::ALL
+            .iter()
+            .filter(|&&action| action != Action::DebugDump)
+            .map(|action| {
+                (
+                    action.binding(&keys).to_string(),
+                    action.label().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(rows, expected);
+        assert!(rows.contains(&("ctrl+shift+p".to_string(), "Command palette".to_string())));
     }
 
     #[test]

@@ -758,6 +758,8 @@ pub struct KeybindingConfig {
     pub show_shortcuts: String,
     /// Show native protocol status overlay
     pub protocol_status: String,
+    /// Open the command palette
+    pub command_palette: String,
     /// Cycle through color themes
     pub cycle_theme: String,
     /// Increase font size
@@ -808,6 +810,7 @@ impl Default for KeybindingConfig {
             reload_config: "ctrl+shift+r".to_string(),
             show_shortcuts: "ctrl+shift+?".to_string(),
             protocol_status: "ctrl+shift+i".to_string(),
+            command_palette: "ctrl+shift+p".to_string(),
             cycle_theme: "ctrl+shift+n".to_string(),
             font_increase: "ctrl+=".to_string(),
             font_decrease: "ctrl+-".to_string(),
@@ -854,55 +857,15 @@ impl KeybindingConfig {
     }
 
     fn all_bindings(&self) -> Vec<(String, String)> {
-        let mut bindings = vec![
-            ("copy".to_string(), self.copy.clone()),
-            ("paste".to_string(), self.paste.clone()),
-            ("new_tab".to_string(), self.new_tab.clone()),
-            ("close_tab".to_string(), self.close_tab.clone()),
-            ("next_tab".to_string(), self.next_tab.clone()),
-            ("prev_tab".to_string(), self.prev_tab.clone()),
-            (
-                "split_horizontal".to_string(),
-                self.split_horizontal.clone(),
-            ),
-            ("split_vertical".to_string(), self.split_vertical.clone()),
-            ("focus_pane_left".to_string(), self.focus_pane_left.clone()),
-            (
-                "focus_pane_right".to_string(),
-                self.focus_pane_right.clone(),
-            ),
-            ("focus_pane_up".to_string(), self.focus_pane_up.clone()),
-            ("focus_pane_down".to_string(), self.focus_pane_down.clone()),
-            ("close_pane".to_string(), self.close_pane.clone()),
-            ("vim_mode".to_string(), self.vim_mode.clone()),
-            ("find".to_string(), self.find.clone()),
-            ("reload_config".to_string(), self.reload_config.clone()),
-            ("show_shortcuts".to_string(), self.show_shortcuts.clone()),
-            ("protocol_status".to_string(), self.protocol_status.clone()),
-            ("cycle_theme".to_string(), self.cycle_theme.clone()),
-            ("font_increase".to_string(), self.font_increase.clone()),
-            ("font_decrease".to_string(), self.font_decrease.clone()),
-            ("font_reset".to_string(), self.font_reset.clone()),
-            ("screenshot".to_string(), self.screenshot.clone()),
-            ("debug_dump".to_string(), self.debug_dump.clone()),
-            ("scroll_page_up".to_string(), self.scroll_page_up.clone()),
-            (
-                "scroll_page_down".to_string(),
-                self.scroll_page_down.clone(),
-            ),
-            (
-                "jump_prev_prompt".to_string(),
-                self.jump_prev_prompt.clone(),
-            ),
-            (
-                "jump_next_prompt".to_string(),
-                self.jump_next_prompt.clone(),
-            ),
-            (
-                "select_last_output".to_string(),
-                self.select_last_output.clone(),
-            ),
-        ];
+        let mut bindings: Vec<(String, String)> = crate::action::Action::ALL
+            .iter()
+            .map(|action| {
+                (
+                    action.config_key().to_string(),
+                    action.binding(self).to_string(),
+                )
+            })
+            .collect();
 
         let mut custom: Vec<(String, String)> = self
             .custom
@@ -1657,6 +1620,14 @@ copy = "ctrl+c"
         let config: Config =
             toml::from_str("[tmux]\npassthrough = true\n[font]\nfamily = \"Fira Code\"\n").unwrap();
         assert_eq!(config.font.family, "Fira Code");
+    }
+
+    #[test]
+    fn default_keybindings_do_not_conflict() {
+        assert_eq!(
+            KeybindingConfig::default().duplicate_bindings(),
+            Vec::<(String, Vec<String>)>::new()
+        );
     }
 
     #[test]

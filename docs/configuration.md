@@ -180,6 +180,36 @@ the app, so a new tab or split opens where that shell last reported, not in
 the app's own directory. Tabs and splits made from a launch profile or by
 `ulttyctl` with an explicit directory use that directory instead.
 
+## Command palette
+
+```toml
+[keybindings]
+command_palette = "ctrl+shift+p"
+```
+
+The command palette lists every action you can bind to a key, with the key
+bound to it at the right, and runs the one you pick. It is the same table the
+keyboard shortcuts overlay (`show_shortcuts`) shows, so a key you rebind here
+shows up in both.
+
+- Type to filter. Matching is fuzzy and ignores case and spaces: `sd` finds
+  "Split down", `nt` finds "New tab". Matched letters are colored and
+  underlined, and the best match is selected.
+- Up and Down, or Ctrl+P and Ctrl+N, move the selection; Enter runs it; Esc,
+  a click or the palette's own key closes the palette.
+- With an empty query, the actions you ran from the palette come first, most
+  recent at the top. Ultty forgets them when it exits.
+- While the palette is open it takes every key, so nothing you type reaches
+  the program in the pane, whether that is a shell or a native-protocol app.
+  Closing it leaves the same pane focused.
+- Splits are offered as "Split right" (`split_horizontal`) and "Split down"
+  (`split_vertical`). The palette does not list itself.
+- Screen readers see the palette as a dialog with a search field and a list
+  of commands; the selected command has focus and carries its key as the
+  keyboard shortcut.
+
+Set `command_palette = ""` to turn the key off.
+
 ## Jumping between prompts
 
 ```toml

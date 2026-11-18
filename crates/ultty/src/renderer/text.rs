@@ -1639,6 +1639,81 @@ impl TextRenderer {
         });
     }
 
+    /// Append `text` laid out on cells, as the grid is, from `(x, y)` (the
+    /// top-left of its first cell), at most `max_cells` cells wide. Each
+    /// character is drawn in `color(index)`, its index among `text`'s
+    /// characters. Returns the cells used.
+    ///
+    /// Characters are shaped one at a time through the grid's per-character
+    /// shaping cache, so drawing the same text again shapes nothing. For
+    /// chrome that redraws every frame while it is shown (the command
+    /// palette); a character of no width (a combining mark) is skipped.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_cell_text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        max_cells: usize,
+        mut color: impl FnMut(usize) -> Rgba,
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+    ) -> usize {
+        let style = CellStyle::default();
+        let mut buffer: Option<Buffer> = None;
+        let mut col = 0usize;
+        for (index, ch) in text.chars().enumerate() {
+            let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if width == 0 {
+                continue;
+            }
+            if col + width > max_cells {
+                break;
+            }
+            if ch != ' ' {
+                let key = shaping_cache_key(ch, self.ligatures, style);
+                let shaped = match self.shaping_cache.get(&key) {
+                    Some(&cached) => Some(cached),
+                    None => {
+                        let buffer = buffer.get_or_insert_with(|| {
+                            let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
+                            buffer.set_size(
+                                Some(self.cell_width * 4.0),
+                                Some(self.cell_height * 2.0),
+                            );
+                            buffer
+                        });
+                        let shaped = self.shape_cell(buffer, &ch.to_string(), style);
+                        if let Some(shaped) = shaped {
+                            self.shaping_cache.insert(key, shaped);
+                        }
+                        shaped
+                    }
+                };
+                if let Some(shaped) = shaped {
+                    if let Some(glyph) = self
+                        .atlas
+                        .get_glyph(&mut self.font_system, shaped.cache_key)
+                    {
+                        if glyph.width > 0.0 && glyph.height > 0.0 {
+                            let cell = (u16::try_from(col).unwrap_or(u16::MAX), 0);
+                            let (gx, gy) = cell_glyph_origin(
+                                cell,
+                                (self.cell_width, self.cell_height),
+                                (x, y),
+                                shaped,
+                                &glyph,
+                            );
+                            Self::emit_glyph_quad(vertices, indices, gx, gy, &glyph, color(index));
+                        }
+                    }
+                }
+            }
+            col += width;
+        }
+        col
+    }
+
     /// Build vertices for a text label at a specific position.
     ///
     /// Returns vertices and indices that can be rendered with the text pipeline.

@@ -3,6 +3,8 @@
 use std::time::Instant;
 
 use super::{App, CLICK_THRESHOLD};
+use ultty::action::Action;
+use ultty::command_palette::PaletteKey;
 use ultty::config::KeybindingConfig;
 use ultty::grid::{
     MouseButton as TerminalMouseButton, MouseModifiers, SelectionMode, SelectionPoint,
@@ -13,7 +15,7 @@ use ultty::url::UrlDetector;
 use ultty::vim::CopyModeResult;
 use ultty_protocol::{Key as ProtocolKey, Modifiers as ProtocolModifiers};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::keyboard::{Key, NamedKey, PhysicalKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 impl App {
@@ -82,6 +84,10 @@ impl App {
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.set_ime_preedit(String::new());
+                if self.command_palette.is_open() {
+                    self.palette_input(PaletteKey::Text(&text));
+                    return false;
+                }
                 if self.forward_text_to_native_session(&text) {
                     return false;
                 }
@@ -188,6 +194,14 @@ impl App {
 
         let x = self.mouse_pos.x as f32;
         let y = self.mouse_pos.y as f32;
+
+        // A click anywhere closes the command palette, and does nothing else.
+        if self.command_palette.is_open() {
+            if state == ElementState::Pressed {
+                self.close_command_palette();
+            }
+            return;
+        }
 
         // An open menu takes every click: an item runs, anything else closes
         // it. Nothing reaches the terminal or the chrome underneath.
@@ -954,6 +968,9 @@ impl App {
             return;
         }
         if event.state == ElementState::Released {
+            if self.command_palette.is_open() {
+                return;
+            }
             // Only a program that asked for release events gets any bytes.
             if !self.forward_key_up_to_native_sessions(&event) {
                 self.send_key_to_terminal(&event);
@@ -964,215 +981,18 @@ impl App {
         // Reset cursor blink on key press (cursor should be visible while typing)
         self.cursor_blink.restart(Instant::now());
 
-        // Check for vim mode toggle (Ctrl+Shift+Space)
-        if self.check_keybinding(&event, &self.config.keybindings.vim_mode.clone()) {
-            if self.copy_mode.is_active() {
-                self.copy_mode.exit();
-            } else {
-                self.enter_copy_mode();
-            }
-            self.needs_redraw = true;
+        // The open command palette takes every key; none reaches a program.
+        if self.command_palette.is_open() {
+            self.handle_palette_key(&event);
             return;
         }
 
-        // Page through scrollback (Shift+PageUp/PageDown) on the main screen.
-        // On the alternate screen there is no scrollback, so the key goes to
-        // the app, as in xterm.
-        let page_up =
-            self.check_keybinding(&event, &self.config.keybindings.scroll_page_up.clone());
-        if page_up
-            || self.check_keybinding(&event, &self.config.keybindings.scroll_page_down.clone())
-        {
-            let screen = self
-                .terminal()
-                .filter(|t| !t.is_alternate_screen())
-                .map(|t| t.dimensions().rows);
-            if let Some(rows) = screen {
-                // Keep one line of the previous page for context.
-                let page = i32::from(rows.saturating_sub(1).max(1));
-                self.scroll_scrollback(if page_up { page } else { -page });
+        // Bound actions. A page or prompt key on the alternate screen does
+        // nothing here and goes on to the program.
+        for action in self.bound_actions(&event.logical_key) {
+            if !action.waits_for_modes() && self.perform_action(action) {
                 return;
             }
-        }
-
-        // Prompt marks (OSC 133) on the main screen: jump between prompts and
-        // select the last command's output. On the alternate screen the key
-        // goes to the app, like the page keys above.
-        {
-            use ultty::grid::PromptJump;
-            let keys = &self.config.keybindings;
-            let jump = if self.check_keybinding(&event, &keys.jump_prev_prompt.clone()) {
-                Some(Some(PromptJump::Previous))
-            } else if self.check_keybinding(&event, &keys.jump_next_prompt.clone()) {
-                Some(Some(PromptJump::Next))
-            } else if self.check_keybinding(&event, &keys.select_last_output.clone()) {
-                Some(None)
-            } else {
-                None
-            };
-            if let Some(jump) = jump {
-                let handled = self
-                    .terminal_mut()
-                    .filter(|t| !t.is_alternate_screen())
-                    .map(|mut t| match jump {
-                        Some(direction) => t.jump_to_prompt(direction),
-                        None => t.select_last_output(),
-                    });
-                if let Some(changed) = handled {
-                    if changed {
-                        self.needs_redraw = true;
-                    }
-                    return;
-                }
-            }
-        }
-
-        // Check for find/search (Ctrl+Shift+F)
-        if self.check_keybinding(&event, &self.config.keybindings.find.clone()) {
-            // If native sessions are active, also search their scene trees
-            if self.has_native_sessions() {
-                self.native_search_active = true;
-                self.native_search_query.clear();
-                self.native_search_matches.clear();
-                self.native_search_index = 0;
-            }
-            self.enter_search_mode();
-            self.needs_redraw = true;
-            return;
-        }
-
-        // Tab keybindings
-        if self.check_keybinding(&event, &self.config.keybindings.new_tab.clone()) {
-            match self.create_tab() {
-                Ok(tab_id) => {
-                    self.clear_tab_width_freeze();
-                    tracing::info!("Created new tab {:?}", tab_id);
-                    self.update_tab_bar();
-                    self.needs_redraw = true;
-                }
-                Err(e) => tracing::warn!("Failed to create tab: {}", e),
-            }
-            return;
-        }
-        if self.check_keybinding(&event, &self.config.keybindings.close_tab.clone()) {
-            if self.runtime.manager.tab_count() > 1 {
-                if let Some(tab) = self.runtime.manager.active_tab() {
-                    let tab_id = tab.id;
-                    self.freeze_tab_width_after_close();
-                    self.runtime.manager.close_tab(tab_id);
-                    tracing::info!("Closed tab {:?}", tab_id);
-                    self.update_tab_bar();
-                    self.needs_redraw = true;
-                }
-            }
-            return;
-        }
-        if self.check_keybinding(&event, &self.config.keybindings.next_tab.clone()) {
-            self.runtime.manager.next_tab();
-            self.update_tab_bar();
-            self.needs_redraw = true;
-            return;
-        }
-        if self.check_keybinding(&event, &self.config.keybindings.prev_tab.clone()) {
-            self.runtime.manager.prev_tab();
-            self.update_tab_bar();
-            self.needs_redraw = true;
-            return;
-        }
-        if self.check_keybinding(&event, &self.config.keybindings.split_horizontal.clone()) {
-            self.split_pane(SplitDirection::Horizontal);
-            return;
-        }
-        if self.check_keybinding(&event, &self.config.keybindings.split_vertical.clone()) {
-            self.split_pane(SplitDirection::Vertical);
-            return;
-        }
-
-        // Pane navigation: to the nearest pane on that side, wherever it is
-        // in the split tree.
-        {
-            use ultty::pane_layout::FocusDirection;
-            let keys = &self.config.keybindings;
-            let direction = if self.check_keybinding(&event, &keys.focus_pane_right.clone()) {
-                Some(FocusDirection::Right)
-            } else if self.check_keybinding(&event, &keys.focus_pane_down.clone()) {
-                Some(FocusDirection::Down)
-            } else if self.check_keybinding(&event, &keys.focus_pane_left.clone()) {
-                Some(FocusDirection::Left)
-            } else if self.check_keybinding(&event, &keys.focus_pane_up.clone()) {
-                Some(FocusDirection::Up)
-            } else {
-                None
-            };
-            if let Some(direction) = direction {
-                let (width, height) = self.renderer.terminal_area();
-                self.runtime
-                    .manager
-                    .focus_direction(direction, width, height);
-                self.needs_redraw = true;
-                return;
-            }
-        }
-        if self.check_keybinding(&event, &self.config.keybindings.close_pane.clone()) {
-            if self.runtime.manager.close_focused_pane() {
-                tracing::info!("Closed pane");
-                self.needs_redraw = true;
-            }
-            return;
-        }
-
-        if self.check_keybinding(&event, &self.config.keybindings.reload_config.clone()) {
-            self.reload_config();
-            return;
-        }
-
-        if self.check_keybinding(&event, &self.config.keybindings.show_shortcuts.clone()) {
-            self.shortcuts_visible = !self.shortcuts_visible;
-            if self.shortcuts_visible {
-                self.protocol_status_visible = false;
-            }
-            self.needs_redraw = true;
-            return;
-        }
-
-        if self.check_keybinding(&event, &self.config.keybindings.protocol_status.clone()) {
-            self.protocol_status_visible = !self.protocol_status_visible;
-            if self.protocol_status_visible {
-                self.shortcuts_visible = false;
-            }
-            self.needs_redraw = true;
-            return;
-        }
-
-        if self.check_keybinding(&event, &self.config.keybindings.cycle_theme.clone()) {
-            self.cycle_theme();
-            return;
-        }
-
-        // Font size shortcuts
-        if self.check_keybinding(&event, &self.config.keybindings.font_increase.clone()) {
-            self.change_font_size(true);
-            return;
-        }
-        if self.check_keybinding(&event, &self.config.keybindings.font_decrease.clone()) {
-            self.change_font_size(false);
-            return;
-        }
-        if self.check_keybinding(&event, &self.config.keybindings.font_reset.clone()) {
-            self.reset_font_size();
-            return;
-        }
-
-        // Screenshot shortcut
-        if self.check_keybinding(&event, &self.config.keybindings.screenshot.clone()) {
-            self.take_screenshot();
-            return;
-        }
-
-        // Debug dump shortcut
-        if self.check_keybinding(&event, &self.config.keybindings.debug_dump.clone()) {
-            self.debug_dump_terminal();
-            return;
         }
 
         // Escape closes the main menu; it takes no other keys.
@@ -1211,10 +1031,11 @@ impl App {
             }
         }
 
-        // Handle paste shortcut (Ctrl+Shift+V or Shift+Insert)
-        if self.check_keybinding(&event, &self.config.keybindings.paste.clone()) {
-            self.paste_from_clipboard();
-            return;
+        // Copy and paste (Ctrl+Shift+C/V), and Shift+Insert paste.
+        for action in self.bound_actions(&event.logical_key) {
+            if action.waits_for_modes() && self.perform_action(action) {
+                return;
+            }
         }
         if let Key::Named(NamedKey::Insert) = &event.logical_key {
             if self.modifiers.shift_key() {
@@ -1223,20 +1044,167 @@ impl App {
             }
         }
 
-        // Handle copy shortcut (Ctrl+Shift+C)
-        if self.check_keybinding(&event, &self.config.keybindings.copy.clone()) {
-            if self.native_transcript_copy() {
-                return;
-            }
-            if let Some(text) = self.terminal().and_then(|t| t.selected_text()) {
-                self.copy_to_clipboard(&text);
-            }
-            return;
-        }
-
         if !self.forward_key_to_native_sessions(&event) {
             self.send_key_to_terminal(&event);
         }
+    }
+
+    /// The actions bound to `key` with the modifiers held now, in
+    /// [`Action::ALL`] order.
+    pub(super) fn bound_actions(&self, key: &Key) -> Vec<Action> {
+        bound_actions(&self.config.keybindings, key, self.modifiers)
+    }
+
+    /// Run `action`, as its key or the command palette asks. Returns
+    /// whether it applied: the page and prompt keys do nothing on the
+    /// alternate screen, where their key belongs to the program.
+    pub(super) fn perform_action(&mut self, action: Action) -> bool {
+        use ultty::pane_layout::FocusDirection;
+        match action {
+            Action::CopyMode => {
+                if self.copy_mode.is_active() {
+                    self.copy_mode.exit();
+                } else {
+                    self.enter_copy_mode();
+                }
+                self.needs_redraw = true;
+            }
+            // Page through scrollback on the main screen. On the alternate
+            // screen there is no scrollback, so the key goes to the app, as
+            // in xterm.
+            Action::ScrollPageUp | Action::ScrollPageDown => {
+                let screen = self
+                    .terminal()
+                    .filter(|t| !t.is_alternate_screen())
+                    .map(|t| t.dimensions().rows);
+                let Some(rows) = screen else {
+                    return false;
+                };
+                // Keep one line of the previous page for context.
+                let page = i32::from(rows.saturating_sub(1).max(1));
+                let up = action == Action::ScrollPageUp;
+                self.scroll_scrollback(if up { page } else { -page });
+            }
+            // Prompt marks (OSC 133) on the main screen: jump between
+            // prompts and select the last command's output.
+            Action::JumpPrevPrompt | Action::JumpNextPrompt | Action::SelectLastOutput => {
+                use ultty::grid::PromptJump;
+                let handled = self
+                    .terminal_mut()
+                    .filter(|t| !t.is_alternate_screen())
+                    .map(|mut t| match action {
+                        Action::JumpPrevPrompt => t.jump_to_prompt(PromptJump::Previous),
+                        Action::JumpNextPrompt => t.jump_to_prompt(PromptJump::Next),
+                        _ => t.select_last_output(),
+                    });
+                let Some(changed) = handled else {
+                    return false;
+                };
+                if changed {
+                    self.needs_redraw = true;
+                }
+            }
+            Action::Find => {
+                // If native sessions are active, also search their scene trees
+                if self.has_native_sessions() {
+                    self.native_search_active = true;
+                    self.native_search_query.clear();
+                    self.native_search_matches.clear();
+                    self.native_search_index = 0;
+                }
+                self.enter_search_mode();
+                self.needs_redraw = true;
+            }
+            Action::NewTab => match self.create_tab() {
+                Ok(tab_id) => {
+                    self.clear_tab_width_freeze();
+                    tracing::info!("Created new tab {:?}", tab_id);
+                    self.update_tab_bar();
+                    self.needs_redraw = true;
+                }
+                Err(e) => tracing::warn!("Failed to create tab: {}", e),
+            },
+            Action::CloseTab => {
+                if self.runtime.manager.tab_count() > 1 {
+                    if let Some(tab) = self.runtime.manager.active_tab() {
+                        let tab_id = tab.id;
+                        self.freeze_tab_width_after_close();
+                        self.runtime.manager.close_tab(tab_id);
+                        tracing::info!("Closed tab {:?}", tab_id);
+                        self.update_tab_bar();
+                        self.needs_redraw = true;
+                    }
+                }
+            }
+            Action::NextTab => {
+                self.runtime.manager.next_tab();
+                self.update_tab_bar();
+                self.needs_redraw = true;
+            }
+            Action::PrevTab => {
+                self.runtime.manager.prev_tab();
+                self.update_tab_bar();
+                self.needs_redraw = true;
+            }
+            Action::SplitRight => self.split_pane(SplitDirection::Horizontal),
+            Action::SplitDown => self.split_pane(SplitDirection::Vertical),
+            // Pane navigation: to the nearest pane on that side, wherever
+            // it is in the split tree.
+            Action::FocusPaneLeft
+            | Action::FocusPaneRight
+            | Action::FocusPaneUp
+            | Action::FocusPaneDown => {
+                let direction = match action {
+                    Action::FocusPaneLeft => FocusDirection::Left,
+                    Action::FocusPaneRight => FocusDirection::Right,
+                    Action::FocusPaneUp => FocusDirection::Up,
+                    _ => FocusDirection::Down,
+                };
+                let (width, height) = self.renderer.terminal_area();
+                self.runtime
+                    .manager
+                    .focus_direction(direction, width, height);
+                self.needs_redraw = true;
+            }
+            Action::ClosePane => {
+                if self.runtime.manager.close_focused_pane() {
+                    tracing::info!("Closed pane");
+                    self.needs_redraw = true;
+                }
+            }
+            Action::ReloadConfig => self.reload_config(),
+            Action::ShowShortcuts => {
+                self.shortcuts_visible = !self.shortcuts_visible;
+                if self.shortcuts_visible {
+                    self.protocol_status_visible = false;
+                }
+                self.needs_redraw = true;
+            }
+            Action::ProtocolStatus => {
+                self.protocol_status_visible = !self.protocol_status_visible;
+                if self.protocol_status_visible {
+                    self.shortcuts_visible = false;
+                }
+                self.needs_redraw = true;
+            }
+            Action::CommandPalette => self.open_command_palette(),
+            Action::CycleTheme => self.cycle_theme(),
+            Action::FontIncrease => self.change_font_size(true),
+            Action::FontDecrease => self.change_font_size(false),
+            Action::FontReset => self.reset_font_size(),
+            Action::Screenshot => self.take_screenshot(),
+            Action::DebugDump => self.debug_dump_terminal(),
+            Action::Paste => self.paste_from_clipboard(),
+            Action::Copy => {
+                if self.native_transcript_copy() {
+                    return true;
+                }
+                if let Some(text) = self.terminal().and_then(|t| t.selected_text()) {
+                    self.copy_to_clipboard(&text);
+                }
+            }
+        }
+        true
     }
 
     /// Send a key to the focused terminal, encoded for its keyboard modes.
@@ -1441,59 +1409,6 @@ impl App {
         true
     }
 
-    /// Check if a key event matches a configured keybinding.
-    fn check_keybinding(&self, event: &KeyEvent, binding: &str) -> bool {
-        let Some(parsed) = KeybindingConfig::parse_keybinding(binding) else {
-            return false;
-        };
-
-        // Check modifiers
-        if parsed.ctrl != self.modifiers.control_key() {
-            return false;
-        }
-        if parsed.shift != self.modifiers.shift_key() {
-            return false;
-        }
-        if parsed.alt != self.modifiers.alt_key() {
-            return false;
-        }
-        if parsed.super_key != self.modifiers.super_key() {
-            return false;
-        }
-
-        // Check key
-        match &event.logical_key {
-            Key::Named(named) => {
-                let key_name = match named {
-                    NamedKey::Space => "space",
-                    NamedKey::Enter => "enter",
-                    NamedKey::Tab => "tab",
-                    NamedKey::Escape => "escape",
-                    NamedKey::Backspace => "backspace",
-                    NamedKey::Delete => "delete",
-                    NamedKey::Insert => "insert",
-                    NamedKey::Home => "home",
-                    NamedKey::End => "end",
-                    NamedKey::PageUp => "pageup",
-                    NamedKey::PageDown => "pagedown",
-                    NamedKey::ArrowUp => "up",
-                    NamedKey::ArrowDown => "down",
-                    NamedKey::ArrowLeft => "left",
-                    NamedKey::ArrowRight => "right",
-                    _ => return false,
-                };
-                parsed.key == key_name
-            }
-            Key::Character(c) => {
-                let event_key = c.to_lowercase();
-                parsed.key == event_key
-                    || (parsed.key == "?" && event_key == "/")
-                    || (parsed.key == "/" && event_key == "?")
-            }
-            _ => false,
-        }
-    }
-
     fn enter_copy_mode(&mut self) {
         let Some(terminal) = self.terminal() else {
             return;
@@ -1656,6 +1571,68 @@ impl App {
             mods = mods.union(ProtocolModifiers::ALT);
         }
         mods
+    }
+}
+
+/// The actions `keys` binds to `key` pressed with `mods`, in
+/// [`Action::ALL`] order.
+pub(super) fn bound_actions(
+    keys: &KeybindingConfig,
+    key: &Key,
+    mods: ModifiersState,
+) -> Vec<Action> {
+    Action::ALL
+        .into_iter()
+        .filter(|action| binding_matches(action.binding(keys), key, mods))
+        .collect()
+}
+
+/// Whether `key` pressed with `mods` is the keybinding `binding`
+/// (`"ctrl+shift+t"`).
+fn binding_matches(binding: &str, key: &Key, mods: ModifiersState) -> bool {
+    let Some(parsed) = KeybindingConfig::parse_keybinding(binding) else {
+        return false;
+    };
+
+    // Check modifiers
+    if parsed.ctrl != mods.control_key()
+        || parsed.shift != mods.shift_key()
+        || parsed.alt != mods.alt_key()
+        || parsed.super_key != mods.super_key()
+    {
+        return false;
+    }
+
+    // Check key
+    match key {
+        Key::Named(named) => {
+            let key_name = match named {
+                NamedKey::Space => "space",
+                NamedKey::Enter => "enter",
+                NamedKey::Tab => "tab",
+                NamedKey::Escape => "escape",
+                NamedKey::Backspace => "backspace",
+                NamedKey::Delete => "delete",
+                NamedKey::Insert => "insert",
+                NamedKey::Home => "home",
+                NamedKey::End => "end",
+                NamedKey::PageUp => "pageup",
+                NamedKey::PageDown => "pagedown",
+                NamedKey::ArrowUp => "up",
+                NamedKey::ArrowDown => "down",
+                NamedKey::ArrowLeft => "left",
+                NamedKey::ArrowRight => "right",
+                _ => return false,
+            };
+            parsed.key == key_name
+        }
+        Key::Character(c) => {
+            let event_key = c.to_lowercase();
+            parsed.key == event_key
+                || (parsed.key == "?" && event_key == "/")
+                || (parsed.key == "/" && event_key == "?")
+        }
+        _ => false,
     }
 }
 

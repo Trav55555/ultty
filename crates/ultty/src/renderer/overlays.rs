@@ -562,6 +562,30 @@ impl Renderer {
         );
     }
 
+    /// Draw what floats over every pane, last: the shortcuts and protocol
+    /// status overlays, the command palette and the main menu.
+    pub(super) fn render_modal_overlays(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        overlay: &OverlayState,
+    ) {
+        if overlay.shortcuts_visible {
+            if let Some(keybindings) = overlay.keybindings {
+                self.render_shortcuts_overlay(encoder, view, keybindings);
+            }
+        }
+        if let Some(rows) = overlay.protocol_status {
+            self.render_protocol_status_overlay(encoder, view, rows);
+        }
+        if let Some(palette) = overlay.command_palette {
+            self.render_command_palette(encoder, view, palette);
+        }
+        if let Some(tab_bar) = overlay.tab_bar {
+            self.render_main_menu(encoder, view, tab_bar);
+        }
+    }
+
     /// Draw the text an input method is composing over the cursor cell,
     /// underlined on an opaque background so it hides the cells beneath
     /// and reads as not yet typed.

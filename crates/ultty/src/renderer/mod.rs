@@ -9,6 +9,7 @@
 mod atlas;
 pub mod block_chars;
 pub mod color;
+mod command_palette;
 mod cursor;
 mod decoration;
 mod emoji;
@@ -95,6 +96,8 @@ pub struct OverlayState<'a> {
     pub cursor_blink_visible: bool,
     /// Text the input method is composing, drawn over the cursor
     pub ime_preedit: Option<ImePreedit<'a>>,
+    /// The command palette, when it is open
+    pub command_palette: Option<&'a crate::command_palette::CommandPalette>,
 }
 
 /// Uncommitted input method text and where it goes: the top-left corner of
@@ -119,6 +122,7 @@ impl<'a> Default for OverlayState<'a> {
             protocol_status: None,
             cursor_blink_visible: true, // Default visible
             ime_preedit: None,
+            command_palette: None,
         }
     }
 }
@@ -1400,18 +1404,7 @@ impl Renderer {
             self.render_ime_preedit(&mut encoder, view, preedit);
         }
 
-        // Render keyboard shortcuts overlay if visible
-        if overlay.shortcuts_visible {
-            if let Some(keybindings) = overlay.keybindings {
-                self.render_shortcuts_overlay(&mut encoder, view, keybindings);
-            }
-        }
-        if let Some(rows) = overlay.protocol_status {
-            self.render_protocol_status_overlay(&mut encoder, view, rows);
-        }
-        if let Some(tab_bar) = overlay.tab_bar {
-            self.render_main_menu(&mut encoder, view, tab_bar);
-        }
+        self.render_modal_overlays(&mut encoder, view, overlay);
 
         self.queue.submit(std::iter::once(encoder.finish()));
     }
@@ -1584,17 +1577,7 @@ impl Renderer {
         if let Some(preedit) = overlay.ime_preedit {
             self.render_ime_preedit(&mut encoder, view, preedit);
         }
-        if overlay.shortcuts_visible {
-            if let Some(keybindings) = overlay.keybindings {
-                self.render_shortcuts_overlay(&mut encoder, view, keybindings);
-            }
-        }
-        if let Some(rows) = overlay.protocol_status {
-            self.render_protocol_status_overlay(&mut encoder, view, rows);
-        }
-        if let Some(tab_bar) = overlay.tab_bar {
-            self.render_main_menu(&mut encoder, view, tab_bar);
-        }
+        self.render_modal_overlays(&mut encoder, view, overlay);
 
         self.queue.submit(std::iter::once(encoder.finish()));
     }

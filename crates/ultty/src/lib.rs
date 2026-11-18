@@ -39,6 +39,8 @@ compile_error!(
 
 #[cfg(feature = "gui")]
 pub mod a11y;
+pub mod action;
+pub mod command_palette;
 pub mod config;
 #[cfg(feature = "gui")]
 pub mod config_watcher;

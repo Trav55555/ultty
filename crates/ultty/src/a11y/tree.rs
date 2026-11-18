@@ -4,13 +4,18 @@
 //! Window (the window title)
 //! ├── TabList
 //! │   └── Tab, one per tab, the active one selected
-//! └── TabPanel (the active tab's title)
+//! ├── TabPanel (the active tab's title)
 //!     ├── Terminal (the focused pane's title): one TextRun per screen row
 //!     │   (a row past 255 characters is several, on one line),
 //!     │   the caret at the cursor; focus rests here
 //!     │   └── an inline surface's root, after its anchor row's runs
 //!     │       and described by that row, with its region tree
 //!     └── Group (each other pane's title), no children
+//! └── Dialog "Command palette", modal, while the palette is open
+//!     ├── SearchInput: the query
+//!     └── ListBox: one ListBoxOption per matching action, its key as
+//!         the keyboard shortcut, the selected one selected; focus
+//!         rests on it, or on the query when nothing matches
 //! ```
 //!
 //! While a native app shows a full scene the grid is hidden under it, so
@@ -49,6 +54,26 @@ pub struct Snapshot {
     pub tabs: Vec<TabSnapshot>,
     /// The panes of the selected tab, in layout order.
     pub panes: Vec<PaneSnapshot>,
+    /// The command palette, while it is open.
+    pub palette: Option<PaletteSnapshot>,
+}
+
+/// The open command palette.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PaletteSnapshot {
+    pub query: String,
+    /// The matching actions, as listed.
+    pub items: Vec<PaletteItemSnapshot>,
+    /// Index of the selected item, when there are any.
+    pub selected: Option<usize>,
+}
+
+/// One action the palette lists.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PaletteItemSnapshot {
+    pub label: String,
+    /// Its key (`"Ctrl+Shift+T"`); empty when unbound.
+    pub key: String,
 }
 
 impl Snapshot {
@@ -347,7 +372,15 @@ pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
 
     let mut window = Node::new(Role::Window);
     window.set_label(window_title);
-    window.set_children(vec![tab_list_id, panel_id]);
+    let mut children = vec![tab_list_id, panel_id];
+    if let Some(palette) = &snapshot.palette {
+        children.push(node_id("palette"));
+        // Its nodes are pushed last; no app's node may take their ids.
+        for id in palette_node_ids(palette) {
+            out.reserve(id);
+        }
+    }
+    window.set_children(children);
     out.push_fixed(WINDOW_ID, window);
 
     let mut tab_list = Node::new(Role::TabList);
@@ -509,12 +542,73 @@ pub fn build(window_title: &str, snapshot: &Snapshot) -> TreeUpdate {
         focus = id;
     }
 
+    // The palette is modal: while it is open, focus is in it.
+    if let Some(palette) = &snapshot.palette {
+        focus = push_palette(&mut out, palette);
+    }
+
     TreeUpdate {
         nodes: out.finish(),
         tree: Some(TreeInfo::new(WINDOW_ID)),
         tree_id: TreeId::ROOT,
         focus,
     }
+}
+
+/// Every node id the palette's subtree uses.
+fn palette_node_ids(palette: &PaletteSnapshot) -> impl Iterator<Item = NodeId> {
+    ["palette", "palette.query", "palette.list"]
+        .into_iter()
+        .map(node_id)
+        .chain((0..palette.items.len()).map(palette_item_node_id))
+}
+
+/// The palette's dialog and its parts; returns the node focus goes to.
+fn push_palette(out: &mut Emitter, palette: &PaletteSnapshot) -> NodeId {
+    let dialog_id = node_id("palette");
+    let input_id = node_id("palette.query");
+    let list_id = node_id("palette.list");
+    let items: Vec<NodeId> = (0..palette.items.len()).map(palette_item_node_id).collect();
+
+    let mut dialog = Node::new(Role::Dialog);
+    dialog.set_label("Command palette");
+    dialog.set_modal();
+    dialog.set_children(vec![input_id, list_id]);
+    out.push_fixed(dialog_id, dialog);
+
+    let mut input = Node::new(Role::SearchInput);
+    input.set_label("Command");
+    input.set_value(palette.query.as_str());
+    input.set_controls(vec![list_id]);
+    let selected = palette.selected.and_then(|index| items.get(index).copied());
+    if let Some(selected) = selected {
+        input.set_active_descendant(selected);
+    }
+    out.push_fixed(input_id, input);
+
+    let mut list = Node::new(Role::ListBox);
+    list.set_label("Commands");
+    list.set_size_of_set(palette.items.len());
+    list.set_children(items.clone());
+    out.push_fixed(list_id, list);
+
+    for (index, (item, id)) in palette.items.iter().zip(&items).enumerate() {
+        let mut option = Node::new(Role::ListBoxOption);
+        option.set_label(item.label.as_str());
+        if !item.key.is_empty() {
+            option.set_keyboard_shortcut(item.key.as_str());
+        }
+        option.set_position_in_set(index + 1);
+        option.set_size_of_set(palette.items.len());
+        option.set_selected(Some(*id) == selected);
+        out.push_fixed(*id, option);
+    }
+    selected.unwrap_or(input_id)
+}
+
+/// Row `index` of the open command palette's list, `palette.item<index>`.
+pub fn palette_item_node_id(index: usize) -> NodeId {
+    node_id(&format!("palette.item{index}"))
 }
 
 /// When the pane's native nodes were cut to the budget, end its children
@@ -672,6 +766,7 @@ mod tests {
         Snapshot {
             tabs: vec![tab(1, "zsh", true)],
             panes: vec![pane(1, "zsh", Some(grid))],
+            palette: None,
         }
     }
 
@@ -925,6 +1020,7 @@ mod tests {
                 pane(4, "vim notes", Some(screen(10, 2, "hi"))),
                 pane(5, "htop", None),
             ],
+            palette: None,
         };
         let update = build("vim notes", &snapshot);
 
@@ -968,6 +1064,7 @@ mod tests {
                 pane(1, "zsh", Some(screen(10, 2, ""))),
                 pane(2, "htop", None),
             ],
+            palette: None,
         };
         let update = build("zsh", &snapshot);
         let group = node(&update, pane_node_id(2));
@@ -1004,6 +1101,7 @@ mod tests {
         let snapshot = Snapshot {
             tabs: (0..20).map(|id| tab(id, "t", id == 0)).collect(),
             panes: vec![pane(0, "p", Some(screen(10, 50, "")))],
+            palette: None,
         };
         let update = build("Ultty", &snapshot);
         let mut ids: Vec<NodeId> = update.nodes.iter().map(|(id, _)| *id).collect();
@@ -1023,6 +1121,7 @@ mod tests {
                 pane(1, "a", Some(screen(8, 4, "a中\u{301}b\r\n  x"))),
                 pane(2, "b", None),
             ],
+            palette: None,
         };
         let tree = accesskit_consumer::Tree::new(build("Ultty", &snapshot), true);
         let state = tree.state();
@@ -1037,5 +1136,85 @@ mod tests {
             caret.to_global_usv_index(),
             "a中\u{301}b\n  x".chars().count()
         );
+    }
+
+    fn palette(query: &str, items: &[(&str, &str)], selected: Option<usize>) -> PaletteSnapshot {
+        PaletteSnapshot {
+            query: query.to_owned(),
+            items: items
+                .iter()
+                .map(|(label, key)| PaletteItemSnapshot {
+                    label: (*label).to_owned(),
+                    key: (*key).to_owned(),
+                })
+                .collect(),
+            selected,
+        }
+    }
+
+    #[test]
+    fn the_open_palette_is_a_modal_dialog_with_the_selected_item_focused() {
+        let snapshot = Snapshot {
+            tabs: vec![tab(1, "a", true)],
+            panes: vec![pane(1, "a", Some(screen(8, 2, "x")))],
+            palette: Some(palette(
+                "sp",
+                &[
+                    ("Split right", "Ctrl+Shift+D"),
+                    ("Split down", "Ctrl+Shift+E"),
+                ],
+                Some(1),
+            )),
+        };
+        let tree = accesskit_consumer::Tree::new(build("Ultty", &snapshot), true);
+        let state = tree.state();
+        let focus = state.focus().expect("a focused node");
+        assert_eq!(focus.role(), Role::ListBoxOption);
+        assert_eq!(focus.label().as_deref(), Some("Split down"));
+        assert_eq!(focus.is_selected(), Some(true));
+        assert_eq!(focus.data().keyboard_shortcut(), Some("Ctrl+Shift+E"));
+
+        let list = focus.parent().expect("the list");
+        assert_eq!(list.role(), Role::ListBox);
+        let options: Vec<_> = list.children().collect();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].is_selected(), Some(false));
+
+        let dialog = list.parent().expect("the dialog");
+        assert_eq!(dialog.role(), Role::Dialog);
+        assert!(dialog.is_modal());
+        assert_eq!(dialog.label().as_deref(), Some("Command palette"));
+        let input = dialog.children().next().expect("the query");
+        assert_eq!(input.role(), Role::SearchInput);
+        assert_eq!(input.value().as_deref(), Some("sp"));
+        assert_eq!(dialog.parent().map(|w| w.role()), Some(Role::Window));
+    }
+
+    #[test]
+    fn a_palette_with_no_matches_focuses_its_query() {
+        let snapshot = Snapshot {
+            tabs: vec![tab(1, "a", true)],
+            panes: vec![pane(1, "a", Some(screen(8, 2, "")))],
+            palette: Some(palette("zzz", &[], None)),
+        };
+        let tree = accesskit_consumer::Tree::new(build("Ultty", &snapshot), true);
+        let focus = tree.state().focus().expect("a focused node");
+        assert_eq!(focus.role(), Role::SearchInput);
+        assert_eq!(focus.value().as_deref(), Some("zzz"));
+    }
+
+    #[test]
+    fn closing_the_palette_returns_focus_to_the_pane() {
+        let snapshot = Snapshot {
+            tabs: vec![tab(1, "a", true)],
+            panes: vec![pane(1, "a", Some(screen(8, 2, "")))],
+            palette: None,
+        };
+        let update = build("Ultty", &snapshot);
+        assert_eq!(update.focus, pane_node_id(1));
+        assert!(!update
+            .nodes
+            .iter()
+            .any(|(_, node)| node.role() == Role::Dialog));
     }
 }
