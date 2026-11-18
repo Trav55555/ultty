@@ -43,11 +43,9 @@ MSRV was raised to 1.89 for `notify-rust` 4.18.2, and is now 1.90 because
 `RUSTSEC-2024-0436` (`paste`), `RUSTSEC-2026-0002` and `RUSTSEC-2026-0253`
 (`lru`), and `RUSTSEC-2026-0206` (`rustybuzz`), so those ignores are gone.
 
-`examples/porygon-tui` is excluded from the workspace, so `cargo audit` covers
-the workspace lockfile only. The `tokio-tungstenite` path above comes from
-`ulttui` itself, not from porygon-tui, so the exclusion does not change this
-table. Audit the standalone package separately with
-`cargo audit --file examples/porygon-tui/Cargo.lock` when it is released.
+Porygon's native client (porygon-tui), which kept its own lockfile, moved to
+the porygon-ai repository on 2026-11-18; audit its `Cargo.lock` there. The
+`tokio-tungstenite` path above comes from `ulttui` itself.
 
 ## Runtime hardening
 

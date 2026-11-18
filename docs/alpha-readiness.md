@@ -82,7 +82,7 @@ As of 2026-11-07:
   known limitations are in [CHANGELOG.md](../CHANGELOG.md).
 - **Dogfood**: the gates are met for maintainers running from source. Gitea
   CI runs fmt, clippy, tests, MSRV, the deep VT integrity property run, fuzz
-  smoke runs, a GUI smoke under Xvfb, and a check of `examples/porygon-tui`.
+  smoke runs, and a GUI smoke under Xvfb.
 - **Public alpha**: these gates are still open.
   - The release workflow does not run tests before publishing, builds
     without `--locked`, and uses unpinned actions with write permission on

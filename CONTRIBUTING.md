@@ -36,13 +36,6 @@ cargo insta review                   # review snapshot diffs
 cargo bench -p ultty                 # benchmarks
 ```
 
-`examples/porygon-tui` is not a workspace member. Build it from its own
-manifest:
-
-```bash
-cargo build --manifest-path examples/porygon-tui/Cargo.toml
-```
-
 ## Before you open a pull request
 
 Run all three. CI runs the same commands, and warnings are errors.

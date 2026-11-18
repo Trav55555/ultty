@@ -263,7 +263,6 @@ go through `scripts/ci-runner-step.sh`, which keeps the pool's heartbeat.
 | `clippy` | `cargo clippy --workspace --all-targets -- -D warnings` |
 | `test` | `cargo test --workspace`, the ignored protocol roundtrip tests, and the snapshot tests |
 | `msrv` | `cargo check --workspace --all-targets` on the MSRV toolchain |
-| `porygon-tui` | `cargo check --locked` of `examples/porygon-tui`, which is outside the workspace |
 | `vt-integrity` | The deep property run of `cargo test -p ultty-vt --test integrity` |
 | `fuzz` | Short cargo-fuzz runs of the VT parser, protocol decoders, and in-band splitter |
 | `gui-smoke` | `scripts/ci-gui-smoke.sh`: Ultty under Xvfb with software Vulkan, driven by the live smokes |

@@ -96,16 +96,6 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
       - run: cargo check --locked --workspace --all-targets
 
-  porygon-tui:
-    name: porygon-tui
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - run: cargo check --locked --manifest-path examples/porygon-tui/Cargo.toml
-
   vt-integrity:
     name: VT integrity (deep property run)
     runs-on: ubuntu-latest

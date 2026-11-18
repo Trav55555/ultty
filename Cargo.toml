@@ -19,9 +19,6 @@ members = [
     "examples/agent-transcript",
     "tools/ultty-bench",
 ]
-# porygon-tui is a standalone client for a private daemon; it builds from its own
-# directory and is intentionally kept out of the workspace build and test set.
-exclude = ["examples/porygon-tui"]
 
 [workspace.package]
 version = "0.2.0"
