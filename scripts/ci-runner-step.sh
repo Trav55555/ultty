@@ -9,7 +9,12 @@
 # RUSTC_WRAPPER is sccache, compiles are cached in the shared S3 bucket under
 # SCCACHE_S3_KEY_PREFIX, with credentials exported from the task role. If the
 # sccache server will not start, the step compiles without the cache rather
-# than failing. scripts/ci-runner-step-test.sh tests this script.
+# than failing. The same goes for a server that passes that check and then dies
+# mid-step (job 7421: "sccache: error: Timed out waiting for server startup"
+# from a later rustc call): if the command fails and its output carries
+# sccache's own startup error, it is rerun once without the wrapper, reusing
+# the artifacts already built. Any other failure is not retried, and the exit
+# status is always the last run's. scripts/ci-runner-step-test.sh tests this script.
 set -euo pipefail
 
 ACTIVITY_SSM="${ULTTY_RUNNER_ACTIVITY_SSM:-/gitea/prod/ultty_runner_last_activity}"
@@ -57,4 +62,24 @@ if [ "${RUSTC_WRAPPER:-}" = sccache ]; then
   fi
 fi
 
-"$@"
+if [ "${RUSTC_WRAPPER:-}" != sccache ]; then
+  exec_status=0
+  "$@" || exec_status=$?
+  exit "$exec_status"
+fi
+
+# Tee the output so a failure can be matched against sccache's error lines.
+log="$(mktemp)"
+trap 'kill "$heartbeat_pid" 2>/dev/null || true; rm -f "$log"' EXIT
+set +e
+"$@" 2>&1 | tee "$log"
+exec_status="${PIPESTATUS[0]}"
+set -e
+if [ "$exec_status" -ne 0 ] &&
+  grep -Eq 'sccache: error: (Timed out waiting for server startup|Server startup failed)' "$log"; then
+  echo "::warning::sccache failed mid-step; rerunning without the cache"
+  unset RUSTC_WRAPPER
+  exec_status=0
+  "$@" || exec_status=$?
+fi
+exit "$exec_status"
