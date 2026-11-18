@@ -9,6 +9,17 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Added
 
+- Kitty graphics protocol, direct transmission (ADR 0026, slice 1): RGB,
+  RGBA and PNG images, optionally zlib-compressed and chunked; transmit,
+  place, delete (every `d=` value) and query, with kitty's replies and quiet
+  modes; z-index under backgrounds, under text and over text. Images scroll,
+  sit in scrollback, follow reflow and clear with the screen, in split panes
+  and screenshots too. The file, temporary-file and shared-memory media are
+  refused: Ultty never reads a file named in terminal output.
+  `images.storage_limit` (MiB per screen, default 256; 0 turns images off)
+  bounds sixel and Kitty images together. `ulttyctl images` lists
+  placements.
+
 - 88 more bundled colour themes (Catppuccin, Dracula, Gruvbox, Nord,
   Solarized, Tokyo Night, Rose Pine, Kanagawa, GitHub and others), your own
   in `~/.config/ultty/themes/`, and `ultty --list-themes`. `colors.theme` in

@@ -14,6 +14,8 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 ultty-protocol = { path = "../crates/ultty-protocol" }
 ultty-vt = { path = "../crates/ultty-vt" }
+base64 = "0.21"
+miniz_oxide = "0.8"
 
 [[bin]]
 name = "decode_app"
@@ -39,6 +41,20 @@ bench = false
 [[bin]]
 name = "in_band_split"
 path = "fuzz_targets/in_band_split.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kitty_graphics"
+path = "fuzz_targets/kitty_graphics.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "image_decode"
+path = "fuzz_targets/image_decode.rs"
 test = false
 doc = false
 bench = false

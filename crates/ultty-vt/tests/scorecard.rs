@@ -213,3 +213,24 @@ fn scorecard_sixel() {
     let term = run(b"\x1bPq#0;2;100;0;0#0~~~~\x1b\\");
     assert_eq!(term.images().images().count(), 1);
 }
+
+#[test]
+fn scorecard_kitty_graphics() {
+    let mut term = run(b"");
+    term.set_cell_pixel_size(10, 20);
+    // Detection: a query, then DA1; the query is answered first.
+    let got = replies(
+        &mut term,
+        b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c",
+    );
+    assert!(got.starts_with("\x1b_Gi=31;OK\x1b\\\x1b[?"), "{got:?}");
+    // A 1x1 PNG, transmitted and placed in one command (kitten icat's way).
+    let png = b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+    let mut command = b"\x1b_Ga=T,f=100,i=1;".to_vec();
+    command.extend_from_slice(png);
+    command.extend_from_slice(b"\x1b\\");
+    assert_eq!(replies(&mut term, &command), "\x1b_Gi=1;OK\x1b\\");
+    let placed = term.images().images().next().expect("placed");
+    assert_eq!((placed.width, placed.height), (1, 1));
+    assert!(placed.kitty.is_some());
+}
