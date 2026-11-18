@@ -146,6 +146,11 @@ jobs:
       - name: In-band stream splitter
         working-directory: fuzz
         run: ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run in_band_split -- -max_total_time=60 -max_len=4096
+      - name: Kitty graphics commands and image decoders
+        working-directory: fuzz
+        run: |
+          ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run kitty_graphics -- -max_total_time=60 -max_len=8192
+          ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run image_decode -- -max_total_time=60 -max_len=65536 -rss_limit_mb=4096
 
   # Instruction counts (callgrind) of the VT core, this commit against its
   # merge-base, built and measured in this job so toolchain and libc cancel

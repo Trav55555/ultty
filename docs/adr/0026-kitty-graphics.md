@@ -2,8 +2,11 @@
 
 ## Status
 
-**Proposed (not scheduled)** 2026-11-12. This records a possible feature for
-deciding later; slices 1 to 3 are not scheduled.
+**Accepted for slices 0 and 1** (proposed 2026-11-12; slice 1 scheduled
+2026-11-17). Slices 2 and 3 are not scheduled.
+
+Slice 1 is built; see "Slice 1 as built" below for what it settled and
+where it differs from the plan.
 
 Slice 0, the sixel fixes that matter whether or not the rest goes ahead, is
 done: #129, #130, #132, #133 and #134, merged 2026-11-13. "What Ultty has
@@ -204,7 +207,7 @@ quiet mode suppresses it.
 
 | `a=` | Meaning |
 |---|---|
-| `t` | Transmit and store. This is the default when `a` is absent; I could not confirm the default in the spec text I read, so check it. |
+| `t` | Transmit and store. This is the default when `a` is absent (spec, control data reference). |
 | `T` | Transmit and place. |
 | `p` | Place an image that was sent earlier. |
 | `d` | Delete. |
@@ -268,6 +271,68 @@ is `EINVAL`.
 
 Slice 1 also adds a scorecard row, "Kitty graphics (direct)", and
 `ulttyctl` exposure of placements for tests (see Testing).
+
+### Slice 1 as built
+
+Four stacked changes, #166 to #169: framing and refusals; decoding,
+storage and limits; placement, deletion and drawing; fuzzing, scorecard
+and docs. What they settled, and where the build differs from the plan
+above:
+
+- **Decoding lives in `ultty-vt`** (open question 1), in
+  `grid/graphics/decode.rs`, with `png` 0.17, `miniz_oxide` 0.8 and the
+  workspace `base64`. All three were already in the lock file and are pure
+  Rust with no I/O, so `ultty-vt` keeps its "no I/O" rule. A query must
+  decode to answer, so a decoder trait would have split one state machine
+  across two crates, and the conformance tests, proptests and both fuzz
+  targets would have needed `ultty` to reach it.
+- **Placements are pictures in the screen's existing store.** A Kitty
+  placement is a `TerminalImage` with `kitty: Some(KittyPlacement)` and a
+  `z`, beside sixel images in `ImageStore`, so slice 0's line pinning,
+  scrolling, scrollback eviction, reflow and clearing apply unchanged. The
+  decoded image lives once in the screen's `KittyImages`; its placements
+  share its pixels (`Arc<[u8]>`) and its texture. Sixel images are at
+  z = -1. Erases and printed text cut sixel images, as before, but not
+  Kitty placements; Kitty deletes leave sixel images alone.
+- **Region scrolls** follow slice 0: a placement whose top row leaves the
+  region is dropped rather than clipped. **IL and DL** move placements as
+  they move sixel images. **Reflow** moves a placement to the row its line
+  went to and keeps its column, as for sixel.
+- **ED 2** now drops only the pictures on the screen's rows; those wholly
+  in scrollback stay for ED 3. Before, ED 2 dropped every image, which was
+  wrong once slice 0 put images in scrollback.
+- **Cell size changes** (open question 4): a placement keeps its cell span.
+  Its drawn rectangle is stored in cells (`dest`), so the picture scales
+  with the cells and text layout does not change.
+- **Layout.** Without `c` and `r` the image keeps its pixel size; with one,
+  the other follows the aspect ratio; with both it is letterboxed, as the
+  current spec says. `X`/`Y` are clamped inside the first cell. The cursor
+  moves right by the columns and down by the rows less one, and the screen
+  scrolls at the bottom margin, as kitty does.
+- **Chunking.** A transmit during an upload continues it when it carries no
+  key besides `a`, `m`, `q`, `i`, `I` and `p` and names the same image, as
+  in kitty. A command that describes a new image (`f`, `s`, `v`, ...) or
+  names another one starts afresh, so an upload a crashed client left
+  unfinished does not swallow the next program's image. A chunk with only
+  `m`/`q` and no upload in flight is dropped. The last chunk's `q` wins.
+- **Error codes** (open question 6) are kitty's, from `kitty/graphics.c`:
+  `EFBIG:Too much data` past 32 MiB, `ENODATA` for short data, `EINVAL`
+  for size mismatches and failed inflation, `EBADPNG` for bad PNG data,
+  `ENOENT` for a missing image, `ENOSPC` for an image larger than the
+  quota, `EILSEQ` reserved for orphan chunks. The texts are Ultty's fixed
+  strings.
+- **Feature queries** (open question 5) get `EINVAL`. The spec now says a
+  client must treat a reply without `e` as "not supported", so this is
+  safe.
+- **Images off.** With `images.storage_limit = 0` graphics commands get no
+  reply at all, so a "query, then DA1" probe sees no support and the
+  program falls back.
+- **Quota.** One per-screen quota covers sixel and Kitty images. Eviction
+  is the order above; "oldest" is creation order for both kinds.
+- **Not built in slice 1:** the accessibility node per placement (open
+  question 7 stays open), the `kitty_image_1080p_placed` and
+  `kitty_quota_churn` memory bench cases, and `scripts/e2e/kitty-graphics.sh`
+  with pixel sampling. The smoke check was done by hand (see the PR).
 
 ### Slice 2: Unicode placeholders
 
@@ -636,26 +701,24 @@ prototype. Each slice also needs `cargo test --workspace`, clippy with
 
 ## Open questions
 
-1. **Where decoding lives.** In `ultty-vt` with `png` and `miniz_oxide`,
-   which is simpler and fully fuzzable there, or behind a trait that
-   `ultty` provides, which keeps `ultty-vt`'s dependencies at four?
+1. **Where decoding lives.** *Settled in slice 1: in `ultty-vt`* (see
+   "Slice 1 as built").
 2. **Process-wide cap.** Should there be a cap across all panes (for
    example 1 GiB), on top of the per-screen quota? Otherwise ten panes
    could hold 5 GiB.
 3. **Copying placeholder cells** (slice 2). Copy them as nothing, as
    spaces, or as the raw characters? Raw is what tmux will see anyway.
    I have not checked what kitty does.
-4. **Cell size changes.** Should a placement keep its cell span, or keep
-   its pixel size and recompute the span? Check kitty's and Ghostty's
-   behaviour before building.
-5. **Feature queries (`e=`).** Do clients that send them handle `EINVAL`
-   from a terminal without the feature, or do they expect a particular
-   reply? I am not sure, from the spec text alone.
-6. **Error codes.** The spec text I read names `ENOENT`, `EINVAL`,
-   `EBADF`, `ETOODEEP`, `ECYCLE`, `ENOPARENT` and (for composition)
-   `ENOSPC`. I did not confirm the codes for "data too large" or "not
-   enough data" (`EFBIG`, `ENODATA` are guesses). Use kitty's actual
-   strings.
+4. **Cell size changes.** *Settled in slice 1: a placement keeps its cell
+   span* and the picture scales with it. kitty instead recomputes the span
+   of auto-sized placements from pixels (`grman_rescale`); revisit if a
+   program depends on that.
+5. **Feature queries (`e=`).** *Settled in slice 1: `EINVAL`.* The spec
+   says a reply without `e` means the action or the feature queries are
+   not supported.
+6. **Error codes.** *Settled in slice 1:* kitty's codes, checked in
+   `kitty/graphics.c` (`EFBIG`, `ENODATA`, `EBADPNG`, `EILSEQ` and the
+   others).
 7. **Accessibility.** Is an unlabelled `Image` node per placement useful
    to screen reader users, or noise? ADR 0021's review could decide.
 8. **Decode stalls.** Is a stall of tens of milliseconds on the parse

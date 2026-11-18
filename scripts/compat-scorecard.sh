@@ -30,7 +30,7 @@ colour_scheme_updates|Theme change reports (mode 2031)|Programs restyling when t
 colour_queries|Colour queries (OSC 10, 11)|Choosing a light or dark palette at start|Reports the live theme
 terminal_name|Terminal name (XTVERSION)|Detecting the terminal without guessing from TERM|
 sixel|Sixel images|Inline images and plots|
-kitty_graphics|Kitty graphics protocol|Inline images in programs that only speak kitty's protocol|Use Sixel
+kitty_graphics|Kitty graphics protocol (direct transmission)|Inline images in programs that only speak kitty's protocol: kitten icat, yazi, timg, chafa|RGB, RGBA and PNG, zlib, chunked; place, delete, query, z-index. File, temp-file and shared-memory media are refused; no Unicode placeholders or animation yet
 EOF
 )
 
