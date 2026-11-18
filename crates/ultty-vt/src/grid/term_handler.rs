@@ -909,11 +909,13 @@ impl<'a> TerminalHandler<'a> {
             id,
             width,
             height,
-            data: pixels,
+            data: pixels.into(),
             start_col,
             line,
             cell_width,
             cell_height,
+            z: crate::grid::SIXEL_Z,
+            kitty: None,
         };
 
         tracing::debug!(

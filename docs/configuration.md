@@ -232,6 +232,21 @@ How many lines each pane keeps after they scroll off the top, up to
 the new value to open panes as well; lowering it drops their oldest lines. The
 alternate screen, which full-screen programs use, has no scrollback.
 
+## Images
+
+```toml
+[images]
+storage_limit = 256
+```
+
+How much decoded image memory, in MiB, each screen of a pane may hold for
+sixel and Kitty graphics images together. Each pane has two screens (main and
+alternate), so a pane can hold up to twice this. Past the limit the oldest
+images are evicted, those no longer on screen first. `0` turns images off:
+both protocols are ignored, and Kitty graphics queries get no reply, so
+programs fall back to text. A config reload applies the new value to open
+panes as well.
+
 ## When a program exits
 
 ```toml

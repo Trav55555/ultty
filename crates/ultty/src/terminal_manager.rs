@@ -398,6 +398,9 @@ pub struct TerminalManager {
     theme_colors: ThemeColors,
     /// Lines of scrollback each terminal keeps (`behavior.scrollback_lines`).
     scrollback_lines: usize,
+    /// Image bytes each screen of a terminal may hold
+    /// (`images.storage_limit`).
+    image_storage_limit: usize,
     /// Whether a pane closes when its program exits
     /// (`behavior.close_on_exit`). When false, the pane stays, showing its
     /// last output, until it is closed by hand.
@@ -455,6 +458,18 @@ impl TerminalManager {
         self.scrollback_lines = lines;
     }
 
+    /// Set how many decoded image bytes each screen of a terminal may hold,
+    /// for existing terminals and any created later; 0 turns images off.
+    pub fn set_image_storage_limit(&mut self, bytes: usize) {
+        for terminal in &self.terminals {
+            terminal
+                .event_loop
+                .terminal()
+                .set_image_storage_limit(bytes);
+        }
+        self.image_storage_limit = bytes;
+    }
+
     /// Set whether a pane closes when its program exits. When false,
     /// [`TerminalManager::cleanup_exited`] keeps exited panes and the window
     /// stays open until every pane has been closed by hand.
@@ -500,6 +515,7 @@ impl TerminalManager {
             let mut state = terminal.event_loop.terminal();
             state.set_theme_colors(self.theme_colors.clone());
             state.set_scrollback_limit(self.scrollback_lines);
+            state.set_image_storage_limit(self.image_storage_limit);
             if let Some(area) = self.pane_area {
                 let (width, height) = area.cell_pixel_size();
                 state.set_cell_pixel_size(width, height);
@@ -553,6 +569,7 @@ impl TerminalManager {
             waker: None,
             theme_colors: ThemeColors::default(),
             scrollback_lines: crate::grid::DEFAULT_SCROLLBACK,
+            image_storage_limit: crate::grid::MAX_IMAGE_STORE_BYTES,
             close_on_exit: true,
             inherit_working_directory: true,
             hostname: crate::inherit_dir::hostname(),

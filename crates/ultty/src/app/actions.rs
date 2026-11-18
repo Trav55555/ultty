@@ -219,6 +219,9 @@ impl App {
             .set_scrollback_lines(new_config.behavior.scrollback_lines);
         self.runtime
             .manager
+            .set_image_storage_limit(new_config.images.storage_limit_bytes());
+        self.runtime
+            .manager
             .set_close_on_exit(new_config.behavior.close_on_exit);
         self.runtime
             .manager

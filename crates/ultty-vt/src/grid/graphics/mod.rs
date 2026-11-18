@@ -6,7 +6,10 @@
 //! file, temporary-file and shared-memory media are refused with `EBADF`.
 
 pub mod command;
+pub mod decode;
 pub mod reply;
+pub mod store;
 
 pub use command::{Command, Verb};
 pub use reply::{Addressee, Error};
+pub use store::{KittyImage, KittyImages};

@@ -749,11 +749,13 @@ mod tests {
                 id: ImageId(0),
                 width: 1,
                 height: 1,
-                data: color.to_vec(),
+                data: color.to_vec().into(),
                 start_col: 0,
                 line: 0,
                 cell_width: 8,
                 cell_height: 3,
+                z: crate::grid::SIXEL_Z,
+                kitty: None,
             });
         }
         let a = TerminalSnapshot::capture(&a).unwrap().to_view().unwrap();
@@ -823,7 +825,7 @@ mod tests {
         // A complete attachment replacement keeps its pane/image identities,
         // but owns a fresh Terminal UID even when image dimensions stay equal.
         let mut replacement = TerminalSnapshot::capture(&a).unwrap();
-        replacement.main.images[0].data = vec![0, 255, 0, 255];
+        replacement.main.images[0].data = vec![0, 255, 0, 255].into();
         let updated = replacement.to_view().unwrap();
         assert_ne!(updated.uid(), a.uid());
         let updated_panes = [
