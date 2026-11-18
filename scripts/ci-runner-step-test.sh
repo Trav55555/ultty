@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run scripts/ci-runner-step.sh against fake sccache, aws and ssm-put commands
 # and check that a step still runs when the sccache server is slow to start
-# or never starts, that it keeps the cache when the server does come up, and
+# or never starts or dies mid-step, that it keeps the cache when the server does come up, and
 # that the step's exit status passes through.
 #
 #   scripts/ci-runner-step-test.sh [path/to/ci-runner-step.sh]
@@ -28,8 +28,17 @@ case "$1" in
     fi
     exit 0 ;;
 esac
-# Invoked as the rustc wrapper: fine once the server is up.
+# Invoked as the rustc wrapper: fails while the server is down, and its first
+# $SCCACHE_WRAP_FAILS calls fail even though the start check passed (a server
+# that died or restarted mid-build).
 [ "$n" -gt "${SCCACHE_FAILS:-0}" ] || exit 2
+wrap_file="$FAKE_STATE/sccache-wrapped"
+w=$(($(cat "$wrap_file" 2>/dev/null || echo 0) + 1))
+echo "$w" >"$wrap_file"
+if [ "$w" -le "${SCCACHE_WRAP_FAILS:-0}" ]; then
+  echo "sccache: error: Timed out waiting for server startup. Maybe the remote service is unreachable?" >&2
+  exit 2
+fi
 SH
 cat >"$work/bin/aws" <<'SH'
 #!/bin/sh
@@ -42,6 +51,8 @@ printf '#!/bin/sh\nexit 0\n' >"$work/bin/ssm-put"
 # A stand-in for cargo: runs the wrapper the way cargo would, if one is set.
 cat >"$work/bin/fake-cargo" <<'SH'
 #!/bin/sh
+echo run >>"$FAKE_STATE/cargo-runs"
+[ -z "${FAKE_CARGO_MSG:-}" ] || echo "$FAKE_CARGO_MSG" >&2
 if [ -n "${RUSTC_WRAPPER:-}" ]; then
   "$RUSTC_WRAPPER" rustc -vV || { echo "wrapper failed" >&2; exit 101; }
 fi
@@ -51,14 +62,16 @@ SH
 chmod 755 "$work/bin/"*
 
 failures=0
-# run_step NAME SCCACHE_FAILS CARGO_EXIT -> prints combined output, sets $status
+# run_step NAME SCCACHE_FAILS CARGO_EXIT [WRAP_FAILS] -> sets $out, $status, $runs
 run_step() {
   rm -rf "$work/state" && mkdir "$work/state"
   status=0
   out="$(PATH="$work/bin:$PATH" FAKE_STATE="$work/state" SCCACHE_FAILS="$2" \
+    SCCACHE_WRAP_FAILS="${4:-0}" \
     FAKE_CARGO_EXIT="$3" RUSTC_WRAPPER=sccache SCCACHE_REGION=us-east-1 \
     ULTTY_RUNNER_ACTIVITY_SSM=/test/activity \
     "$STEP_SH" fake-cargo 2>&1)" || status=$?
+  runs="$(wc -l <"$work/state/cargo-runs")"
 }
 expect() { # NAME CONDITION-DESCRIPTION TEST...
   local name="$1" what="$2"
@@ -86,6 +99,25 @@ expect "server never starts" "exit status 0" test "$status" -eq 0
 
 run_step "step fails" 0 3
 expect "step fails" "the step's exit status passes through" test "$status" -eq 3
+
+run_step "step fails" 0 3
+expect "step fails" "an ordinary failure is not retried" test "$runs" -eq 1
+
+FAKE_CARGO_MSG="error: could not compile (sccache: error: not ours)" \
+  run_step "ordinary compile error" 0 101
+expect "ordinary compile error" "not retried" test "$runs" -eq 1
+expect "ordinary compile error" "exit status 101" test "$status" -eq 101
+
+run_step "server dies mid-step" 0 0 1
+expect "server dies mid-step" "step is rerun once" test "$runs" -eq 2
+expect "server dies mid-step" "rerun has no cache" contains "wrapper=none"
+expect "server dies mid-step" "a warning says so" contains "::warning::sccache failed mid-step"
+expect "server dies mid-step" "exit status 0" test "$status" -eq 0
+
+# The rerun's own result is the step's result.
+run_step "mid-step failure, then real failure" 0 3 1
+expect "mid-step failure, then real failure" "exit status 3" test "$status" -eq 3
+expect "mid-step failure, then real failure" "rerun once only" test "$runs" -eq 2
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures check(s) failed" >&2
