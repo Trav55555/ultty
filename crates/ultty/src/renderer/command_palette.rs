@@ -16,6 +16,7 @@ use crate::command_palette::CommandPalette;
 const MAX_VISIBLE_ROWS: usize = 12;
 /// Widest the panel gets, in cells.
 const MAX_WIDTH_CELLS: f32 = 72.0;
+const PROMPT: &str = "> ";
 const PLACEHOLDER: &str = "Type a command";
 const NO_MATCHES: &str = "No matching commands";
 
@@ -90,6 +91,28 @@ impl PaletteLayout {
     }
 }
 
+/// Cells from the start of the panel's text area to the end of the typed
+/// query (where the caret and an input method's candidates belong), in a
+/// text area `inner_cells` wide, with `list_len` matches of which
+/// `visible_rows` show (a match count takes the right edge when the list
+/// scrolls). A long query shows only its tail.
+fn caret_cells(
+    query_chars: usize,
+    inner_cells: usize,
+    list_len: usize,
+    visible_rows: usize,
+    selected: usize,
+) -> usize {
+    let prompt = PROMPT.chars().count();
+    let count = if list_len > visible_rows {
+        format!("{} of {}", selected + 1, list_len).chars().count() + 1
+    } else {
+        0
+    };
+    let room = inner_cells.saturating_sub(prompt + count + 1);
+    prompt + query_chars.min(room)
+}
+
 /// The palette's colors, from the theme.
 struct PaletteColors {
     panel: Rgba,
@@ -124,6 +147,41 @@ impl PaletteColors {
 }
 
 impl Renderer {
+    /// The query caret's cell as `[x, y, width, height]` in window pixels,
+    /// for the input method; `None` while the palette is closed.
+    pub fn command_palette_caret_cell(&self, palette: &CommandPalette) -> Option<[f32; 4]> {
+        if !palette.is_open() {
+            return None;
+        }
+        let (cell_width, cell_height) = (self.cell_width, self.cell_height);
+        let window = (self.config.width as f32, self.config.height as f32);
+        let list_len = palette.rows().len();
+        let layout = PaletteLayout::new(
+            window,
+            self.tab_bar_height,
+            (cell_width, cell_height),
+            list_len,
+            palette.selected(),
+        );
+        let inner_cells = ((layout.width - 2.0 * layout.padding) / cell_width)
+            .floor()
+            .max(0.0) as usize;
+        let cells = caret_cells(
+            palette.query().chars().count(),
+            inner_cells,
+            list_len,
+            layout.visible_rows,
+            palette.selected(),
+        );
+        let text_offset = ((layout.row_height - cell_height) / 2.0).round();
+        Some([
+            layout.x + layout.padding + cells as f32 * cell_width,
+            layout.query_y + text_offset,
+            cell_width,
+            cell_height,
+        ])
+    }
+
     /// Background and text vertices of the open palette.
     pub(super) fn build_command_palette_vertices(
         &mut self,
@@ -189,7 +247,7 @@ impl Renderer {
         // count at the right when the list scrolls.
         let query_text_y = layout.query_y + text_offset;
         let prompt_cells = self.text_renderer.append_cell_text(
-            "> ",
+            PROMPT,
             inner_x,
             query_text_y,
             inner_cells,
@@ -359,6 +417,22 @@ mod tests {
     use super::*;
 
     const CELL: (f32, f32) = (9.0, 18.0);
+
+    #[test]
+    fn the_caret_follows_the_prompt_and_the_typed_query() {
+        // "> " is two cells; nothing typed puts the caret right after it.
+        assert_eq!(caret_cells(0, 60, 5, 5, 0), 2);
+        assert_eq!(caret_cells(3, 60, 5, 5, 0), 5);
+    }
+
+    #[test]
+    fn a_long_query_stops_the_caret_before_the_match_count() {
+        // 29 matches, 12 listed: "1 of 29" and a gap take 8 cells, the
+        // prompt 2, one is kept free.
+        assert_eq!(caret_cells(500, 40, 29, 12, 0), 2 + (40 - 2 - 8 - 1));
+        // Without a count the whole width but the free cell is available.
+        assert_eq!(caret_cells(500, 40, 5, 5, 0), 2 + (40 - 2 - 1));
+    }
 
     fn inside(layout: &PaletteLayout, (width, height): (f32, f32)) -> bool {
         layout.x >= 0.0

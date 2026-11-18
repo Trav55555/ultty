@@ -800,6 +800,17 @@ impl App {
             return;
         }
 
+        // The open palette takes the wheel: it moves the selection, and
+        // nothing behind the palette scrolls.
+        if self.command_palette.is_open() {
+            if let Some((key, steps)) = super::command_palette::wheel_key(lines) {
+                for _ in 0..steps {
+                    self.palette_input(key);
+                }
+            }
+            return;
+        }
+
         // Check if mouse tracking is enabled - send scroll events to PTY
         if self.terminal().is_some_and(|t| t.mouse_tracking_enabled()) {
             let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
