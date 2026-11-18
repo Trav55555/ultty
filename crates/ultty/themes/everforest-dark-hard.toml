@@ -6,7 +6,8 @@ name = "Everforest Dark Hard"
 foreground = "#d3c6aa"
 background = "#1e2326"
 cursor = "#e69875"
-selection = "#4c3743c0"
+selection = "#4c3743"
+selection_foreground = "#d3c6aa"
 
 [palette]
 black = "#7a8478"

@@ -6,7 +6,8 @@ name = "Material Darker"
 foreground = "#eeffff"
 background = "#212121"
 cursor = "#ffffff"
-selection = "#eeffffc0"
+selection = "#eeffff"
+selection_foreground = "#545454"
 
 [palette]
 black = "#000000"

@@ -2,11 +2,12 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: Apache-2.0. Source: https://github.com/folke/tokyonight.nvim
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: upstream selection foreground #3760bf dropped: low contrast.
 name = "TokyoNight Day"
 foreground = "#3760bf"
 background = "#e1e2e7"
 cursor = "#3760bf"
-selection = "#99a7dfc0"
+selection = "#99a7df"
 
 [palette]
 black = "#e9e9ed"

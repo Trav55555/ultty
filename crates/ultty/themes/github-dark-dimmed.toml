@@ -6,7 +6,8 @@ name = "GitHub Dark Dimmed"
 foreground = "#adbac7"
 background = "#22272e"
 cursor = "#539bf5"
-selection = "#adbac7c0"
+selection = "#adbac7"
+selection_foreground = "#22272e"
 
 [palette]
 black = "#545d68"

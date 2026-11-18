@@ -38,6 +38,35 @@ impl Rgba {
         [self.r, self.g, self.b, self.a]
     }
 
+    /// WCAG 2.x relative luminance of the colour's RGB (alpha ignored).
+    pub fn relative_luminance(&self) -> f32 {
+        fn channel(c: f32) -> f32 {
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * channel(self.r) + 0.7152 * channel(self.g) + 0.0722 * channel(self.b)
+    }
+
+    /// WCAG 2.x contrast ratio between two colours, from 1.0 (identical)
+    /// to 21.0 (black on white).
+    pub fn contrast_ratio(&self, other: &Rgba) -> f32 {
+        let (a, b) = (self.relative_luminance(), other.relative_luminance());
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// This colour drawn at its own alpha over an opaque `under`.
+    pub fn over(&self, under: &Rgba) -> Rgba {
+        let mix = |top: f32, bottom: f32| top * self.a + bottom * (1.0 - self.a);
+        Rgba::rgb(
+            mix(self.r, under.r),
+            mix(self.g, under.g),
+            mix(self.b, under.b),
+        )
+    }
+
     /// Convert from sRGB to linear color space.
     ///
     /// Colors from hex values (like #1D2021) are in sRGB space.
@@ -67,6 +96,15 @@ impl Default for Rgba {
     }
 }
 
+/// Contrast an unthemed cell's own text colour needs against the selection to
+/// stay as it is: WCAG AA for body text.
+pub const SELECTION_KEEP_CONTRAST: f32 = 4.5;
+
+/// Contrast the theme's foreground or background needs against the
+/// selection to stand in for an unreadable cell colour; below it black or
+/// white is used. WCAG AA for large text and UI.
+pub const SELECTION_FALLBACK_CONTRAST: f32 = 3.0;
+
 /// Terminal color scheme.
 ///
 /// Maps terminal colors to RGB values for rendering.
@@ -82,6 +120,9 @@ pub struct ColorScheme {
     pub cursor: Rgba,
     /// Selection background
     pub selection: Rgba,
+    /// Text colour inside a selection. `None` picks one per cell, see
+    /// [`ColorScheme::selection_text`].
+    pub selection_foreground: Option<Rgba>,
     /// Palette entries an application changed with OSC 4, by index. Only
     /// set on the per-terminal copy [`ColorScheme::for_palette`] makes.
     overrides: Option<Box<[Option<Rgba>; 256]>>,
@@ -96,15 +137,60 @@ impl Default for ColorScheme {
 impl ColorScheme {
     /// Selection background used for terminal-grid selections.
     ///
-    /// User themes control the hue, while the renderer keeps opacity inside a
-    /// legible range so selected text is neither faint nor fully obscured.
+    /// The theme controls the hue. Alpha is raised to at least 0.55 so a
+    /// faint selection stays visible; an opaque selection stays opaque,
+    /// which is what a theme's `selection_foreground` was chosen against.
     pub fn selection_background(&self) -> Rgba {
         Rgba::new(
             self.selection.r,
             self.selection.g,
             self.selection.b,
-            self.selection.a.clamp(0.55, 0.72),
+            self.selection.a.clamp(0.55, 1.0),
         )
+    }
+
+    /// The opaque colour a selected cell shows: the selection background
+    /// over the screen background.
+    pub fn selection_fill(&self) -> Rgba {
+        self.selection_background().over(&self.background)
+    }
+
+    /// Text colour for a selected cell whose own text colour is `cell_fg`.
+    ///
+    /// A `selection_foreground` from the theme or config always wins, as
+    /// Ghostty's `selection-foreground` does. Without one, `cell_fg` is kept
+    /// while it reads on the selection (at least
+    /// [`SELECTION_KEEP_CONTRAST`]:1), so syntax colours survive a
+    /// selection. Otherwise the theme's foreground or background, whichever
+    /// contrasts more, replaces it, or black or white when neither reaches
+    /// [`SELECTION_FALLBACK_CONTRAST`]. Ghostty, Alacritty and kitty swap the
+    /// cell's foreground and background instead; that is unreadable when the
+    /// selection colour is close to the text colour, which is what the
+    /// bundled themes ran into.
+    pub fn selection_text(&self, cell_fg: Rgba) -> Rgba {
+        if let Some(fg) = self.selection_foreground {
+            return fg;
+        }
+        let fill = self.selection_fill();
+        if cell_fg.contrast_ratio(&fill) >= SELECTION_KEEP_CONTRAST {
+            return cell_fg;
+        }
+        let (best, ratio) = [self.foreground, self.background]
+            .into_iter()
+            .map(|c| (c, c.contrast_ratio(&fill)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("two candidates");
+        if ratio >= SELECTION_FALLBACK_CONTRAST {
+            return best;
+        }
+        // Neither theme colour reads on this selection (TokyoNight Day's
+        // blue text on a blue selection): use black or white.
+        let (black, white) = (Rgba::rgb(0.0, 0.0, 0.0), Rgba::rgb(1.0, 1.0, 1.0));
+        if black.contrast_ratio(&fill) >= white.contrast_ratio(&fill) {
+            black
+        } else {
+            white
+        }
     }
 
     /// Dark color scheme (similar to many terminal defaults).
@@ -134,6 +220,7 @@ impl ColorScheme {
             background: Rgba::from_u8(0x1E, 0x1E, 0x1E),
             cursor: Rgba::from_u8(0xFF, 0xFF, 0xFF),
             selection: Rgba::new(0.3, 0.4, 0.6, 0.5),
+            selection_foreground: None,
             overrides: None,
         }
     }
@@ -162,6 +249,9 @@ impl ColorScheme {
             ),
             cursor: Rgba::from_u8(config.cursor.r, config.cursor.g, config.cursor.b),
             selection: Rgba::new(sr, sg, sb, sa),
+            selection_foreground: config
+                .selection_foreground
+                .map(|c| Rgba::from_u8(c.r, c.g, c.b)),
             overrides: None,
         }
     }
@@ -355,14 +445,50 @@ mod tests {
     }
 
     #[test]
-    fn selection_background_caps_opaque_alpha() {
+    fn selection_background_keeps_an_opaque_alpha() {
         let mut scheme = ColorScheme::dark();
         scheme.selection = Rgba::new(0.2, 0.3, 0.4, 1.0);
 
+        assert_eq!(scheme.selection_background(), Rgba::new(0.2, 0.3, 0.4, 1.0));
+    }
+
+    #[test]
+    fn contrast_ratio_matches_the_wcag_extremes() {
+        let black = Rgba::rgb(0.0, 0.0, 0.0);
+        let white = Rgba::rgb(1.0, 1.0, 1.0);
+        assert!((black.contrast_ratio(&white) - 21.0).abs() < 0.01);
+        assert!((white.contrast_ratio(&black) - 21.0).abs() < 0.01);
+        assert!((white.contrast_ratio(&white) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn selection_text_uses_the_configured_foreground() {
+        let mut scheme = ColorScheme::dark();
+        scheme.selection_foreground = Some(Rgba::from_u8(1, 2, 3));
         assert_eq!(
-            scheme.selection_background(),
-            Rgba::new(0.2, 0.3, 0.4, 0.72)
+            scheme.selection_text(scheme.foreground),
+            Rgba::from_u8(1, 2, 3)
         );
+    }
+
+    #[test]
+    fn selection_text_keeps_a_readable_cell_colour() {
+        let mut scheme = ColorScheme::dark();
+        scheme.selection = Rgba::rgb(0.0, 0.0, 0.0);
+        let cell = Rgba::rgb(1.0, 0.8, 0.2);
+        assert_eq!(scheme.selection_text(cell), cell);
+    }
+
+    #[test]
+    fn selection_text_replaces_a_colour_that_vanishes() {
+        // Nord: light text on a light selection.
+        let mut scheme = ColorScheme::dark();
+        scheme.background = Rgba::from_u8(0x2e, 0x34, 0x40);
+        scheme.foreground = Rgba::from_u8(0xd8, 0xde, 0xe9);
+        scheme.selection = Rgba::from_u8(0xec, 0xef, 0xf4);
+        let text = scheme.selection_text(scheme.foreground);
+        assert_eq!(text, scheme.background);
+        assert!(text.contrast_ratio(&scheme.selection_fill()) >= 4.5);
     }
 
     #[test]

@@ -2,11 +2,13 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/Everblush/everblush
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #141b1e to show against the background.
 name = "Everblush"
 foreground = "#dadada"
 background = "#141b1e"
 cursor = "#dadada"
-selection = "#141b1ec0"
+selection = "#2d3336"
+selection_foreground = "#dadada"
 
 [palette]
 black = "#232a2d"

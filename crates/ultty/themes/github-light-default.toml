@@ -6,7 +6,8 @@ name = "GitHub Light Default"
 foreground = "#1f2328"
 background = "#ffffff"
 cursor = "#0969da"
-selection = "#1f2328c0"
+selection = "#1f2328"
+selection_foreground = "#ffffff"
 
 [palette]
 black = "#24292f"

@@ -6,7 +6,8 @@ name = "Fairyfloss"
 foreground = "#f8f8f2"
 background = "#5a5475"
 cursor = "#f8f8f0"
-selection = "#8077a8c0"
+selection = "#8077a8"
+selection_foreground = "#f6e1ce"
 
 [palette]
 black = "#040303"

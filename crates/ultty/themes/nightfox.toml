@@ -6,7 +6,8 @@ name = "Nightfox"
 foreground = "#cdcecf"
 background = "#192330"
 cursor = "#cdcecf"
-selection = "#2b3b51c0"
+selection = "#2b3b51"
+selection_foreground = "#cdcecf"
 
 [palette]
 black = "#393b44"

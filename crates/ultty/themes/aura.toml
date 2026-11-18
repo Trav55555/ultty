@@ -2,11 +2,12 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/daltonmenezes/aura-theme
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: upstream selection foreground #edecee dropped: low contrast.
 name = "Aura"
 foreground = "#edecee"
 background = "#15141b"
 cursor = "#a277ff"
-selection = "#a277ffc0"
+selection = "#a277ff"
 
 [palette]
 black = "#110f18"

@@ -103,6 +103,11 @@ pub struct ColorConfig {
     /// Selection background color
     #[serde(deserialize_with = "deserialize_color_with_alpha")]
     pub selection: RgbaColor,
+    /// Text colour inside a selection. Unset, each selected cell keeps its
+    /// own colour while it is readable on the selection and otherwise takes
+    /// the foreground or background colour that is.
+    #[serde(deserialize_with = "deserialize_optional_color")]
+    pub selection_foreground: Option<RgbColor>,
     /// 16-color palette
     pub palette: PaletteConfig,
     /// Named color themes (can be cycled with keybinding)
@@ -126,6 +131,9 @@ pub struct ThemeConfig {
     pub cursor: RgbColor,
     #[serde(deserialize_with = "deserialize_color_with_alpha")]
     pub selection: RgbaColor,
+    /// See [`ColorConfig::selection_foreground`].
+    #[serde(deserialize_with = "deserialize_optional_color")]
+    pub selection_foreground: Option<RgbColor>,
     pub palette: Option<PaletteConfig>,
 }
 
@@ -137,6 +145,7 @@ impl Default for ThemeConfig {
             background: RgbColor::new(0x1E, 0x1E, 0x1E),
             cursor: RgbColor::new(0xFF, 0xFF, 0xFF),
             selection: RgbaColor::new(0x4D, 0x4D, 0x4D, 0x80),
+            selection_foreground: None,
             palette: None,
         }
     }
@@ -150,7 +159,8 @@ impl ThemeConfig {
             foreground: RgbColor::new(0x00, 0x00, 0x00),
             background: RgbColor::new(0xFF, 0xFF, 0xFF),
             cursor: RgbColor::new(0x00, 0x00, 0x00),
-            selection: RgbaColor::new(0xAD, 0xD8, 0xE6, 0x80),
+            selection: RgbaColor::new(0xA6, 0xCB, 0xE8, 0xFF),
+            selection_foreground: None,
             palette: Some(PaletteConfig::light()),
         }
     }
@@ -163,6 +173,7 @@ impl ThemeConfig {
             background: RgbColor::new(0x1E, 0x1E, 0x1E),
             cursor: RgbColor::new(0xFF, 0xFF, 0xFF),
             selection: RgbaColor::new(0x4D, 0x4D, 0x4D, 0x80),
+            selection_foreground: None,
             palette: None,
         }
     }
@@ -175,6 +186,7 @@ impl ThemeConfig {
             background: RgbColor::new(0x1D, 0x20, 0x21), // bg0_h (hard) - darkest
             cursor: RgbColor::new(0xFE, 0x80, 0x19),     // orange cursor
             selection: RgbaColor::new(0x45, 0x85, 0x88, 0x80), // blue selection
+            selection_foreground: None,
             palette: Some(PaletteConfig::gruvbox_dark()),
         }
     }
@@ -186,7 +198,8 @@ impl ThemeConfig {
             foreground: RgbColor::new(0xA9, 0xB1, 0xD6), // fg
             background: RgbColor::new(0x1A, 0x1B, 0x26), // bg - very dark
             cursor: RgbColor::new(0x7A, 0xA2, 0xF7),     // blue cursor
-            selection: RgbaColor::new(0x28, 0x2D, 0x42, 0xC0), // dark blue selection
+            selection: RgbaColor::new(0x33, 0x46, 0x7C, 0xFF), // tokyonight bg_visual, brightened
+            selection_foreground: None,
             palette: Some(PaletteConfig::tokyo_night()),
         }
     }
@@ -199,6 +212,7 @@ impl ThemeConfig {
             background: RgbColor::new(0x1E, 0x1E, 0x2E), // base
             cursor: RgbColor::new(0xF5, 0xE0, 0xDC),     // rosewater cursor
             selection: RgbaColor::new(0x45, 0x47, 0x5A, 0xC0), // surface1
+            selection_foreground: None,
             palette: Some(PaletteConfig::catppuccin_mocha()),
         }
     }
@@ -210,7 +224,8 @@ impl ThemeConfig {
             foreground: RgbColor::new(0xF2, 0xE8, 0xD5), // fg (brightened)
             background: RgbColor::new(0x2D, 0x35, 0x3B), // bg0 (medium)
             cursor: RgbColor::new(0xA7, 0xC0, 0x80),     // green cursor
-            selection: RgbaColor::new(0x3D, 0x48, 0x4D, 0xC0), // bg3
+            selection: RgbaColor::new(0x4A, 0x5F, 0x6B, 0xFF), // blue-grey, 1.9:1 on the background
+            selection_foreground: None,
             palette: Some(PaletteConfig::everforest_dark()),
         }
     }
@@ -227,6 +242,7 @@ impl Default for ColorConfig {
             background: default_theme.background,
             cursor: default_theme.cursor,
             selection: default_theme.selection,
+            selection_foreground: default_theme.selection_foreground,
             palette: PaletteConfig::everforest_dark(),
             themes,
             theme: Some("everforest-dark".to_string()),
@@ -300,6 +316,9 @@ impl ColorConfig {
         if raw.contains_key("selection") {
             base.selection = self.selection;
         }
+        if raw.contains_key("selection_foreground") {
+            base.selection_foreground = self.selection_foreground;
+        }
         if let Some(palette) = raw.get("palette").and_then(toml::Value::as_table) {
             let mut colors = base.palette.to_array();
             let explicit = self.palette.to_array();
@@ -321,6 +340,7 @@ impl ColorConfig {
         self.background = theme.background;
         self.cursor = theme.cursor;
         self.selection = theme.selection;
+        self.selection_foreground = theme.selection_foreground;
         if let Some(ref palette) = theme.palette {
             self.palette = palette.clone();
         }
@@ -1332,6 +1352,16 @@ where
 {
     let s = String::deserialize(deserializer)?;
     RgbColor::from_hex(&s).ok_or_else(|| serde::de::Error::custom("invalid color format"))
+}
+
+fn deserialize_optional_color<'de, D>(deserializer: D) -> Result<Option<RgbColor>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    RgbColor::from_hex(&s)
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom("invalid color format"))
 }
 
 // Custom deserializer for RgbaColor

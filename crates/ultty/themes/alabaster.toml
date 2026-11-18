@@ -6,7 +6,8 @@ name = "Alabaster"
 foreground = "#000000"
 background = "#f7f7f7"
 cursor = "#007acc"
-selection = "#bfdbfec0"
+selection = "#bfdbfe"
+selection_foreground = "#000000"
 
 [palette]
 black = "#000000"

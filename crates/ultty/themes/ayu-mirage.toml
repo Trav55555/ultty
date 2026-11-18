@@ -6,7 +6,8 @@ name = "Ayu Mirage"
 foreground = "#cccac2"
 background = "#1f2430"
 cursor = "#ffcc66"
-selection = "#409fffc0"
+selection = "#409fff"
+selection_foreground = "#1f2430"
 
 [palette]
 black = "#171b24"

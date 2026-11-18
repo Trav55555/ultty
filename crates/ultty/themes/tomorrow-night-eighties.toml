@@ -6,7 +6,8 @@ name = "Tomorrow Night Eighties"
 foreground = "#cccccc"
 background = "#2d2d2d"
 cursor = "#cccccc"
-selection = "#515151c0"
+selection = "#515151"
+selection_foreground = "#cccccc"
 
 [palette]
 black = "#000000"

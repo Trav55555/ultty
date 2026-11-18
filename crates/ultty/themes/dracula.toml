@@ -6,7 +6,8 @@ name = "Dracula"
 foreground = "#f8f8f2"
 background = "#282a36"
 cursor = "#f8f8f2"
-selection = "#44475ac0"
+selection = "#44475a"
+selection_foreground = "#ffffff"
 
 [palette]
 black = "#21222c"

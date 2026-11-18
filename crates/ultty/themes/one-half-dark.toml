@@ -6,7 +6,8 @@ name = "One Half Dark"
 foreground = "#dcdfe4"
 background = "#282c34"
 cursor = "#a3b3cc"
-selection = "#474e5dc0"
+selection = "#474e5d"
+selection_foreground = "#dcdfe4"
 
 [palette]
 black = "#282c34"

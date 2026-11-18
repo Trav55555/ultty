@@ -6,7 +6,8 @@ name = "Iceberg Light"
 foreground = "#33374c"
 background = "#e8e9ec"
 cursor = "#33374c"
-selection = "#33374cc0"
+selection = "#33374c"
+selection_foreground = "#e8e9ec"
 
 [palette]
 black = "#dcdfe7"

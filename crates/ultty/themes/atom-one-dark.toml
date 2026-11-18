@@ -6,7 +6,8 @@ name = "Atom One Dark"
 foreground = "#abb2bf"
 background = "#21252b"
 cursor = "#abb2bf"
-selection = "#323844c0"
+selection = "#323844"
+selection_foreground = "#abb2bf"
 
 [palette]
 black = "#21252b"

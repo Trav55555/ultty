@@ -6,7 +6,8 @@ name = "Sonokai"
 foreground = "#e2e2e3"
 background = "#2c2e34"
 cursor = "#e2e2e3"
-selection = "#414550c0"
+selection = "#414550"
+selection_foreground = "#e2e2e3"
 
 [palette]
 black = "#181819"

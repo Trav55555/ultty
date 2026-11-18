@@ -2,11 +2,12 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/jan-warchol/selenized
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #ece3cc to show against the background; upstream selection foreground #00978a dropped: low contrast.
 name = "Selenized Light"
 foreground = "#53676d"
 background = "#fbf3db"
 cursor = "#53676d"
-selection = "#ece3ccc0"
+selection = "#d9d4c0"
 
 [palette]
 black = "#ece3cc"

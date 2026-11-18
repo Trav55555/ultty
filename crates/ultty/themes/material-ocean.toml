@@ -2,11 +2,13 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/kaicataldo/material.vim
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #1f2233 to show against the background.
 name = "Material Ocean"
 foreground = "#8f93a2"
 background = "#0f111a"
 cursor = "#ffcc00"
-selection = "#1f2233c0"
+selection = "#26293a"
+selection_foreground = "#8f93a2"
 
 [palette]
 black = "#546e7a"

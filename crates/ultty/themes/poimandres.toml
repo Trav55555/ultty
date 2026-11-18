@@ -2,11 +2,12 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/drcmda/poimandres-theme
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: upstream selection foreground #ffffff dropped: low contrast.
 name = "Poimandres"
 foreground = "#a6accd"
 background = "#1a1e28"
 cursor = "#ffffff"
-selection = "#a6accdc0"
+selection = "#a6accd"
 
 [palette]
 black = "#1a1e28"

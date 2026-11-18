@@ -2,11 +2,13 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/mellow-theme/mellow.nvim
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #2a2a2d to show against the background.
 name = "Mellow"
 foreground = "#c9c7cd"
 background = "#161617"
 cursor = "#cac9dd"
-selection = "#2a2a2dc0"
+selection = "#2f2f32"
+selection_foreground = "#c1c0d4"
 
 [palette]
 black = "#27272a"

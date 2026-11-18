@@ -6,7 +6,8 @@ name = "Dawnfox"
 foreground = "#575279"
 background = "#faf4ed"
 cursor = "#575279"
-selection = "#d0d8d8c0"
+selection = "#d0d8d8"
+selection_foreground = "#575279"
 
 [palette]
 black = "#575279"

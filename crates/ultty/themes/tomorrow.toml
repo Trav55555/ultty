@@ -6,7 +6,8 @@ name = "Tomorrow"
 foreground = "#4d4d4c"
 background = "#ffffff"
 cursor = "#4d4d4c"
-selection = "#d6d6d6c0"
+selection = "#d6d6d6"
+selection_foreground = "#4d4d4c"
 
 [palette]
 black = "#000000"

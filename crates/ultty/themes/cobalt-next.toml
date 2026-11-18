@@ -6,7 +6,8 @@ name = "Cobalt Next"
 foreground = "#d7deea"
 background = "#162c35"
 cursor = "#ffc64c"
-selection = "#4c5b67c0"
+selection = "#4c5b67"
+selection_foreground = "#ffffff"
 
 [palette]
 black = "#000000"

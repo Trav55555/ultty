@@ -6,7 +6,8 @@ name = "Zenburned"
 foreground = "#f0e4cf"
 background = "#404040"
 cursor = "#f3eadb"
-selection = "#746956c0"
+selection = "#746956"
+selection_foreground = "#f0e4cf"
 
 [palette]
 black = "#404040"
