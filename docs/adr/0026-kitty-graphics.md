@@ -276,8 +276,8 @@ Slice 1 also adds a scorecard row, "Kitty graphics (direct)", and
 
 Four stacked changes, #166 to #169: framing and refusals; decoding,
 storage and limits; placement, deletion and drawing; fuzzing, scorecard
-and docs. What they
-settled, and where the build differs from the plan above:
+and docs. What they settled, and where the build differs from the plan
+above:
 
 - **Decoding lives in `ultty-vt`** (open question 1), in
   `grid/graphics/decode.rs`, with `png` 0.17, `miniz_oxide` 0.8 and the
