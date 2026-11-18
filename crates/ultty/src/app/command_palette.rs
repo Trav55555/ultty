@@ -51,6 +51,38 @@ impl App {
     }
 }
 
+/// Most list rows one wheel event moves, so a fast flick cannot spin the
+/// selection around the list many times.
+const MAX_WHEEL_STEPS: usize = 8;
+
+/// What `lines` of wheel scroll (positive: wheel rolled away from the user,
+/// toward the top of the list) does in the palette: a key and how many
+/// times to press it. The wheel moves the selection, which scrolls the list.
+pub(super) fn wheel_key(lines: i32) -> Option<(PaletteKey<'static>, usize)> {
+    let steps = (lines.unsigned_abs() as usize).min(MAX_WHEEL_STEPS);
+    match lines {
+        0 => None,
+        1.. => Some((PaletteKey::Up, steps)),
+        _ => Some((PaletteKey::Down, steps)),
+    }
+}
+
+/// The cell the input method should sit at: the palette's query caret while
+/// it is open, otherwise the terminal cursor.
+pub(super) fn ime_cell(
+    palette_caret: Option<[f32; 4]>,
+    cursor: Option<super::render::CellRect>,
+) -> Option<super::render::CellRect> {
+    palette_caret
+        .map(|[x, y, width, height]| super::render::CellRect {
+            x,
+            y,
+            width,
+            height,
+        })
+        .or(cursor)
+}
+
 /// What a key pressed with `mods` (and typing `text`) does in the palette.
 /// Ctrl+N and Ctrl+P move like Down and Up; other keys with Ctrl, Alt or
 /// Super type nothing.
@@ -95,6 +127,37 @@ mod tests {
 
     const NONE: ModifiersState = ModifiersState::empty();
     const CTRL: ModifiersState = ModifiersState::CONTROL;
+
+    #[test]
+    fn the_wheel_moves_the_selection_and_never_scrolls_past_a_flick() {
+        assert_eq!(wheel_key(0), None);
+        assert_eq!(wheel_key(2), Some((PaletteKey::Up, 2)));
+        assert_eq!(wheel_key(-3), Some((PaletteKey::Down, 3)));
+        assert_eq!(wheel_key(-500), Some((PaletteKey::Down, MAX_WHEEL_STEPS)));
+        assert_eq!(
+            wheel_key(i32::MIN),
+            Some((PaletteKey::Down, MAX_WHEEL_STEPS))
+        );
+    }
+
+    #[test]
+    fn the_input_method_follows_the_palette_caret_while_it_is_open() {
+        use crate::app::render::CellRect;
+        let cursor = Some(CellRect {
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        });
+        let caret = ime_cell(Some([10.0, 20.0, 9.0, 18.0]), cursor).unwrap();
+        assert_eq!(
+            (caret.x, caret.y, caret.width, caret.height),
+            (10.0, 20.0, 9.0, 18.0)
+        );
+        let back = ime_cell(None, cursor).unwrap();
+        assert_eq!((back.x, back.y), (1.0, 2.0));
+        assert!(ime_cell(None, None).is_none());
+    }
 
     #[test]
     fn arrows_and_ctrl_n_p_move() {
