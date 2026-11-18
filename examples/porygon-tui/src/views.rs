@@ -145,6 +145,12 @@ impl PorygonTui {
             .is_some_and(crate::approval_ui::runs_on_host)
         {
             3
+        } else if self
+            .pending_approval
+            .as_ref()
+            .is_some_and(crate::approval_ui::runs_contained)
+        {
+            1
         } else {
             0
         };
@@ -207,6 +213,8 @@ impl PorygonTui {
             let scope = &request.params["session_scope"];
             let location = if crate::approval_ui::runs_on_host(request) {
                 format!("{}.\n", crate::approval_ui::HOST_EXECUTION_LINE)
+            } else if crate::approval_ui::runs_contained(request) {
+                format!("{}.\n", crate::approval_ui::CONTAINED_EXECUTION_LINE)
             } else {
                 String::new()
             };
@@ -227,7 +235,7 @@ impl PorygonTui {
             durable_context
                 .and_then(|context| context.get("reason"))
                 .and_then(serde_json::Value::as_str),
-            Some("missing_policy_binding" | "host_execution_request")
+            Some("missing_policy_binding" | "host_execution_request" | "contained_project_work")
         ) {
             "this invocation only"
         } else {
@@ -249,6 +257,8 @@ impl PorygonTui {
                 crate::approval_ui::HOST_EXECUTION_LINE,
                 crate::approval_ui::host_justification(request).unwrap_or("(none given)")
             )
+        } else if crate::approval_ui::runs_contained(request) {
+            format!("{}\n", crate::approval_ui::CONTAINED_EXECUTION_LINE)
         } else {
             String::new()
         };
@@ -398,6 +408,11 @@ impl PorygonTui {
                     panel = panel.child(Text::new(line));
                 }
             }
+        } else if crate::approval_ui::runs_contained(request) {
+            panel = panel.child(RichText::new().span(
+                crate::approval_ui::CONTAINED_EXECUTION_LINE,
+                Style::new().fg(Theme::current().success),
+            ));
         }
         if self.approval_stage == 2 {
             return panel
@@ -405,25 +420,18 @@ impl PorygonTui {
                 .child(self.approval_feedback.clone())
                 .child(Text::new("Enter: reject and send | Esc: back"));
         }
-        let labels = if self.approval_session_available() {
-            vec![
-                "Allow once",
-                "Allow this command for this session",
-                if self.approval_supports("reject_feedback") {
-                    "Reject with instructions…"
-                } else {
-                    "Reject"
-                },
-            ]
+        use crate::approval_ui::{
+            APPROVE_ONCE_LABEL, APPROVE_SESSION_LABEL, REJECT_FEEDBACK_LABEL, REJECT_LABEL,
+        };
+        let reject = if self.approval_supports("reject_feedback") && !self.approval_is_stream {
+            REJECT_FEEDBACK_LABEL
         } else {
-            vec![
-                "Allow once",
-                if self.approval_supports("reject_feedback") && !self.approval_is_stream {
-                    "Reject with instructions…"
-                } else {
-                    "Reject"
-                },
-            ]
+            REJECT_LABEL
+        };
+        let labels = if self.approval_session_available() {
+            vec![APPROVE_ONCE_LABEL, APPROVE_SESSION_LABEL, reject]
+        } else {
+            vec![APPROVE_ONCE_LABEL, reject]
         };
         for (index, label) in labels.iter().enumerate() {
             let selected = self.approval_choice == index;
@@ -847,6 +855,18 @@ impl PorygonTui {
                     }
                     Key::Char('n') if self.approval_stage == 0 && !self.approval_in_flight => {
                         Some(Msg::ApprovalDecision(false))
+                    }
+                    // "Don't ask again" still shows its scope before it is sent.
+                    Key::Char('a')
+                        if self.approval_stage == 0
+                            && !self.approval_in_flight
+                            && self.approval_session_available() =>
+                    {
+                        self.approval_choice = 1;
+                        self.approval_stage = 1;
+                        self.approval_details = true;
+                        self.approval_scroll = 0;
+                        None
                     }
                     _ => None,
                 },
@@ -1326,8 +1346,8 @@ mod tests {
         assert!(screen.contains("Visible conversation"), "{screen}");
         assert!(screen.contains("Permission required"), "{screen}");
         assert!(screen.contains("--help"), "{screen}");
-        assert!(screen.contains("Allow once"), "{screen}");
-        assert!(screen.contains("Reject"), "{screen}");
+        assert!(screen.contains("> Yes"), "{screen}");
+        assert!(screen.contains("  No"), "{screen}");
         let native = ulttui::widgets::render_view_messages(&app.render_view()).unwrap();
         assert!(native.iter().any(|message| matches!(message, ultty_protocol::AppMessage::SetSemantics { semantics, .. } if semantics.modal && semantics.role == ultty_protocol::Role::Dialog)));
         assert!(native.iter().any(|message| matches!(
@@ -1404,9 +1424,11 @@ mod tests {
             "{screen}"
         );
         assert!(
-            screen.contains("Allow once") && screen.contains("Reject"),
+            screen.contains("> Yes")
+                && screen.contains("No, and tell Porygon what to do differently"),
             "{screen}"
         );
+        assert!(!screen.contains("Runs sandboxed"), "{screen}");
         assert!(details.contains("Runs on your machine"), "{details}");
         assert!(
             details.contains("Justification: ulttyctl drives your terminal"),
@@ -1421,8 +1443,9 @@ mod tests {
             "approval_options": ["once", "reject_feedback"],
         }));
         assert!(screen.contains("Permission required"), "{screen}");
-        assert!(screen.contains("Allow once"), "{screen}");
+        assert!(screen.contains("> Yes"), "{screen}");
         assert!(!screen.contains("Runs on your machine"), "{screen}");
+        assert!(!screen.contains("Runs sandboxed"), "{screen}");
         assert!(!screen.contains("Why:"), "{screen}");
         assert!(!details.contains("Runs on your machine"), "{details}");
 
@@ -1436,6 +1459,137 @@ mod tests {
             "{screen}"
         );
         assert!(screen.contains("Why: drive the terminal"), "{screen}");
+    }
+
+    fn contained_request(options: serde_json::Value) -> ApprovalRequest {
+        ApprovalRequest {
+            scope: Some("tool_call".into()),
+            decision_version: Some("v1".into()),
+            decision_stale: false,
+            id: "contained".into(),
+            tool_name: "run_argv".into(),
+            params: serde_json::json!({
+                "params": {"argv": ["pip", "download", "requests"]},
+                "reason": "contained_project_work",
+                "execution": "contained",
+                "approval_options": options,
+                "session_scope": {
+                    "conversation_id": "conversation-1",
+                    "project_root": "/project",
+                    "argv": ["pip", "download", "requests"],
+                    "execution": "contained",
+                },
+            }),
+            risk_score: -1.0,
+            reasoning: "review".into(),
+            blast_radius: "unknown".into(),
+            reversible: None,
+        }
+    }
+
+    fn screen_of(app: &mut PorygonTui) -> String {
+        app.update_scroll_dimensions();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| app.render_view().render_ansi(frame, frame.area()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn contained_approval_offers_the_three_choice_menu_and_says_it_is_sandboxed() {
+        let mut app = PorygonTui::new();
+        app.terminal_width = 80;
+        app.terminal_height = 24;
+        app.input.set_value("unsent draft");
+        app.pending_approval = Some(contained_request(serde_json::json!([
+            "once",
+            "reject_feedback",
+            "session"
+        ])));
+        app.show_approval_modal = true;
+        let screen = screen_of(&mut app);
+        assert!(screen.contains("pip"), "{screen}");
+        assert!(
+            screen.contains("Runs sandboxed (a disposable copy of the project, no network)"),
+            "{screen}"
+        );
+        assert!(!screen.contains("Runs on your machine"), "{screen}");
+        let yes = screen.find("> Yes").expect("Yes is first and selected");
+        let always = screen
+            .find("Yes, and don't ask again for this command")
+            .expect("session choice");
+        let no = screen
+            .find("No, and tell Porygon what to do differently")
+            .expect("reject with instructions");
+        assert!(yes < always && always < no, "{screen}");
+        let details = app
+            .approval_rows(app.pending_approval.as_ref().unwrap())
+            .join("\n");
+        assert!(details.contains("Runs sandboxed"), "{details}");
+        assert!(details.contains("Scope: this invocation only"), "{details}");
+
+        // 1. Yes: a one-time approval.
+        assert!(matches!(
+            app.handle_event(&composer_key(Key::Enter, false)),
+            Some(Msg::ApprovalDecision(true))
+        ));
+        // 2. Don't ask again: shows the sandboxed scope, then confirms.
+        assert!(app
+            .handle_event(&composer_key(Key::Char('a'), false))
+            .is_none());
+        assert_eq!(app.approval_stage, 1);
+        let scope = app
+            .approval_rows(app.pending_approval.as_ref().unwrap())
+            .join("\n");
+        assert!(scope.contains("Runs sandboxed"), "{scope}");
+        assert!(scope.contains("conversation-1") && scope.contains("download"));
+        app.handle_event(&composer_key(Key::End, false));
+        assert!(matches!(
+            app.handle_event(&composer_key(Key::Enter, false)),
+            Some(Msg::ApprovalSession)
+        ));
+        // 3. No: type what to do instead; the draft is untouched.
+        app.handle_event(&composer_key(Key::Escape, false));
+        app.approval_choice = 0;
+        app.handle_event(&composer_key(Key::Down, false));
+        app.handle_event(&composer_key(Key::Down, false));
+        assert!(app.handle_event(&composer_key(Key::Enter, false)).is_none());
+        assert_eq!(app.approval_stage, 2);
+        for key in "use the vendored wheel".chars() {
+            app.handle_event(&composer_key(Key::Char(key), false));
+        }
+        assert!(matches!(
+            app.handle_event(&composer_key(Key::Enter, false)),
+            Some(Msg::ApprovalRejectFeedback(text)) if text == "use the vendored wheel"
+        ));
+        assert_eq!(app.input.current_value(), "unsent draft");
+    }
+
+    #[test]
+    fn contained_approval_without_session_offers_yes_and_no_only() {
+        let mut app = PorygonTui::new();
+        app.terminal_width = 80;
+        app.terminal_height = 24;
+        app.pending_approval = Some(contained_request(serde_json::json!([
+            "once",
+            "reject_feedback"
+        ])));
+        app.show_approval_modal = true;
+        let screen = screen_of(&mut app);
+        assert!(screen.contains("Runs sandboxed"), "{screen}");
+        assert!(!screen.contains("don't ask again"), "{screen}");
+        assert!(app
+            .handle_event(&composer_key(Key::Char('a'), false))
+            .is_none());
+        assert_eq!(app.approval_stage, 0);
     }
 
     #[test]
