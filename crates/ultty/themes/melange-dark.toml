@@ -6,7 +6,8 @@ name = "Melange Dark"
 foreground = "#ece1d7"
 background = "#292522"
 cursor = "#ece1d7"
-selection = "#ece1d7c0"
+selection = "#ece1d7"
+selection_foreground = "#403a36"
 
 [palette]
 black = "#34302c"

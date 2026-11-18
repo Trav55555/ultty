@@ -6,7 +6,8 @@ name = "Nordfox"
 foreground = "#cdcecf"
 background = "#2e3440"
 cursor = "#cdcecf"
-selection = "#3e4a5bc0"
+selection = "#3e4a5b"
+selection_foreground = "#cdcecf"
 
 [palette]
 black = "#3b4252"

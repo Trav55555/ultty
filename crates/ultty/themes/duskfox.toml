@@ -6,7 +6,8 @@ name = "Duskfox"
 foreground = "#e0def4"
 background = "#232136"
 cursor = "#e0def4"
-selection = "#433c59c0"
+selection = "#433c59"
+selection_foreground = "#e0def4"
 
 [palette]
 black = "#393552"

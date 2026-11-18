@@ -6,7 +6,8 @@ name = "Challenger Deep"
 foreground = "#cbe1e7"
 background = "#1e1c31"
 cursor = "#fbfcfc"
-selection = "#cbe1e7c0"
+selection = "#cbe1e7"
+selection_foreground = "#1e1c31"
 
 [palette]
 black = "#141228"

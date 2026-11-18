@@ -2,11 +2,13 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/robb0wen/synthwave-vscode
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #181521 to show against the background.
 name = "Synthwave Everything"
 foreground = "#f0eff1"
 background = "#2a2139"
 cursor = "#72f1b8"
-selection = "#181521c0"
+selection = "#3a3742"
+selection_foreground = "#f0eff1"
 
 [palette]
 black = "#fefefe"

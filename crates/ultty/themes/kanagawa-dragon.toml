@@ -6,7 +6,8 @@ name = "Kanagawa Dragon"
 foreground = "#c5c9c5"
 background = "#181616"
 cursor = "#c8c093"
-selection = "#c5c9c5c0"
+selection = "#c5c9c5"
+selection_foreground = "#181616"
 
 [palette]
 black = "#0d0c0c"

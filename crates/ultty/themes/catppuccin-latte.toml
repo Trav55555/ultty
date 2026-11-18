@@ -2,11 +2,12 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/catppuccin/palette
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: upstream selection foreground #eff1f5 dropped: low contrast.
 name = "Catppuccin Latte"
 foreground = "#4c4f69"
 background = "#eff1f5"
 cursor = "#dc8a78"
-selection = "#dc8a78c0"
+selection = "#dc8a78"
 
 [palette]
 black = "#bcc0cc"

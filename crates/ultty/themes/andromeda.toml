@@ -6,7 +6,8 @@ name = "Andromeda"
 foreground = "#e5e5e5"
 background = "#262a33"
 cursor = "#f8f8f0"
-selection = "#5a5c62c0"
+selection = "#5a5c62"
+selection_foreground = "#ece7e7"
 
 [palette]
 black = "#000000"

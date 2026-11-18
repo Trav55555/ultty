@@ -6,7 +6,8 @@ name = "Catppuccin Macchiato"
 foreground = "#cad3f5"
 background = "#24273a"
 cursor = "#f4dbd6"
-selection = "#f4dbd6c0"
+selection = "#f4dbd6"
+selection_foreground = "#24273a"
 
 [palette]
 black = "#494d64"

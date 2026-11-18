@@ -6,7 +6,8 @@ name = "Zenwritten Dark"
 foreground = "#bbbbbb"
 background = "#191919"
 cursor = "#c9c9c9"
-selection = "#404040c0"
+selection = "#404040"
+selection_foreground = "#bbbbbb"
 
 [palette]
 black = "#191919"

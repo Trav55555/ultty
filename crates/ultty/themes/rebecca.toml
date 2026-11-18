@@ -6,7 +6,8 @@ name = "Rebecca"
 foreground = "#e8e6ed"
 background = "#292a44"
 cursor = "#b89bf9"
-selection = "#663399c0"
+selection = "#663399"
+selection_foreground = "#f4f2f9"
 
 [palette]
 black = "#12131e"

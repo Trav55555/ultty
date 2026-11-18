@@ -447,6 +447,23 @@ impl Renderer {
         self.pane_offset_x = 0.0;
         self.pane_offset_y = 0.0;
 
+        self.render_copy_mode_indicator(encoder, view, overlay);
+
+        if let Some(preedit) = overlay.ime_preedit {
+            self.render_ime_preedit(encoder, view, preedit);
+        }
+
+        self.render_modal_overlays(encoder, view, overlay);
+    }
+
+    /// Draw the copy-mode status line (mode, search prompt, `[n/m]`) over
+    /// the frame. Windows and screenshots both draw it here.
+    pub(super) fn render_copy_mode_indicator(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        overlay: &OverlayState,
+    ) {
         // Render vim mode indicator if in copy mode
         if let Some(copy_mode) = overlay.copy_mode {
             if copy_mode.is_active() {
@@ -548,12 +565,6 @@ impl Renderer {
                 }
             }
         }
-
-        if let Some(preedit) = overlay.ime_preedit {
-            self.render_ime_preedit(encoder, view, preedit);
-        }
-
-        self.render_modal_overlays(encoder, view, overlay);
     }
 
     /// Build background vertices with pane offset.

@@ -22,6 +22,16 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Changed
 
+- Selected text stays readable on every bundled theme. `colors.selection_foreground`
+  (and the theme key of the same name) sets the text colour in a selection; the
+  importer now carries each theme's own, and a selection too close to the
+  background is moved until it shows. Without one, a cell keeps its colour
+  while it reads on the selection and otherwise takes the foreground or
+  background that does. The default theme's selection is clearer, and an opaque
+  selection colour is no longer thinned to 72%.
+- A font family that is not installed, the default one on a fresh machine
+  included, is replaced by the system monospace font with one warning, so the
+  grid is never drawn in a proportional face.
 - **Breaking, `ulttui-lua`:** while an `input` with an `id` has focus, its
   editing keys (characters, arrows, Home, End, Backspace, Delete, Ctrl+A,
   E, K, U and W, Ctrl or Alt with the arrows) no longer arrive as `key`
@@ -167,6 +177,8 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Fixed
 
+- `ulttyctl screenshot` draws the copy-mode status line (mode, search prompt,
+  `[n/m]`) for a single-pane tab, as it already did for splits.
 - A Luau override file with a `widget` hook panicked every `ulttui` app
   on its first frame ("RefCell already mutably borrowed"): the runner
   registered focusable widgets while holding the focus manager, and the

@@ -6,7 +6,8 @@ name = "Snazzy"
 foreground = "#ebece6"
 background = "#1e1f29"
 cursor = "#e4e4e4"
-selection = "#81aec6c0"
+selection = "#81aec6"
+selection_foreground = "#000000"
 
 [palette]
 black = "#000000"

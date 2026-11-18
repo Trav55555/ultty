@@ -2,11 +2,13 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/icewind/everforest.iterm2
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #eaedc8 to show against the background.
 name = "Everforest Light Med"
 foreground = "#5c6a72"
 background = "#efebd4"
 cursor = "#f57d26"
-selection = "#eaedc8c0"
+selection = "#cbd0b5"
+selection_foreground = "#5c6a72"
 
 [palette]
 black = "#7a8478"

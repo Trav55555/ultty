@@ -6,7 +6,8 @@ name = "Gruvbox Material Light"
 foreground = "#654735"
 background = "#fbf1c7"
 cursor = "#654735"
-selection = "#654735c0"
+selection = "#654735"
+selection_foreground = "#fbf1c7"
 
 [palette]
 black = "#fbf1c7"

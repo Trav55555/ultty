@@ -2,11 +2,13 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/ramojus/mellifluous.nvim
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #2d2d2d to show against the background.
 name = "Mellifluous"
 foreground = "#dadada"
 background = "#1a1a1a"
 cursor = "#bfad9e"
-selection = "#2d2d2dc0"
+selection = "#323232"
+selection_foreground = "#c0af8c"
 
 [palette]
 black = "#1a1a1a"

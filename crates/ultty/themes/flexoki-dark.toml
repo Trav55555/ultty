@@ -6,7 +6,8 @@ name = "Flexoki Dark"
 foreground = "#cecdc3"
 background = "#100f0f"
 cursor = "#cecdc3"
-selection = "#403e3cc0"
+selection = "#403e3c"
+selection_foreground = "#cecdc3"
 
 [palette]
 black = "#100f0f"

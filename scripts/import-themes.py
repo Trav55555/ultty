@@ -68,9 +68,20 @@ PALETTE_NAMES = (
     "bright_cyan",
     "bright_white",
 )
-# Ultty draws selections as a translucent overlay and clamps the alpha to
-# 0.55-0.72, so a fixed 0xC0 keeps the upstream colour readable.
-SELECTION_ALPHA = "c0"
+
+# A selection has to be seen and its text has to be read. The Rust test
+# `bundled_themes_have_a_legible_selection` (crates/ultty/src/themes.rs)
+# holds every theme to the same two numbers; keep them in step.
+#
+# MIN_SELECTION_DISTINCT: WCAG contrast of the selection against the
+# background. 1.3:1 is the least that shows as a distinct band; below it
+# (Solarized is 1.15) the selection is barely there. It is deliberately far
+# under WCAG's 3:1 for UI components: the selection is a fill behind text,
+# not a control, and a 3:1 fill would hide the theme's own look.
+# MIN_SELECTION_TEXT: WCAG contrast of selected text, 3:1 (the AA floor for
+# large text and UI), the least that stays readable on a themed fill.
+MIN_SELECTION_DISTINCT = 1.3
+MIN_SELECTION_TEXT = 3.0
 
 
 class SchemeError(Exception):
@@ -87,7 +98,9 @@ class Scheme:
     background: str
     cursor: str
     selection: str
+    selection_foreground: str | None
     palette: list[str]
+    selection_note: str | None = None
 
 
 def slugify(name: str) -> str:
@@ -144,14 +157,71 @@ def parse_ghostty(text: str, name: str) -> dict:
     selection = parse_hex(
         keys.get("selection-background", foreground), f"{name} selection-background"
     )
+    selection_foreground = None
+    if "selection-foreground" in keys:
+        selection_foreground = parse_hex(
+            keys["selection-foreground"], f"{name} selection-foreground"
+        )
     return {
         "foreground": foreground,
         "background": background,
         "cursor": cursor,
-        "selection": selection + SELECTION_ALPHA,
+        "selection": selection,
+        "selection_foreground": selection_foreground,
         "palette": [palette[i] for i in range(16)],
         "meta": meta,
     }
+
+
+def _luminance(colour: str) -> float:
+    def channel(value: int) -> float:
+        c = value / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (int(colour[i : i + 2], 16) for i in (1, 3, 5))
+    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+
+def contrast(a: str, b: str) -> float:
+    """WCAG 2.x contrast ratio of two `#rrggbb` colours."""
+    la, lb = _luminance(a), _luminance(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+def mix(a: str, b: str, steps: int, of: int) -> str:
+    """`a` moved `steps`/`of` of the way to `b`, channel by channel."""
+    out = "#"
+    for i in (1, 3, 5):
+        x, y = int(a[i : i + 2], 16), int(b[i : i + 2], 16)
+        out += f"{x + ((y - x) * steps + of // 2) // of:02x}"
+    return out
+
+
+def legible_selection(scheme: Scheme) -> str | None:
+    """Make the selection visible and its text readable, deterministically.
+
+    Several upstream schemes pick a selection colour next to the background
+    (Solarized, Everblush, Hybrid, ...) or a selection foreground that reads
+    poorly on it. A selection that is too close to the background is moved
+    towards the theme's foreground, 1/32 at a time, until it shows. A
+    selection foreground below MIN_SELECTION_TEXT on the result is dropped:
+    Ultty then picks a readable text colour per cell. Returns a one-line note
+    of what changed, for the theme file, or None.
+    """
+    notes = []
+    if contrast(scheme.selection, scheme.background) < MIN_SELECTION_DISTINCT:
+        original = scheme.selection
+        for step in range(1, 33):
+            scheme.selection = mix(original, scheme.foreground, step, 32)
+            if contrast(scheme.selection, scheme.background) >= MIN_SELECTION_DISTINCT:
+                break
+        notes.append(f"selection moved from {original} to show against the background")
+    if scheme.selection_foreground and (
+        contrast(scheme.selection_foreground, scheme.selection) < MIN_SELECTION_TEXT
+    ):
+        notes.append(f"upstream selection foreground {scheme.selection_foreground} dropped: low contrast")
+        scheme.selection_foreground = None
+    return "; ".join(notes) or None
 
 
 def parse_licenses(text: str) -> dict[str, dict[str, str]]:
@@ -248,6 +318,7 @@ def build_schemes(
                 background=parsed["background"],
                 cursor=parsed["cursor"],
                 selection=parsed["selection"],
+                selection_foreground=parsed["selection_foreground"],
                 palette=parsed["palette"],
             )
         )
@@ -270,6 +341,8 @@ def build_schemes(
         for path in sorted(sources.iterdir()):
             if path.is_file() and not path.name.startswith("."):
                 add(path.name, slugify(path.name), path.read_text(encoding="utf-8"), None, None)
+    for scheme in schemes:
+        scheme.selection_note = legible_selection(scheme)
     slugs: dict[str, str] = {}
     for scheme in schemes:
         if scheme.slug in slugs:
@@ -288,11 +361,19 @@ def render_theme(scheme: Scheme) -> str:
         f"# Converted by scripts/import-themes.py from {UPSTREAM_NAME} ({UPSTREAM_URL}).",
         f"# Theme licence: {scheme.license}. Source: {scheme.source or 'not recorded'}",
         "# See THIRD_PARTY_THEMES.md in this directory.",
+    ]
+    if scheme.selection_note:
+        lines.append(f"# Selection: {scheme.selection_note}.")
+    lines += [
         f"name = {toml_string(scheme.name)}",
         f'foreground = "{scheme.foreground}"',
         f'background = "{scheme.background}"',
         f'cursor = "{scheme.cursor}"',
         f'selection = "{scheme.selection}"',
+    ]
+    if scheme.selection_foreground:
+        lines.append(f'selection_foreground = "{scheme.selection_foreground}"')
+    lines += [
         "",
         "[palette]",
     ]

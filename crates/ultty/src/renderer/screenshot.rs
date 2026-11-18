@@ -431,6 +431,7 @@ impl Renderer {
         );
 
         self.render_screenshot_overlays(&mut encoder, &view, terminal, overlay);
+        self.render_copy_mode_indicator(&mut encoder, &view, overlay);
         self.render_modal_overlays(&mut encoder, &view, overlay);
 
         let png_data = self.read_back_png(encoder, &texture)?;
@@ -551,6 +552,7 @@ impl Renderer {
         );
 
         self.render_screenshot_overlays(&mut encoder, &view, terminal, overlay);
+        self.render_copy_mode_indicator(&mut encoder, &view, overlay);
         self.render_modal_overlays(&mut encoder, &view, overlay);
 
         self.read_back_png(encoder, &texture)

@@ -6,7 +6,8 @@ name = "Melange Light"
 foreground = "#54433a"
 background = "#f1f1f1"
 cursor = "#54433a"
-selection = "#54433ac0"
+selection = "#54433a"
+selection_foreground = "#d9d3ce"
 
 [palette]
 black = "#e9e1db"

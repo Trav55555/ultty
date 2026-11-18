@@ -2,11 +2,12 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/raunofreiberg/vesper
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: upstream selection foreground #b9beb8 dropped: low contrast.
 name = "Vesper"
 foreground = "#ffffff"
 background = "#101010"
 cursor = "#acb1ab"
-selection = "#988049c0"
+selection = "#988049"
 
 [palette]
 black = "#101010"

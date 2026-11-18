@@ -2,11 +2,13 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/sainnhe/edge
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #e3eaf6 to show against the background.
 name = "Edge Light"
 foreground = "#4b505b"
 background = "#fafafa"
 cursor = "#3a8b84"
-selection = "#e3eaf6c0"
+selection = "#d5dce7"
+selection_foreground = "#45505b"
 
 [palette]
 black = "#fafafa"

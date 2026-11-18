@@ -6,7 +6,8 @@ name = "One Half Light"
 foreground = "#383a42"
 background = "#fafafa"
 cursor = "#a5b4e5"
-selection = "#bfceffc0"
+selection = "#bfceff"
+selection_foreground = "#383a42"
 
 [palette]
 black = "#383a42"
