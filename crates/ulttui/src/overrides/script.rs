@@ -126,6 +126,11 @@ pub struct OverrideScript {
     last_good: RefCell<HashMap<String, Option<WidgetPatch>>>,
     /// Luau time spent in this frame's `widget` calls.
     spent: Cell<Duration>,
+    /// Time one `widget` call may take (`CALL_BUDGET`; tests widen it).
+    call_budget: Cell<Duration>,
+    /// Luau time a frame may spend in `widget` calls (`FRAME_BUDGET`; tests
+    /// widen it).
+    frame_budget: Cell<Duration>,
     /// Number of `widget` calls made (for tests and measurements).
     calls: Cell<u64>,
     /// Whether a failing call has been logged for this version.
@@ -206,6 +211,8 @@ impl OverrideScript {
             frame: RefCell::default(),
             last_good: RefCell::default(),
             spent: Cell::default(),
+            call_budget: Cell::new(CALL_BUDGET),
+            frame_budget: Cell::new(FRAME_BUDGET),
             calls: Cell::default(),
             warned: Cell::default(),
         })
@@ -215,6 +222,14 @@ impl OverrideScript {
     pub(crate) fn begin_frame(&self) {
         self.frame.borrow_mut().clear();
         self.spent.set(Duration::ZERO);
+    }
+
+    /// Replace the call and frame budgets, so a test that counts calls does
+    /// not depend on how fast a loaded machine runs them.
+    #[cfg(test)]
+    fn set_budgets(&self, call: Duration, frame: Duration) {
+        self.call_budget.set(call);
+        self.frame_budget.set(frame);
     }
 
     /// Number of `widget` calls made so far.
@@ -245,14 +260,14 @@ impl OverrideScript {
             Some(Outcome::Failed) => return last_good(),
             None => {}
         }
-        if self.spent.get() >= FRAME_BUDGET {
+        if self.spent.get() >= self.frame_budget.get() {
             return last_good();
         }
         let started = Instant::now();
         self.calls.set(self.calls.get() + 1);
         let result = self
             .sandbox
-            .guarded(CALL_BUDGET, || {
+            .guarded(self.call_budget.get(), || {
                 let info = self.sandbox.lua().create_table()?;
                 info.raw_set("role", inputs.role)?;
                 info.raw_set("text", inputs.text.as_deref())?;
@@ -669,6 +684,12 @@ mod tests {
             }
             "#,
         );
+        // The default budgets are wall-clock (8 ms a frame); on a loaded
+        // machine 200 calls overrun them and the count below is wrong.
+        overrides
+            .script()
+            .unwrap()
+            .set_budgets(Duration::from_secs(10), Duration::from_secs(60));
         let view = (0..200).fold(Column::new(), |column, i| {
             column.child(Button::new(format!("item {i}")).id(format!("w{i}")))
         });

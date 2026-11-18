@@ -1950,6 +1950,9 @@ mod tests {
             use std::os::unix::process::CommandExt;
             let child = std::process::Command::new(program)
                 .args(args)
+                // A pipe held by the test, so `read` waits instead of seeing
+                // the end of an inherited stdin and exiting.
+                .stdin(std::process::Stdio::piped())
                 .process_group(group)
                 .spawn()
                 .expect("spawn group child");

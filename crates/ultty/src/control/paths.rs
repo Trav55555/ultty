@@ -22,7 +22,7 @@ const SOCKET_SUFFIX: &str = ".sock";
 
 /// The directory holding control sockets and tokens, created if needed.
 pub fn control_dir() -> io::Result<PathBuf> {
-    private_socket_dir(&std::env::temp_dir())
+    private_socket_dir(std::env::var_os("XDG_RUNTIME_DIR"), &std::env::temp_dir())
 }
 
 /// A control socket and the token file that authenticates to it.

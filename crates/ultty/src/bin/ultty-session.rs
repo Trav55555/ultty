@@ -69,7 +69,8 @@ fn main() -> anyhow::Result<()> {
             let owner = new_owner()?;
             let authority = Authority::new(&session, owner.clone())?;
             let control = HostControl::new(owner.clone())?;
-            let base = private_socket_dir(&std::env::temp_dir())?;
+            let base =
+                private_socket_dir(std::env::var_os("XDG_RUNTIME_DIR"), &std::env::temp_dir())?;
             ensure_private_dir(&base)?;
             let directory = NativeDirectory(base.join(format!("un-{}", &owner.epoch[..16])));
             ensure_private_dir(&directory.0)?;
