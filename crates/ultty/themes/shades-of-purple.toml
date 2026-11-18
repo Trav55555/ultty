@@ -2,11 +2,12 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/ahmadawais/shades-of-purple-iterm2
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: upstream selection foreground #c2c2c2 dropped: low contrast.
 name = "Shades Of Purple"
 foreground = "#ffffff"
 background = "#1e1d40"
 cursor = "#fad000"
-selection = "#b362ffc0"
+selection = "#b362ff"
 
 [palette]
 black = "#000000"

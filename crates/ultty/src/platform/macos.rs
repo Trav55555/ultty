@@ -14,7 +14,7 @@ impl Platform for MacosPlatform {
         let base = std::env::var_os("TMPDIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/tmp"));
-        private_socket_dir(&base)
+        private_socket_dir(std::env::var_os("XDG_RUNTIME_DIR"), &base)
     }
 
     fn spawn_shell() -> std::io::Result<Child> {

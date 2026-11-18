@@ -8,7 +8,9 @@ use super::powerline::is_powerline_triangle;
 use super::text_cache::{GridTextCache, GridTextKey};
 use super::{ColorScheme, Rgba, Vertex};
 use crate::config::FontConfig;
-use crate::grid::{Cell, CellFlags, Color, CursorShape, RowView, Terminal, UnderlineStyle};
+use crate::grid::{
+    Cell, CellFlags, Color, CursorShape, RowView, Selection, Terminal, UnderlineStyle,
+};
 use cosmic_text::{
     Attrs, Buffer, CacheKey, CacheKeyFlags, Family, Feature, FeatureTag, FontFeatures, FontSystem,
     Metrics, Shaping, Style, Weight,
@@ -169,7 +171,7 @@ fn could_ligate(text: &str) -> bool {
 ///
 /// Returns `(synthetic_bold, fake_italic)`. cosmic-text falls back to the
 /// nearest weight/style when the family lacks a bold or italic face, so the
-/// face it picked tells us whether to brighten the color (bold) or skew the
+/// face it picked tells us whether to emphasize the color (bold) or skew the
 /// glyph via [`CacheKeyFlags::FAKE_ITALIC`] (italic).
 fn synthesized_styles(style: CellStyle, face: Option<(Weight, Style)>) -> (bool, bool) {
     let has_bold_face = face.is_some_and(|(weight, _)| weight >= Weight::BOLD);
@@ -180,13 +182,17 @@ fn synthesized_styles(style: CellStyle, face: Option<(Weight, Style)>) -> (bool,
     )
 }
 
-/// Brighten a color for cells that asked for bold when no bold face exists.
-fn brighten(color: Rgba) -> Rgba {
+/// Emphasize a color for cells that asked for bold when no bold face
+/// exists: brighter on a dark background, darker on a light one, so bold
+/// text stands out from the background more than plain text does, not less.
+fn emphasize(color: Rgba, background: Rgba) -> Rgba {
     const LIFT: f32 = 0.3;
+    let luma = 0.2126 * background.r + 0.7152 * background.g + 0.0722 * background.b;
+    let target = if luma > 0.5 { 0.0 } else { 1.0 };
     Rgba::new(
-        color.r + (1.0 - color.r) * LIFT,
-        color.g + (1.0 - color.g) * LIFT,
-        color.b + (1.0 - color.b) * LIFT,
+        color.r + (target - color.r) * LIFT,
+        color.g + (target - color.g) * LIFT,
+        color.b + (target - color.b) * LIFT,
         color.a,
     )
 }
@@ -235,6 +241,30 @@ fn cell_foreground(cell: &Cell, color_scheme: &ColorScheme) -> Rgba {
     } else {
         fg
     }
+}
+
+/// Foreground of a cell's glyph: [`cell_foreground`], or the scheme's
+/// selection text colour for it when the cell is selected.
+fn text_color(cell: &Cell, color_scheme: &ColorScheme, selected: bool) -> Rgba {
+    let fg = cell_foreground(cell, color_scheme);
+    if selected {
+        color_scheme.selection_text(fg)
+    } else {
+        fg
+    }
+}
+
+fn is_selected(span: Option<(u16, u16)>, col: u16) -> bool {
+    span.is_some_and(|(first, last)| (first..=last).contains(&col))
+}
+
+/// The columns of screen row `row` inside `selection`, as (first, last).
+/// A selection covers one run of columns on each row.
+fn selected_span(selection: &Selection, row: u16, cols: u16) -> Option<(u16, u16)> {
+    let mut hits = (0..cols).filter(|&col| selection.contains(col, row));
+    let first = hits.next()?;
+    let last = hits.next_back().unwrap_or(first);
+    Some((first, last))
 }
 
 /// Color for the glyph under a block cursor: the cell's background, so the
@@ -342,8 +372,48 @@ struct MappedRange {
     face_styles: FaceStyles,
 }
 
+/// Whether any installed face is in `family` (names match without regard to
+/// case, as the lookups below do).
+fn family_installed(db: &cosmic_text::fontdb::Database, family: &str) -> bool {
+    db.faces().any(|face| {
+        face.families
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(family))
+    })
+}
+
+/// Whether a family can be drawn from the installed fonts.
+type Installed<'a> = &'a dyn Fn(&str) -> bool;
+
+/// `family` if it is installed, empty (the system monospace font, see
+/// [`font_attrs`]) otherwise, so a missing font never leaves the grid to
+/// cosmic-text's fallback, which may be proportional. Warns once per
+/// missing family through `warned`.
+fn installed_or_monospace(installed: Installed, family: &str, warned: &mut Vec<String>) -> String {
+    if family.is_empty() || installed(family) {
+        return family.to_owned();
+    }
+    if !warned.iter().any(|w| w.eq_ignore_ascii_case(family)) {
+        tracing::warn!("font family {family:?} is not installed; using the system monospace font");
+        warned.push(family.to_owned());
+    }
+    String::new()
+}
+
 impl FontSelection {
     fn new(db: &cosmic_text::fontdb::Database, config: &FontConfig) -> Self {
+        Self::resolve(db, config, &|family| family_installed(db, family))
+    }
+
+    /// The selection for `config`, where `installed` says which families
+    /// exist. A family that does not is replaced by the system monospace
+    /// font.
+    fn resolve(
+        db: &cosmic_text::fontdb::Database,
+        config: &FontConfig,
+        installed: Installed,
+    ) -> Self {
+        let mut warned = Vec::new();
         let pick = |configured: &String| {
             if configured.is_empty() {
                 config.family.clone()
@@ -356,7 +426,8 @@ impl FontSelection {
             pick(&config.bold_family),
             pick(&config.italic_family),
             pick(&config.bold_italic_family),
-        ];
+        ]
+        .map(|family| installed_or_monospace(installed, &family, &mut warned));
         let face_styles = std::array::from_fn(|i| FaceStyles::of_family(db, &families[i]));
         Self {
             families,
@@ -364,10 +435,13 @@ impl FontSelection {
             features: font_features(&crate::config::parse_font_features(&config.features)),
             codepoints: crate::config::parse_codepoint_map(&config.codepoint_map)
                 .into_iter()
-                .map(|(range, family)| MappedRange {
-                    range,
-                    face_styles: FaceStyles::of_family(db, &family),
-                    family,
+                .map(|(range, family)| {
+                    let family = installed_or_monospace(installed, &family, &mut warned);
+                    MappedRange {
+                        range,
+                        face_styles: FaceStyles::of_family(db, &family),
+                        family,
+                    }
                 })
                 .collect(),
         }
@@ -682,7 +756,7 @@ impl TextRenderer {
     /// Shape a single cell's text with the given style.
     ///
     /// Requests a bold/italic face when asked; when the family has none, the
-    /// result is flagged for the synthetic fallbacks (brightened color for
+    /// result is flagged for the synthetic fallbacks (emphasized color for
     /// bold, skewed glyph for italic).
     fn shape_cell(
         &mut self,
@@ -796,8 +870,8 @@ impl TextRenderer {
     }
 
     /// Rasterize (or fetch) `shaped` and emit its quad for the cell at
-    /// `cell`, in `color` (brightened for synthetic bold unless the cell is
-    /// under the block cursor).
+    /// `cell`, in `color` (emphasized against `background` for synthetic
+    /// bold unless the cell is under the block cursor).
     #[allow(clippy::too_many_arguments)]
     fn push_glyph(
         &mut self,
@@ -807,6 +881,7 @@ impl TextRenderer {
         cell_size: (f32, f32),
         render_offset: (f32, f32),
         color: Rgba,
+        background: Rgba,
         under_block_cursor: bool,
     ) {
         let Some(glyph_info) = self
@@ -820,9 +895,9 @@ impl TextRenderer {
         }
         let (x, y) = cell_glyph_origin(cell, cell_size, render_offset, shaped, &glyph_info);
         // Under the cursor the color is already the inverted background;
-        // brightening it would reduce contrast.
+        // emphasizing it would reduce contrast.
         let color = if shaped.synthetic_bold && !under_block_cursor {
-            brighten(color)
+            emphasize(color, background)
         } else {
             color
         };
@@ -1329,6 +1404,7 @@ impl TextRenderer {
             dims.rows,
         );
         let block_cursor = block_cursor_cell(terminal, cursor_blink_visible);
+        let selection = terminal.selection();
         let mut buffers: Option<(Buffer, Buffer)> = None;
 
         for row_idx in 0..dims.rows {
@@ -1339,7 +1415,8 @@ impl TextRenderer {
             let cursor_col = block_cursor
                 .filter(|&(_, cursor_row)| cursor_row == row_idx)
                 .map(|(col, _)| col);
-            if cache.is_current(row_idx, &row, cursor_col) {
+            let selected = selection.and_then(|sel| selected_span(sel, row_idx, dims.cols));
+            if cache.is_current(row_idx, &row, cursor_col, selected) {
                 continue;
             }
             let (buffer, run_buffer) = buffers
@@ -1352,13 +1429,14 @@ impl TextRenderer {
                 &row,
                 row_idx,
                 cursor_col,
+                selected,
                 color_scheme,
                 (cell_width, cell_height),
                 (x_offset, y_offset),
                 dims.cols,
             );
             debug_assert_eq!(vertices.len() % 4, 0, "grid geometry is quads");
-            cache.store(row_idx, &row, cursor_col, vertices);
+            cache.store(row_idx, &row, cursor_col, selected, vertices);
         }
 
         self.frame_quads = cache.vertices().map(<[Vertex]>::len).sum::<usize>() / 4;
@@ -1395,6 +1473,7 @@ impl TextRenderer {
         row: &RowView<'_>,
         row_idx: u16,
         cursor_col: Option<u16>,
+        selected: Option<(u16, u16)>,
         color_scheme: &ColorScheme,
         (cell_width, cell_height): (f32, f32),
         (x_offset, y_offset): (f32, f32),
@@ -1423,7 +1502,7 @@ impl TextRenderer {
             let base_color = if under_block_cursor {
                 cursor_glyph_color(&cell, color_scheme)
             } else {
-                cell_foreground(&cell, color_scheme)
+                text_color(&cell, color_scheme, is_selected(selected, col_idx))
             };
 
             // Decorations apply to blank cells and wide-char spacers too,
@@ -1496,7 +1575,7 @@ impl TextRenderer {
                             let color = if under_cursor {
                                 cursor_glyph_color(&glyph_cell, color_scheme)
                             } else {
-                                cell_foreground(&glyph_cell, color_scheme)
+                                text_color(&glyph_cell, color_scheme, is_selected(selected, col))
                             };
                             self.push_glyph(
                                 vertices,
@@ -1505,6 +1584,7 @@ impl TextRenderer {
                                 (cell_width, cell_height),
                                 (x_offset, y_offset),
                                 color,
+                                color_scheme.background,
                                 under_cursor,
                             );
                         }
@@ -1556,6 +1636,7 @@ impl TextRenderer {
                     (cell_width, cell_height),
                     (x_offset, y_offset),
                     base_color,
+                    color_scheme.background,
                     under_block_cursor,
                 );
             }
@@ -2251,7 +2332,7 @@ mod tests {
             synthesized_styles(bold_italic, Some((Weight::BOLD, Style::Italic))),
             (false, false)
         );
-        // Regular face matched: brighten and skew.
+        // Regular face matched: emphasize and skew.
         assert_eq!(
             synthesized_styles(bold_italic, Some((Weight::NORMAL, Style::Normal))),
             (true, true)
@@ -2271,14 +2352,28 @@ mod tests {
     }
 
     #[test]
-    fn brighten_moves_towards_white_without_overflow() {
+    fn emphasize_brightens_on_a_dark_background_without_overflow() {
+        let dark = Rgba::rgb(0.1, 0.1, 0.12);
         let dim = Rgba::new(0.2, 0.4, 0.0, 0.5);
-        let bright = brighten(dim);
+        let bright = emphasize(dim, dark);
         assert!(bright.r > dim.r && bright.g > dim.g && bright.b > dim.b);
         assert_eq!(bright.a, dim.a);
 
-        let white = brighten(Rgba::rgb(1.0, 1.0, 1.0));
+        let white = emphasize(Rgba::rgb(1.0, 1.0, 1.0), dark);
         assert_eq!(white, Rgba::rgb(1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn emphasize_darkens_on_a_light_background() {
+        // Brightening dark text on a light theme made synthetic bold paler
+        // than plain text.
+        let light = Rgba::rgb(0.98, 0.98, 0.98);
+        let text = Rgba::rgb(0.2, 0.2, 0.2);
+        let bold = emphasize(text, light);
+        assert!(bold.r < text.r && bold.g < text.g && bold.b < text.b);
+
+        let black = emphasize(Rgba::rgb(0.0, 0.0, 0.0), light);
+        assert_eq!(black, Rgba::rgb(0.0, 0.0, 0.0));
     }
 
     #[test]
@@ -2639,7 +2734,9 @@ mod tests {
     }
 
     fn selection_of(config: &FontConfig) -> FontSelection {
-        FontSelection::new(&cosmic_text::fontdb::Database::new(), config)
+        // Every family counts as installed: these tests are about what is
+        // asked of the font system, not about what is on this machine.
+        FontSelection::resolve(&cosmic_text::fontdb::Database::new(), config, &|_| true)
     }
 
     const ALL_STYLES: FaceStyles = FaceStyles {
@@ -2666,6 +2763,66 @@ mod tests {
         let db = cosmic_text::fontdb::Database::new();
         assert_eq!(FaceStyles::of_family(&db, "No Such Family"), ALL_STYLES);
         assert_eq!(FaceStyles::of_family(&db, ""), ALL_STYLES);
+    }
+
+    #[test]
+    fn a_missing_family_resolves_to_the_system_monospace_font() {
+        let config = FontConfig {
+            family: "No Such Mono".to_string(),
+            bold_family: "Present Bold".to_string(),
+            codepoint_map: vec![crate::config::CodepointMapEntry {
+                range: "U+E000-U+F8FF".to_string(),
+                family: "No Such Symbols".to_string(),
+            }],
+            ..FontConfig::default()
+        };
+        let db = cosmic_text::fontdb::Database::new();
+        let only_bold = |family: &str| family.eq_ignore_ascii_case("present bold");
+        let fonts = FontSelection::resolve(&db, &config, &only_bold);
+        assert_eq!(fonts.families[0], "", "regular family is replaced");
+        assert_eq!(fonts.families[1], "Present Bold", "an installed one stays");
+        assert_eq!(fonts.families[2], "", "italic follows the missing regular");
+        assert_eq!(fonts.codepoints[0].family, "");
+        assert_eq!(fonts.attrs(false, false).family, Family::Monospace);
+    }
+
+    #[test]
+    fn a_missing_family_draws_a_uniform_advance_grid() {
+        // The default family is missing on a fresh machine. The grid must
+        // still be monospace: narrow and wide glyphs advance the same.
+        let mut font_system = FontSystem::new();
+        if !font_system.db().faces().any(|face| face.monospaced) {
+            eprintln!("no monospace font installed; skipped");
+            return;
+        }
+        let missing = "Ultty Test Family That Is Not Installed";
+        assert!(!family_installed(font_system.db(), missing));
+        let fonts = FontSelection::new(
+            font_system.db(),
+            &FontConfig {
+                family: missing.to_string(),
+                ..FontConfig::default()
+            },
+        );
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(14.0, 18.0));
+        let mut advances = Vec::new();
+        for text in ["i", "l", ".", "M", "W", "m"] {
+            buffer.set_text(text, &fonts.attrs(false, false), Shaping::Advanced, None);
+            buffer.shape_until_scroll(&mut font_system, false);
+            let run = buffer.layout_runs().next().expect("a layout run");
+            let glyph = run.glyphs.first().expect("a glyph");
+            assert!(
+                font_system.is_monospace(glyph.font_id),
+                "{text:?} was drawn from a proportional face"
+            );
+            advances.push(glyph.w);
+        }
+        assert!(
+            advances
+                .windows(2)
+                .all(|pair| (pair[0] - pair[1]).abs() < 0.01),
+            "advances differ: {advances:?}"
+        );
     }
 
     #[test]

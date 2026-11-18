@@ -509,7 +509,9 @@ impl CopyMode {
                 self.search_regex = !self.search_regex;
                 CopyModeResult::Handled
             }
-            Key::Char(c) => {
+            // A modifier key pressed on its own (Shift for a capital, Ctrl
+            // before Ctrl+R) arrives as `'\0'`; it is not part of the query.
+            Key::Char(c) if !c.is_control() => {
                 self.search_query.push(*c);
                 CopyModeResult::Handled
             }
@@ -2074,6 +2076,27 @@ mod tests {
         assert!(m.search_regex());
         assert_eq!(m.search_query(), "");
         assert_eq!(m.status_line(), "/  [regex]");
+    }
+
+    #[test]
+    fn modifier_presses_in_the_prompt_add_nothing_to_the_query() {
+        // The app turns a bare Shift or Ctrl press into `Char('\0')`. Typed
+        // into the query, it made every regex search, and any query typed
+        // with Shift, find nothing.
+        let mut m = active_mode();
+        m.handle_key(&Key::Char('/'), Modifiers::NONE);
+        m.handle_key(&Key::Char('\0'), Modifiers::CTRL);
+        m.handle_key(&Key::Char('r'), Modifiers::CTRL);
+        for c in "ne".chars() {
+            m.handle_key(&Key::Char(c), Modifiers::NONE);
+        }
+        m.handle_key(&Key::Char('\0'), Modifiers::SHIFT);
+        m.handle_key(&Key::Char('+'), Modifiers::SHIFT);
+        assert_eq!(m.search_query(), "ne+");
+        assert!(matches!(
+            m.handle_key(&Key::Enter, Modifiers::NONE),
+            CopyModeResult::Search(query) if query == "ne+"
+        ));
     }
 
     #[test]

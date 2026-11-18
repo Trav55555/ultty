@@ -6,7 +6,8 @@ name = "GitHub Dark Default"
 foreground = "#e6edf3"
 background = "#0d1117"
 cursor = "#2f81f7"
-selection = "#e6edf3c0"
+selection = "#e6edf3"
+selection_foreground = "#0d1117"
 
 [palette]
 black = "#484f58"

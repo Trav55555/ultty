@@ -131,6 +131,11 @@ jobs:
       - name: In-band stream splitter
         working-directory: fuzz
         run: cargo +nightly fuzz run in_band_split -- -max_total_time=60 -max_len=4096
+      - name: Kitty graphics commands and image decoders
+        working-directory: fuzz
+        run: |
+          cargo +nightly fuzz run kitty_graphics -- -max_total_time=60 -max_len=8192
+          cargo +nightly fuzz run image_decode -- -max_total_time=60 -max_len=65536 -rss_limit_mb=4096
 
   gui-smoke:
     name: GUI smoke (Xvfb, software Vulkan)

@@ -6,7 +6,8 @@ name = "Kanagawa Wave"
 foreground = "#dcd7ba"
 background = "#1f1f28"
 cursor = "#dcd7ba"
-selection = "#dcd7bac0"
+selection = "#dcd7ba"
+selection_foreground = "#1f1f28"
 
 [palette]
 black = "#090618"

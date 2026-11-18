@@ -25,6 +25,12 @@ fn viewport_row(row: usize, scroll_offset: usize, viewport_rows: usize) -> Optio
     }
 }
 
+/// Width of the copy-mode status line, which is drawn in the terminal font
+/// one cell per column, so its background covers all of it.
+fn indicator_width(text: &str, cell_width: f32) -> f32 {
+    UnicodeWidthStr::width(text) as f32 * cell_width
+}
+
 impl Renderer {
     /// Build overlay vertex data (vim cursor, selection, URL underlines).
     pub(super) fn build_overlay_vertices(
@@ -316,8 +322,7 @@ impl Renderer {
 
         // Draw a semi-transparent background for the indicator
         let bg_color = Rgba::new(0.1, 0.1, 0.1, 0.9);
-        let text_width = text.len() as f32 * self.cell_width * 0.6; // Approximate width
-        let bg_width = text_width + padding * 2.0;
+        let bg_width = indicator_width(&text, self.cell_width) + padding * 2.0;
         let bg_height = self.cell_height + padding;
 
         self.emit_rect(
@@ -805,6 +810,15 @@ impl Renderer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_indicator_background_covers_the_whole_status_line() {
+        // It was sized at 0.6 cells per character, so the search query and
+        // `[n/m]` count were drawn over the shell's text beyond it.
+        let status = "-- NORMAL --  needle  [3/3]";
+        assert_eq!(super::indicator_width(status, 9.0), 27.0 * 9.0);
+        assert_eq!(super::indicator_width("/ 日本", 10.0), 60.0);
+    }
+
     #[test]
     fn viewport_row_skips_rows_outside_the_viewport() {
         assert_eq!(super::viewport_row(10, 10, 24), Some(0));

@@ -6,7 +6,8 @@ name = "Horizon"
 foreground = "#d5d8da"
 background = "#1c1e26"
 cursor = "#6c6f93"
-selection = "#6c6f93c0"
+selection = "#6c6f93"
+selection_foreground = "#1c1e26"
 
 [palette]
 black = "#000000"

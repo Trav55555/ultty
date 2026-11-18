@@ -2,11 +2,13 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/w0ng/vim-hybrid
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #1e1f22 to show against the background.
 name = "Hybrid"
 foreground = "#b7bcba"
 background = "#161719"
 cursor = "#b7bcba"
-selection = "#1e1f22c0"
+selection = "#2c2e30"
+selection_foreground = "#b7bcba"
 
 [palette]
 black = "#2a2e33"

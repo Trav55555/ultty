@@ -23,7 +23,10 @@ impl App {
         // Where the cursor is, read before the frame is acquired and the
         // terminals are locked for drawing.
         let cursor_cell = self.cursor_cell_rect();
-        self.update_ime_cursor_area(cursor_cell);
+        let palette_caret = self
+            .renderer
+            .command_palette_caret_cell(&self.command_palette);
+        self.update_ime_cursor_area(super::command_palette::ime_cell(palette_caret, cursor_cell));
 
         // Acquire the frame before locking any terminal: this can block
         // until the next vsync, and the terminals' I/O threads must keep
@@ -387,10 +390,10 @@ pub(super) fn pane_draws<'a>(
 /// A cell's rectangle in window pixels.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CellRect {
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
+    pub(super) x: f32,
+    pub(super) y: f32,
+    pub(super) width: f32,
+    pub(super) height: f32,
 }
 
 /// Lock every pane of the active tab once, paired with its rectangle and

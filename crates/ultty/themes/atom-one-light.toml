@@ -2,11 +2,13 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/atom/atom/tree/master/packages/one-light-ui
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #d0dffc to show against the background.
 name = "Atom One Light"
 foreground = "#2a2c33"
 background = "#f9f9f9"
 cursor = "#bbbbbb"
-selection = "#d0dffcc0"
+selection = "#cbd9f6"
+selection_foreground = "#2a2c33"
 
 [palette]
 black = "#000000"

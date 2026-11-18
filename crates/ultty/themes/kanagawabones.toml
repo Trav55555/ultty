@@ -6,7 +6,8 @@ name = "Kanagawabones"
 foreground = "#ddd8bb"
 background = "#1f1f28"
 cursor = "#e6e0c2"
-selection = "#49473ec0"
+selection = "#49473e"
+selection_foreground = "#ddd8bb"
 
 [palette]
 black = "#1f1f28"

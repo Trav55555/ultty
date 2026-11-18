@@ -203,6 +203,70 @@ pub fn format_listing(themes: &[(String, ThemeConfig)], swatches: bool) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ColorConfig;
+    use crate::renderer::ColorScheme;
+
+    /// WCAG contrast of the selection fill against the screen background.
+    /// 1.3:1 is the least that shows as a distinct band: Solarized, at 1.15,
+    /// is barely there. It is far under WCAG's 3:1 for UI components on
+    /// purpose, since a selection is a fill behind text and a 3:1 fill would
+    /// override the theme's own look. Keep in step with
+    /// `MIN_SELECTION_DISTINCT` in scripts/import-themes.py.
+    const MIN_SELECTION_DISTINCT: f32 = 1.3;
+
+    /// WCAG contrast of selected text on the selection fill. 3:1 is the AA
+    /// floor for large text and UI, and what ANSI colours reach on most
+    /// themes' own backgrounds. Keep in step with `MIN_SELECTION_TEXT` in
+    /// scripts/import-themes.py.
+    const MIN_SELECTION_TEXT: f32 = 3.0;
+
+    #[test]
+    fn bundled_themes_have_a_legible_selection() {
+        let registry = default_registry();
+        assert!(registry.len() >= 90, "only {} themes", registry.len());
+        let mut failures = Vec::new();
+        for (key, theme) in &registry {
+            let mut colors = ColorConfig::default();
+            colors.apply_theme(theme);
+            let scheme = ColorScheme::from_config(&colors);
+            let fill = scheme.selection_fill();
+
+            let distinct = fill.contrast_ratio(&scheme.background);
+            if distinct < MIN_SELECTION_DISTINCT {
+                failures.push(format!("{key}: selection vs background {distinct:.2}"));
+            }
+            // The default text colour and every palette colour, as a shell
+            // or a program can put any of them in a selection.
+            let texts = std::iter::once(("foreground".to_owned(), scheme.foreground)).chain(
+                scheme
+                    .named
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| (format!("ansi {i}"), *c)),
+            );
+            for (what, text) in texts {
+                let shown = scheme.selection_text(text);
+                let ratio = shown.contrast_ratio(&fill);
+                if ratio < MIN_SELECTION_TEXT {
+                    failures.push(format!("{key}: selected {what} text {ratio:.2}"));
+                }
+            }
+        }
+        failures.sort();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn a_theme_file_may_set_the_selection_foreground() {
+        let with = format!("selection_foreground = \"#abcdef\"\n{SAMPLE}");
+        let theme = parse_theme(&with).unwrap();
+        assert_eq!(
+            theme.selection_foreground,
+            Some(crate::config::RgbColor::new(0xab, 0xcd, 0xef))
+        );
+        assert_eq!(parse_theme(SAMPLE).unwrap().selection_foreground, None);
+        assert!(parse_theme(&format!("selection_foreground = \"nope\"\n{SAMPLE}")).is_err());
+    }
 
     const SAMPLE: &str = r##"
 name = "Mine"

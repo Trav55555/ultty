@@ -6,7 +6,8 @@ name = "Terafox"
 foreground = "#e6eaea"
 background = "#152528"
 cursor = "#e6eaea"
-selection = "#293e40c0"
+selection = "#293e40"
+selection_foreground = "#e6eaea"
 
 [palette]
 black = "#2f3239"

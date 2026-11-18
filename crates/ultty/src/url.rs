@@ -226,7 +226,16 @@ impl UrlDetector {
         if !is_openable(url) {
             return Err(UrlError::SchemeNotAllowed(url.to_string()));
         }
-        open::that(url).map_err(|e| UrlError::OpenFailed(e.to_string()))
+        #[cfg(feature = "gui")]
+        {
+            open::that(url).map_err(|e| UrlError::OpenFailed(e.to_string()))
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            Err(UrlError::OpenFailed(
+                "this build has no desktop opener (built without the gui feature)".to_string(),
+            ))
+        }
     }
 }
 

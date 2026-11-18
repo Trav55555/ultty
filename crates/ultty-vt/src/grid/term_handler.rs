@@ -83,6 +83,8 @@ impl<'a> TerminalHandler<'a> {
             // Protocol data for the embedder; it does not touch the grid.
             Action::InBand(_) => {}
 
+            Action::Graphics(string) => self.terminal.handle_graphics(&string),
+
             Action::InlineAnchor {
                 session_id,
                 surface_id,
@@ -161,10 +163,11 @@ impl<'a> TerminalHandler<'a> {
                 0 => self.terminal.buffer_mut().erase_below(),
                 1 => self.terminal.buffer_mut().erase_above(),
                 // Foot's `term_erase` drops the sixels on the erased rows
-                // too. Every image of the screen is on a visible row.
+                // too, and kitty the placements on screen; those in
+                // scrollback stay, for ED 3.
                 2 => {
                     self.terminal.grid_mut().clear();
-                    self.terminal.images_mut().clear();
+                    self.terminal.buffer_mut().clear_screen_images();
                 }
                 // ED 3 clears saved lines only (xterm).
                 3 => self.terminal.buffer_mut().clear_history(),
@@ -499,7 +502,7 @@ impl<'a> TerminalHandler<'a> {
             Action::ScreenAlignmentPattern => {
                 self.terminal.grid_mut().fill_with_char('E');
                 // Foot overwrites the whole screen's sixels here too.
-                self.terminal.images_mut().clear();
+                self.terminal.buffer_mut().clear_screen_images();
                 self.terminal.grid_mut().reset_scroll_region();
                 self.terminal.grid_mut().cursor_mut().position =
                     crate::grid::CursorPosition::origin();
@@ -814,7 +817,7 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.request_column_resize(columns);
                 // Clear the screen when switching column modes (per DECCOLM spec)
                 self.terminal.grid_mut().clear();
-                self.terminal.images_mut().clear();
+                self.terminal.buffer_mut().clear_screen_images();
                 self.terminal.grid_mut().cursor_mut().position =
                     crate::grid::CursorPosition::origin();
             }
@@ -907,11 +910,13 @@ impl<'a> TerminalHandler<'a> {
             id,
             width,
             height,
-            data: pixels,
+            data: pixels.into(),
             start_col,
             line,
             cell_width,
             cell_height,
+            z: crate::grid::SIXEL_Z,
+            kitty: None,
         };
 
         tracing::debug!(

@@ -2,11 +2,13 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/rose-pine/build
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #dfdad9 to show against the background.
 name = "Rose Pine Dawn"
 foreground = "#575279"
 background = "#faf4ed"
 cursor = "#575279"
-selection = "#dfdad9c0"
+selection = "#dbd6d6"
+selection_foreground = "#575279"
 
 [palette]
 black = "#f2e9e1"

@@ -6,7 +6,8 @@ name = "Doom One"
 foreground = "#bbc2cf"
 background = "#282c34"
 cursor = "#51afef"
-selection = "#42444bc0"
+selection = "#42444b"
+selection_foreground = "#bbc2cf"
 
 [palette]
 black = "#000000"

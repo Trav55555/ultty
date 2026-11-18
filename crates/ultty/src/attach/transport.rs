@@ -368,7 +368,7 @@ pub fn read_admin_token(session: &str) -> io::Result<Token> {
     Ok(Token::new(value.trim()))
 }
 fn session_directory() -> io::Result<PathBuf> {
-    let directory = private_socket_dir(&std::env::temp_dir())?;
+    let directory = private_socket_dir(std::env::var_os("XDG_RUNTIME_DIR"), &std::env::temp_dir())?;
     ensure_private_dir(&directory)?;
     Ok(directory)
 }

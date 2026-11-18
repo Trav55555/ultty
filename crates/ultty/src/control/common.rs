@@ -556,3 +556,34 @@ pub fn plain_search_match(
         context_after: text[byte_end..ctx_end].to_string(),
     }
 }
+
+/// The image placements on `terminal`'s active screen, oldest first, for
+/// `ControlRequest::Images`.
+pub fn image_placements(
+    terminal: &crate::grid::Terminal,
+) -> Vec<ultty_protocol::control::ImagePlacement> {
+    let buffer = terminal.buffer();
+    terminal
+        .images()
+        .oldest_first()
+        .map(|image| {
+            let (protocol, client, placement) = match &image.kitty {
+                Some(kitty) => ("kitty", kitty.client_id, kitty.placement_id),
+                None => ("sixel", 0, 0),
+            };
+            ultty_protocol::control::ImagePlacement {
+                protocol: protocol.to_string(),
+                image: client,
+                placement,
+                line: image.line as u64,
+                row: buffer.screen_row_of_line(image.line) as i64,
+                col: image.start_col,
+                cols: image.cell_width,
+                rows: image.cell_height,
+                z: image.z,
+                width: image.width,
+                height: image.height,
+            }
+        })
+        .collect()
+}

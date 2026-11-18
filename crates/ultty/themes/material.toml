@@ -6,7 +6,8 @@ name = "Material"
 foreground = "#232322"
 background = "#eaeaea"
 cursor = "#16afca"
-selection = "#c2c2c2c0"
+selection = "#c2c2c2"
+selection_foreground = "#4e4e4e"
 
 [palette]
 black = "#212121"

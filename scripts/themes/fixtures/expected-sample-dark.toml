@@ -6,7 +6,8 @@ name = "Sample Dark"
 foreground = "#f0f0f0"
 background = "#101010"
 cursor = "#ff0000"
-selection = "#303030c0"
+selection = "#303030"
+selection_foreground = "#ffffff"
 
 [palette]
 black = "#000001"

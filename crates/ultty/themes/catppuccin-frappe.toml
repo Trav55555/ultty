@@ -6,7 +6,8 @@ name = "Catppuccin Frappe"
 foreground = "#c6d0f5"
 background = "#303446"
 cursor = "#f2d5cf"
-selection = "#f2d5cfc0"
+selection = "#f2d5cf"
+selection_foreground = "#303446"
 
 [palette]
 black = "#51576d"

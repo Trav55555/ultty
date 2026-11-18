@@ -6,7 +6,8 @@ name = "Moonfly"
 foreground = "#bdbdbd"
 background = "#080808"
 cursor = "#9e9e9e"
-selection = "#b2ceeec0"
+selection = "#b2ceee"
+selection_foreground = "#080808"
 
 [palette]
 black = "#323437"

@@ -6,7 +6,8 @@ name = "Dayfox"
 foreground = "#3d2b5a"
 background = "#f6f2ee"
 cursor = "#3d2b5a"
-selection = "#e7d2bec0"
+selection = "#e7d2be"
+selection_foreground = "#3d2b5a"
 
 [palette]
 black = "#352c24"

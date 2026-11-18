@@ -10,14 +10,29 @@ pub const MAX_SIXEL_DIM: u32 = 16384;
 /// Maximum number of pixels in a decoded Sixel image (64 MiB of RGBA).
 pub const MAX_SIXEL_PIXELS: u64 = 16 * 1024 * 1024;
 
-/// Maximum total RGBA bytes held by an [`ImageStore`] before old images are evicted.
+/// The default quota of decoded image bytes per screen, shared by sixel
+/// and Kitty images; old images are evicted past it (ADR 0026, "Resource
+/// limits"). The embedder can change it, and 0 turns images off.
 pub const MAX_IMAGE_STORE_BYTES: usize = 256 * 1024 * 1024;
 
-/// Maximum number of images held by an [`ImageStore`].
+/// Maximum number of images per screen: sixel images plus Kitty images.
 pub const MAX_IMAGE_STORE_COUNT: usize = 1024;
 
+/// Maximum number of placements per screen: sixel images plus Kitty
+/// placements.
+pub const MAX_PLACEMENTS: usize = 4096;
+
+/// The z-index sixel images sit at: under text, over cell backgrounds.
+pub const SIXEL_Z: i32 = -1;
+
+fn sixel_z() -> i32 {
+    SIXEL_Z
+}
+
 /// Unique identifier for terminal images.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct ImageId(pub u32);
 
 /// The source of fresh [`ImageId`]s. Both screens of a terminal draw from
@@ -38,7 +53,25 @@ impl ImageIds {
     }
 }
 
-/// A decoded terminal image.
+/// What a Kitty placement shows, and where in its cells.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct KittyPlacement {
+    /// The screen's Kitty image it shows; also the id of its texture, so
+    /// placements of one image share one.
+    pub image: ImageId,
+    /// The client's image id (`i=`), 0 for an anonymous image.
+    pub client_id: u32,
+    /// The client's placement id (`p=`), 0 for none.
+    pub placement_id: u32,
+    /// The part of the image shown, in pixels: x, y, width, height.
+    pub source: [u32; 4],
+    /// Where it is drawn, in cells from the placement's top-left cell: x,
+    /// y, width, height. Fractions place it inside cells.
+    pub dest: [f32; 4],
+}
+
+/// A picture placed on the screen: a sixel image, or one placement of a
+/// Kitty image.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TerminalImage {
     /// Unique identifier
@@ -47,8 +80,9 @@ pub struct TerminalImage {
     pub width: u32,
     /// Height in pixels
     pub height: u32,
-    /// RGBA pixel data (row-major, 4 bytes per pixel)
-    pub data: Vec<u8>,
+    /// RGBA pixel data (row-major, 4 bytes per pixel). The placements of
+    /// one Kitty image share it.
+    pub data: Arc<[u8]>,
     /// Position where the image starts (column)
     pub start_col: u16,
     /// The text line the image's top row sits on, numbered as
@@ -59,9 +93,33 @@ pub struct TerminalImage {
     pub cell_width: u16,
     /// Height in cells
     pub cell_height: u16,
+    /// Stacking order relative to text (Kitty `z=`): below 0 under text,
+    /// below -1,073,741,824 under cell backgrounds too. Sixel images sit at
+    /// [`SIXEL_Z`].
+    #[serde(default = "sixel_z")]
+    pub z: i32,
+    /// Set for a Kitty placement. Kitty placements are not cut by erases
+    /// or text, as sixel images are; only delete commands remove them.
+    #[serde(default)]
+    pub kitty: Option<KittyPlacement>,
 }
 
 impl TerminalImage {
+    /// The id of the texture holding this picture's pixels.
+    pub fn texture(&self) -> ImageId {
+        self.kitty.as_ref().map_or(self.id, |kitty| kitty.image)
+    }
+
+    /// The image bytes this placement holds on its own: a sixel's pixels.
+    /// A Kitty placement's bytes are counted once, with its image.
+    pub fn owned_bytes(&self) -> usize {
+        if self.kitty.is_some() {
+            0
+        } else {
+            self.data.len()
+        }
+    }
+
     /// The part of the image on cells `rows` x `cols`, counted from its
     /// top-left cell, as a new image `id`. The picture is stretched over
     /// its cells, so a cell range is the same share of the pixels. `None`
@@ -103,62 +161,53 @@ impl TerminalImage {
             id,
             width: (x1 - x0) as u32,
             height: (y1 - y0) as u32,
-            data,
+            data: data.into(),
             start_col: self.start_col.checked_add(cols.start)?,
             line: self.line + usize::from(rows.start),
             cell_width: cols.end - cols.start,
             cell_height: rows.end - rows.start,
+            z: self.z,
+            kitty: None,
         })
     }
 }
 
-/// Storage for terminal images.
+/// The pictures placed on one screen.
 ///
-/// Bounded by [`MAX_IMAGE_STORE_BYTES`] and [`MAX_IMAGE_STORE_COUNT`]; the
-/// oldest images are evicted first.
+/// The screen bounds it: see `Buffer::enforce_image_limits`, which evicts
+/// past the screen's quota, [`MAX_IMAGE_STORE_COUNT`] and
+/// [`MAX_PLACEMENTS`].
 #[derive(Debug, Default, Clone)]
 pub struct ImageStore {
     images: HashMap<ImageId, TerminalImage>,
     /// Insertion order (front = oldest) for eviction
     order: VecDeque<ImageId>,
-    /// Sum of `data.len()` over all stored images
+    /// Sum of [`TerminalImage::owned_bytes`] over all stored images
     total_bytes: usize,
+    /// How many of the images are sixel images
+    sixels: usize,
 }
 
 impl ImageStore {
     /// Create a new empty image store.
     pub fn new() -> Self {
-        Self {
-            images: HashMap::new(),
-            order: VecDeque::new(),
-            total_bytes: 0,
-        }
+        Self::default()
     }
 
-    /// Add an image to the store, evicting the oldest images if the byte or
-    /// count limits would be exceeded.
+    /// Add an image to the store, replacing one with the same id.
     pub fn add(&mut self, image: TerminalImage) -> ImageId {
         let id = image.id;
-        if let Some(previous) = self.images.remove(&id) {
-            self.total_bytes -= previous.data.len();
-            self.order.retain(|&existing| existing != id);
-        }
-        self.total_bytes += image.data.len();
+        self.remove(id);
+        self.total_bytes += image.owned_bytes();
+        self.sixels += usize::from(image.kitty.is_none());
         self.images.insert(id, image);
         self.order.push_back(id);
-
-        while (self.total_bytes > MAX_IMAGE_STORE_BYTES
-            || self.images.len() > MAX_IMAGE_STORE_COUNT)
-            && self.order.len() > 1
-        {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(evicted) = self.images.remove(&oldest) {
-                self.total_bytes -= evicted.data.len();
-            }
-        }
         id
+    }
+
+    /// Number of sixel images (the rest are Kitty placements).
+    pub fn sixel_count(&self) -> usize {
+        self.sixels
     }
 
     /// Total RGBA bytes currently stored.
@@ -174,7 +223,8 @@ impl ImageStore {
     /// Remove an image.
     pub fn remove(&mut self, id: ImageId) -> Option<TerminalImage> {
         let removed = self.images.remove(&id)?;
-        self.total_bytes -= removed.data.len();
+        self.total_bytes -= removed.owned_bytes();
+        self.sixels -= usize::from(removed.kitty.is_none());
         self.order.retain(|&existing| existing != id);
         Some(removed)
     }
@@ -182,15 +232,17 @@ impl ImageStore {
     /// Let `update` change each image in place; the images it returns
     /// `false` for are removed.
     pub fn retain_mut(&mut self, mut update: impl FnMut(&mut TerminalImage) -> bool) {
-        let mut freed = 0;
+        let (mut freed, mut sixels) = (0, 0);
         self.images.retain(|_, image| {
             let keep = update(image);
             if !keep {
-                freed += image.data.len();
+                freed += image.owned_bytes();
+                sixels += usize::from(image.kitty.is_none());
             }
             keep
         });
         self.total_bytes -= freed;
+        self.sixels -= sixels;
         let images = &self.images;
         self.order.retain(|id| images.contains_key(id));
     }
@@ -200,6 +252,7 @@ impl ImageStore {
         let order = std::mem::take(&mut self.order);
         let mut images = std::mem::take(&mut self.images);
         self.total_bytes = 0;
+        self.sixels = 0;
         order.iter().filter_map(|id| images.remove(id)).collect()
     }
 
@@ -208,6 +261,12 @@ impl ImageStore {
         self.images.clear();
         self.order.clear();
         self.total_bytes = 0;
+        self.sixels = 0;
+    }
+
+    /// Get all images, oldest first.
+    pub fn oldest_first(&self) -> impl Iterator<Item = &TerminalImage> {
+        self.order.iter().filter_map(|id| self.images.get(id))
     }
 
     /// Get all images.
@@ -716,39 +775,14 @@ mod tests {
             id: ImageId(id),
             width: 1,
             height: 1,
-            data: vec![0; bytes],
+            data: vec![0; bytes].into(),
             start_col: 0,
             line: 0,
             cell_width: 1,
             cell_height: 1,
+            z: SIXEL_Z,
+            kitty: None,
         }
-    }
-
-    #[test]
-    fn image_store_evicts_oldest_when_over_byte_limit() {
-        let mut store = ImageStore::new();
-        let chunk = MAX_IMAGE_STORE_BYTES / 4;
-        for id in 0..6 {
-            store.add(image_of(id, chunk));
-        }
-        assert_eq!(store.len(), 4);
-        assert_eq!(store.total_bytes(), chunk * 4);
-        assert!(store.get(ImageId(0)).is_none());
-        assert!(store.get(ImageId(1)).is_none());
-        assert!(store.get(ImageId(5)).is_some());
-    }
-
-    #[test]
-    fn image_store_evicts_oldest_when_over_count_limit() {
-        let mut store = ImageStore::new();
-        for id in 0..(MAX_IMAGE_STORE_COUNT as u32 + 5) {
-            store.add(image_of(id, 4));
-        }
-        assert_eq!(store.len(), MAX_IMAGE_STORE_COUNT);
-        assert!(store.get(ImageId(0)).is_none());
-        assert!(store
-            .get(ImageId(MAX_IMAGE_STORE_COUNT as u32 + 4))
-            .is_some());
     }
 
     #[test]

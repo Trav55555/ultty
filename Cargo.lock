@@ -4915,6 +4915,9 @@ dependencies = [
 name = "ultty-vt"
 version = "0.2.0"
 dependencies = [
+ "base64 0.21.7",
+ "miniz_oxide 0.8.9",
+ "png 0.17.16",
  "proptest",
  "serde",
  "tracing",

@@ -80,6 +80,46 @@ class ImportThemes(unittest.TestCase):
             (sources / "Local One").write_text(body)
             self.assertEqual(run("", tmp, sources), 1)
 
+    def test_a_selection_next_to_the_background_is_moved_and_noted(self):
+        scheme = scheme_with(selection="#073642", background="#002b36", foreground="#839496")
+        note = importer.legible_selection(scheme)
+        self.assertGreaterEqual(
+            importer.contrast(scheme.selection, scheme.background), importer.MIN_SELECTION_DISTINCT
+        )
+        self.assertNotEqual(scheme.selection, "#073642")
+        self.assertIn("moved from #073642", note)
+        # Deterministic: the same input gives the same output.
+        again = scheme_with(selection="#073642", background="#002b36", foreground="#839496")
+        importer.legible_selection(again)
+        self.assertEqual(again.selection, scheme.selection)
+
+    def test_a_good_selection_is_left_alone(self):
+        scheme = scheme_with(selection="#eceff4", selection_foreground="#2e3440")
+        self.assertIsNone(importer.legible_selection(scheme))
+        self.assertEqual((scheme.selection, scheme.selection_foreground), ("#eceff4", "#2e3440"))
+
+    def test_an_unreadable_selection_foreground_is_dropped(self):
+        scheme = scheme_with(selection="#eceff4", selection_foreground="#d8dee9")
+        self.assertIn("dropped", importer.legible_selection(scheme))
+        self.assertIsNone(scheme.selection_foreground)
+
+    def test_selection_foreground_is_carried_into_the_theme_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(run("Sample Dark\n", tmp), 0)
+            got = (Path(tmp) / "out" / "sample-dark.toml").read_text()
+            self.assertIn('selection_foreground = "#ffffff"', got)
+            self.assertIn('selection = "#303030"\n', got)
+
+
+def scheme_with(**overrides):
+    fields = dict(
+        name="T", slug="t", license="MIT", source="", foreground="#d8dee9",
+        background="#2e3440", cursor="#ffffff", selection="#303030",
+        selection_foreground=None, palette=["#000000"] * 16,
+    )
+    fields.update(overrides)
+    return importer.Scheme(**fields)
+
 
 if __name__ == "__main__":
     unittest.main()

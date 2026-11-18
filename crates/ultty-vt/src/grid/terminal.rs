@@ -1,5 +1,6 @@
 //! Terminal state management with alternate screen support.
 
+mod graphics;
 pub mod snapshot;
 
 use super::{
@@ -353,18 +354,6 @@ impl Terminal {
                 self.hyperlinks.len()
             ));
         }
-        for (screen, buffer) in [("main", &self.main), ("alternate", &self.alternate)] {
-            let images = buffer.images();
-            if images.len() > super::image::MAX_IMAGE_STORE_COUNT
-                || images.total_bytes() > super::image::MAX_IMAGE_STORE_BYTES
-            {
-                return Err(format!(
-                    "{screen} screen image store holds {} images / {} bytes, beyond its limits",
-                    images.len(),
-                    images.total_bytes()
-                ));
-            }
-        }
         Ok(())
     }
 
@@ -612,7 +601,7 @@ impl Terminal {
             self.alternate.grid_mut().clear();
             self.alternate.grid_mut().cursor_mut().position = CursorPosition::origin();
             // The screen starts empty, images included.
-            self.alternate.images_mut().clear();
+            self.alternate.clear_all_images();
             self.selection = None;
         }
     }
@@ -622,7 +611,7 @@ impl Terminal {
     pub fn leave_alternate_screen(&mut self) {
         if self.using_alternate {
             self.using_alternate = false;
-            self.alternate.images_mut().clear();
+            self.alternate.clear_all_images();
             self.swap_kitty_keyboard_state();
             self.selection = None;
         }
@@ -1293,6 +1282,9 @@ impl Terminal {
     /// cut to the screen's rows, and neither the cursor nor the screen
     /// moves (foot: `sixel_unhook`, `!term->sixel.scrolling`).
     pub fn add_image(&mut self, mut image: TerminalImage) {
+        if self.buffer().image_quota() == 0 {
+            return;
+        }
         let dims = self.dimensions();
         if self.modes.sixel_scrolling_disabled {
             image.start_col = 0;
@@ -1302,14 +1294,14 @@ impl Terminal {
             else {
                 return;
             };
-            self.images_mut().add(shown);
+            self.store_sixel(shown);
             return;
         }
 
         let (cell_width, cell_height, start_col) =
             (image.cell_width, image.cell_height, image.start_col);
         if cell_height <= 1 {
-            self.images_mut().add(image);
+            self.store_sixel(image);
             let cursor = self.grid_mut().cursor_mut();
             let new_col = cursor.position.col.saturating_add(cell_width);
             cursor.position.col = new_col.min(dims.cols.saturating_sub(1));
@@ -1338,7 +1330,25 @@ impl Terminal {
             shown.line = 0;
             image = shown;
         }
-        self.images_mut().add(image);
+        self.store_sixel(image);
+    }
+
+    /// Keep a placed sixel image, evicting older images past the screen's
+    /// limits; an image larger than the whole quota is dropped.
+    fn store_sixel(&mut self, image: TerminalImage) {
+        let id = image.id;
+        let buffer = self.buffer_mut();
+        buffer.images_mut().add(image);
+        if !buffer.enforce_image_limits(&[id]) {
+            buffer.images_mut().remove(id);
+        }
+    }
+
+    /// Set how many decoded image bytes each screen may hold, sixel and
+    /// Kitty together (`images.storage_limit`); 0 turns images off.
+    pub fn set_image_storage_limit(&mut self, bytes: usize) {
+        self.main.set_image_quota(bytes);
+        self.alternate.set_image_quota(bytes);
     }
 
     /// Resize the terminal.
@@ -1381,8 +1391,8 @@ impl Terminal {
                 anchor,
             });
         }
-        self.main.images_mut().clear();
-        self.alternate.images_mut().clear();
+        self.main.clear_all_images();
+        self.alternate.clear_all_images();
         self.hyperlinks.clear();
         self.hyperlink_ids.clear();
         self.hyperlink_order.clear();
@@ -2064,11 +2074,13 @@ mod tests {
             id: ImageId(0),
             width: 1,
             height: 1,
-            data: vec![0; 4],
+            data: vec![0; 4].into(),
             start_col: 0,
             line: 0,
             cell_width: 1,
             cell_height: 1,
+            z: crate::grid::SIXEL_Z,
+            kitty: None,
         };
         term.add_image(image);
 
@@ -2120,11 +2132,13 @@ mod tests {
             id: ImageId(0),
             width: 24,
             height: 16,
-            data: vec![0; 24 * 16 * 4],
+            data: vec![0; 24 * 16 * 4].into(),
             start_col: 4,
             line: 0,
             cell_width: 3,
             cell_height: 1,
+            z: crate::grid::SIXEL_Z,
+            kitty: None,
         };
         term.add_image(image);
 
@@ -2141,11 +2155,13 @@ mod tests {
             id: ImageId(0),
             width: 32,
             height: 64,
-            data: vec![0; 32 * 64 * 4],
+            data: vec![0; 32 * 64 * 4].into(),
             start_col: 9,
             line: 2,
             cell_width: 4,
             cell_height: 4,
+            z: crate::grid::SIXEL_Z,
+            kitty: None,
         };
         term.add_image(image);
 

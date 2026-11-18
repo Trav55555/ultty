@@ -2,11 +2,13 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/EdenEast/nightfox.nvim/tree/main/extra
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #2a2a2a to show against the background.
 name = "Carbonfox"
 foreground = "#f2f4f8"
 background = "#161616"
 cursor = "#f2f4f8"
-selection = "#2a2a2ac0"
+selection = "#303030"
+selection_foreground = "#f2f4f8"
 
 [palette]
 black = "#282828"

@@ -606,6 +606,8 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             _ => Err("usage: invoke-action <pane> <session> <generation> <region> <widget-id> <focus|activate>".into()),
         },
         "regions" if rest.is_empty() => Ok(ControlRequest::Regions { target: None }),
+        "images" if rest.is_empty() => Ok(ControlRequest::Images { target: None }),
+        "images" => Err("usage: images".to_string()),
         "regions" => Err("usage: regions".to_string()),
         "override" => parse_override(rest),
         "status" => parse_status(rest),
@@ -949,13 +951,14 @@ fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
         | ControlRequest::SetPaneStatus { target, .. }
         | ControlRequest::LastCommand { target, .. }
         | ControlRequest::Regions { target }
+        | ControlRequest::Images { target }
         | ControlRequest::PushOverride { target, .. }
         | ControlRequest::ClearOverride { target }
         | ControlRequest::SplitPane { target, .. } => {
             *target = Some(id);
             Ok(())
         }
-        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for, subscribe, status, last-command, regions, override, split and lua open --split".to_string()),
+        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for, subscribe, status, last-command, regions, images, override, split and lua open --split".to_string()),
     }
 }
 
@@ -1225,7 +1228,7 @@ GLOBAL FLAGS:
     --pane <id>             Act on pane <id> (from `panes`) instead of the
                             focused one. Goes before the command; applies to
                             text, selection, send-*, run, search, wait-for,
-                            subscribe, status, last-command, regions,
+                            subscribe, status, last-command, regions, images,
                             override, split and lua open --split (which
                             otherwise split the pane ulttyctl runs in, from
                             $ULTTY_PANE)
@@ -1256,6 +1259,9 @@ QUERY COMMANDS:
     text [--scrollback]     Get visible text (optionally with scrollback)
     selection               Get current selection
     search <pattern>        Search for pattern in scrollback
+    images                  Image placements (sixel and Kitty graphics) on the
+                            pane's active screen, scrollback included; no
+                            pixel data
     last-command [--tail <lines>]
                             The last command the shell ran and its output
                             (needs OSC 133 shell integration); exits with
@@ -2042,6 +2048,15 @@ mod tests {
             ControlRequest::Regions { target: Some(3) }
         );
         assert!(parse_cli_request(&args("regions extra")).is_err());
+    }
+
+    #[test]
+    fn images_takes_a_pane_and_no_arguments() {
+        assert_eq!(
+            parse_cli_request(&args("--pane 3 images")).unwrap(),
+            ControlRequest::Images { target: Some(3) }
+        );
+        assert!(parse_cli_request(&args("images extra")).is_err());
     }
 
     #[test]

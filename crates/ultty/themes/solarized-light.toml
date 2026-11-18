@@ -2,11 +2,12 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/altercation/solarized/blob/master/LICENSE
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #eee8d5 to show against the background.
 name = "Solarized Light"
 foreground = "#657b83"
 background = "#fdf6e3"
 cursor = "#586e75"
-selection = "#eee8d5c0"
+selection = "#dddacb"
 
 [palette]
 black = "#073642"

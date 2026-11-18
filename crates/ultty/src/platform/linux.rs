@@ -9,7 +9,7 @@ pub struct LinuxPlatform;
 
 impl Platform for LinuxPlatform {
     fn socket_dir() -> std::io::Result<PathBuf> {
-        private_socket_dir(Path::new("/tmp"))
+        private_socket_dir(std::env::var_os("XDG_RUNTIME_DIR"), Path::new("/tmp"))
     }
 
     fn spawn_shell() -> std::io::Result<Child> {

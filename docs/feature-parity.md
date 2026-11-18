@@ -30,12 +30,14 @@ Ranked by how much a typical user would notice:
    OpenType feature list (`font.features`), a codepoint-to-font map
    (`[[font.codepoint_map]]`) and font changes on config reload. It still has
    no variable-font axes and no cell offsets.
-3. **No Kitty graphics protocol.** Ghostty supports it (1.4 added
-   animation). Programs that only speak Kitty's protocol, such as many
-   image viewers and some Neovim plugins, show no images. Ultty supports
-   sixel instead, which Ghostty does not. A sliced plan is proposed in
-   [ADR 0026](adr/0026-kitty-graphics.md); its slice 0 (sixel scroll,
-   clear, split-pane and cache fixes) is done.
+3. **Kitty graphics protocol: partly fixed.** Ghostty supports it (1.4
+   added animation). Ultty now supports direct transmission, placement,
+   deletion, queries and z-index ([ADR 0026](adr/0026-kitty-graphics.md)
+   slices 0 and 1), which covers `kitten icat` and other programs that send
+   image data in the escape codes. Still missing: Unicode placeholders
+   (slice 2, for tmux and Neovim plugins such as image.nvim), relative
+   placements and animation. File and shared-memory media are refused by
+   design.
 4. **Few command-line options.** `ultty` accepts only `--help`, `--version`
    and (added after this audit) `-e command`. There is no
    `--working-directory`, `--config` or per-key override.
@@ -155,7 +157,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 
 | Feature | Ultty | Ghostty 1.4 | Alacritty 0.16 | Ultty evidence |
 |---|---|---|---|---|
-| Kitty graphics protocol | no; APC `G` consumed and dropped | yes; animation, relative placement | no | `ansi/osc.rs` APC handling; scorecard row "No" |
+| Kitty graphics protocol | direct transmission; no placeholders, relative placement or animation | yes; animation, relative placement | no | `scorecard_kitty_graphics`; `tests/kitty_graphics.rs`; `grid/graphics/` |
 | Sixel | yes | no; maintainer declined it | no | `scorecard_sixel`; `conformance.rs` `sixel_images_span_cells_*`; `renderer/image.rs` |
 | iTerm2 images (OSC 1337) | no | no; parsed only | no | no OSC 1337 handler |
 

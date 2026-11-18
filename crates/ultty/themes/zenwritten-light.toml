@@ -2,11 +2,13 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/zenbones-theme/zenbones.nvim
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: selection moved from #d7d7d7 to show against the background.
 name = "Zenwritten Light"
 foreground = "#353535"
 background = "#eeeeee"
 cursor = "#353535"
-selection = "#d7d7d7c0"
+selection = "#d2d2d2"
+selection_foreground = "#353535"
 
 [palette]
 black = "#eeeeee"

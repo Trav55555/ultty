@@ -155,7 +155,7 @@ impl Renderer {
 
     /// Upload an image to the GPU and cache it.
     fn upload_image(&mut self, owner: u64, image: &TerminalImage) -> bool {
-        let key = ImageKey::new(owner, image.id);
+        let key = ImageKey::new(owner, image.texture());
         if self.image_cache.contains(&key) {
             return true;
         }
@@ -372,7 +372,57 @@ impl Renderer {
         !terminal.images().is_empty()
     }
 
-    /// Render terminal images at a pane origin with optional outer clipping.
+    /// Whether any of the terminal's images draw in `layer`.
+    pub(super) fn has_images_in(&self, terminal: &Terminal, layer: ImageLayer) -> bool {
+        terminal.images().images().any(|image| layer.holds(image.z))
+    }
+
+    /// Before the cell backgrounds of a frame that starts by clearing to
+    /// `clear`: when the terminal has images under backgrounds, clear the
+    /// frame now and draw them, and return the load op that keeps them for
+    /// the background pass; otherwise return the clear itself.
+    pub(super) fn images_under_backgrounds(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        terminal: &Terminal,
+        origin: (f32, f32),
+        clear: wgpu::Color,
+    ) -> wgpu::LoadOp<wgpu::Color> {
+        if !self.has_images_in(terminal, ImageLayer::BelowBackgrounds) {
+            return wgpu::LoadOp::Clear(clear);
+        }
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("image_clear_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(clear),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        self.render_images(
+            encoder,
+            view,
+            terminal,
+            origin,
+            None,
+            ImageLayer::BelowBackgrounds,
+        );
+        wgpu::LoadOp::Load
+    }
+
+    /// Render the terminal images of one z `layer` at a pane origin with
+    /// optional outer clipping. Within a layer, lower z draws first, and
+    /// for equal z the older image (spec, "Controlling displayed image
+    /// layout").
     pub(super) fn render_images(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -380,8 +430,9 @@ impl Renderer {
         terminal: &Terminal,
         origin: (f32, f32),
         scissor: Option<super::native_render::Scissor>,
+        layer: ImageLayer,
     ) {
-        if terminal.images().is_empty() {
+        if !self.has_images_in(terminal, layer) {
             return;
         }
 
@@ -398,13 +449,17 @@ impl Renderer {
             .saturating_sub(buffer.scroll_offset());
         let owner = terminal.uid();
 
+        let mut images: Vec<_> = terminal
+            .images()
+            .images()
+            .filter(|image| layer.holds(image.z))
+            .collect();
+        images.sort_by_key(|image| (image.z, image.texture(), image.id));
         // Upload any new image, then render each one with its own texture
-        for image in terminal.images().images() {
-            let Some(quad) = clip_image(
+        for image in images {
+            let Some(quad) = clip_placement(
+                image,
                 image.line as isize - top_line as isize,
-                image.start_col,
-                image.cell_width,
-                image.cell_height,
                 dims.cols,
                 dims.rows,
             ) else {
@@ -413,7 +468,7 @@ impl Renderer {
             if !self.upload_image(owner, image) {
                 continue;
             }
-            let Some(cached) = self.image_cache.get(&ImageKey::new(owner, image.id)) else {
+            let Some(cached) = self.image_cache.get(&ImageKey::new(owner, image.texture())) else {
                 continue;
             };
 
@@ -503,6 +558,33 @@ impl Renderer {
     }
 }
 
+/// The three passes terminal images draw in, by z-index (spec,
+/// "Controlling displayed image layout"; ADR 0026, "Z-index").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ImageLayer {
+    /// z < -1,073,741,824: before cell backgrounds, so a cell with a
+    /// non-default background hides it.
+    BelowBackgrounds,
+    /// -1,073,741,824 <= z < 0: after backgrounds, before text. Sixel
+    /// images draw here.
+    BelowText,
+    /// z >= 0: after text, before the cursor and overlays.
+    AboveText,
+}
+
+impl ImageLayer {
+    /// The z below which images draw under cell backgrounds.
+    const BACKGROUND_Z: i32 = i32::MIN / 2;
+
+    fn holds(self, z: i32) -> bool {
+        match self {
+            Self::BelowBackgrounds => z < Self::BACKGROUND_Z,
+            Self::BelowText => (Self::BACKGROUND_Z..0).contains(&z),
+            Self::AboveText => z >= 0,
+        }
+    }
+}
+
 /// Where an image is drawn, in cells from the terminal's top-left corner,
 /// and which part of its texture shows.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -517,9 +599,69 @@ struct ClippedImage {
     v1: f32,
 }
 
-/// Clip an image of `cell_width` x `cell_height` cells, whose top-left cell
-/// is at `visual_row` (negative above the view) and `start_col`, to a view
-/// of `cols` x `rows` cells. `None` when none of it shows.
+/// Clip a placed image whose top-left cell is at `visual_row` (negative
+/// above the view) to a view of `cols` x `rows` cells. A sixel image fills
+/// its cells; a Kitty placement shows its source rectangle where its
+/// layout puts it. `None` when none of it shows.
+fn clip_placement(
+    image: &TerminalImage,
+    visual_row: isize,
+    cols: u16,
+    rows: u16,
+) -> Option<ClippedImage> {
+    let (col, row) = (f32::from(image.start_col), visual_row as f32);
+    let Some(kitty) = &image.kitty else {
+        let (width, height) = (f32::from(image.cell_width), f32::from(image.cell_height));
+        return clip_rect([col, row, width, height], [0.0, 0.0, 1.0, 1.0], cols, rows);
+    };
+    let [dx, dy, dw, dh] = kitty.dest;
+    let (width, height) = (image.width as f32, image.height as f32);
+    let [sx, sy, sw, sh] = kitty.source.map(|v| v as f32);
+    clip_rect(
+        [col + dx, row + dy, dw, dh],
+        [
+            sx / width,
+            sy / height,
+            (sx + sw) / width,
+            (sy + sh) / height,
+        ],
+        cols,
+        rows,
+    )
+}
+
+/// Clip the rectangle `[x, y, width, height]`, in cells, showing texture
+/// coordinates `uv` (`[u0, v0, u1, v1]`), to a view of `cols` x `rows`
+/// cells, cutting the texture coordinates to match.
+fn clip_rect(rect: [f32; 4], uv: [f32; 4], cols: u16, rows: u16) -> Option<ClippedImage> {
+    let [col0, row0, width, height] = rect;
+    if !(width > 0.0 && height > 0.0) {
+        return None;
+    }
+    let col1 = (col0 + width).min(f32::from(cols));
+    let row1 = (row0 + height).min(f32::from(rows));
+    let (shown_col0, shown_row0) = (col0.max(0.0), row0.max(0.0));
+    if col1 <= shown_col0 || row1 <= shown_row0 {
+        return None;
+    }
+    let [u0, v0, u1, v1] = uv;
+    let u = |at: f32| u0 + (u1 - u0) * (at - col0) / width;
+    let v = |at: f32| v0 + (v1 - v0) * (at - row0) / height;
+    Some(ClippedImage {
+        col0: shown_col0,
+        row0: shown_row0,
+        col1,
+        row1,
+        u0: u(shown_col0),
+        v0: v(shown_row0),
+        u1: u(col1),
+        v1: v(row1),
+    })
+}
+
+/// Clip a sixel image of `cell_width` x `cell_height` cells at
+/// `visual_row` and `start_col`.
+#[cfg(test)]
 fn clip_image(
     visual_row: isize,
     start_col: u16,
@@ -528,28 +670,17 @@ fn clip_image(
     cols: u16,
     rows: u16,
 ) -> Option<ClippedImage> {
-    let (width, height) = (f32::from(cell_width), f32::from(cell_height));
-    if width <= 0.0 || height <= 0.0 {
-        return None;
-    }
-    let col0 = f32::from(start_col);
-    let row0 = visual_row as f32;
-    let col1 = (col0 + width).min(f32::from(cols));
-    let row1 = (row0 + height).min(f32::from(rows));
-    let (shown_col0, shown_row0) = (col0.max(0.0), row0.max(0.0));
-    if col1 <= shown_col0 || row1 <= shown_row0 {
-        return None;
-    }
-    Some(ClippedImage {
-        col0: shown_col0,
-        row0: shown_row0,
-        col1,
-        row1,
-        u0: (shown_col0 - col0) / width,
-        v0: (shown_row0 - row0) / height,
-        u1: (col1 - col0) / width,
-        v1: (row1 - row0) / height,
-    })
+    clip_rect(
+        [
+            f32::from(start_col),
+            visual_row as f32,
+            f32::from(cell_width),
+            f32::from(cell_height),
+        ],
+        [0.0, 0.0, 1.0, 1.0],
+        cols,
+        rows,
+    )
 }
 
 #[cfg(test)]
@@ -586,6 +717,58 @@ mod tests {
         assert_eq!(clip_image(-4, 0, 2, 4, 80, 24), None);
         assert_eq!(clip_image(24, 0, 2, 4, 80, 24), None);
         assert_eq!(clip_image(0, 80, 2, 4, 80, 24), None);
+    }
+
+    #[test]
+    fn a_kitty_placement_shows_its_source_where_its_layout_puts_it() {
+        use crate::grid::{ImageId, KittyPlacement};
+        let image = TerminalImage {
+            id: ImageId(1),
+            width: 100,
+            height: 50,
+            data: vec![0; 100 * 50 * 4].into(),
+            start_col: 2,
+            line: 0,
+            cell_width: 4,
+            cell_height: 2,
+            z: 0,
+            kitty: Some(KittyPlacement {
+                image: ImageId(0),
+                client_id: 1,
+                placement_id: 0,
+                source: [50, 0, 50, 50],
+                dest: [0.5, 0.25, 3.0, 1.5],
+            }),
+        };
+        let quad = clip_placement(&image, 1, 80, 24).unwrap();
+        assert_eq!(
+            (quad.col0, quad.row0, quad.col1, quad.row1),
+            (2.5, 1.25, 5.5, 2.75)
+        );
+        assert_eq!((quad.u0, quad.v0, quad.u1, quad.v1), (0.5, 0.0, 1.0, 1.0));
+        // Cut by the right edge at column 4: half its width shows.
+        let quad = clip_placement(&image, 1, 4, 24).unwrap();
+        assert_eq!((quad.col1, quad.u1), (4.0, 0.75));
+    }
+
+    #[test]
+    fn z_layers_follow_the_spec_thresholds() {
+        let layer = |z| {
+            [
+                ImageLayer::BelowBackgrounds,
+                ImageLayer::BelowText,
+                ImageLayer::AboveText,
+            ]
+            .into_iter()
+            .filter(|layer| layer.holds(z))
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(layer(i32::MIN), [ImageLayer::BelowBackgrounds]);
+        assert_eq!(layer(-1_073_741_825), [ImageLayer::BelowBackgrounds]);
+        assert_eq!(layer(-1_073_741_824), [ImageLayer::BelowText]);
+        assert_eq!(layer(-1), [ImageLayer::BelowText]);
+        assert_eq!(layer(0), [ImageLayer::AboveText]);
+        assert_eq!(layer(i32::MAX), [ImageLayer::AboveText]);
     }
 
     #[test]
@@ -749,11 +932,13 @@ mod tests {
                 id: ImageId(0),
                 width: 1,
                 height: 1,
-                data: color.to_vec(),
+                data: color.to_vec().into(),
                 start_col: 0,
                 line: 0,
                 cell_width: 8,
                 cell_height: 3,
+                z: crate::grid::SIXEL_Z,
+                kitty: None,
             });
         }
         let a = TerminalSnapshot::capture(&a).unwrap().to_view().unwrap();
@@ -823,7 +1008,7 @@ mod tests {
         // A complete attachment replacement keeps its pane/image identities,
         // but owns a fresh Terminal UID even when image dimensions stay equal.
         let mut replacement = TerminalSnapshot::capture(&a).unwrap();
-        replacement.main.images[0].data = vec![0, 255, 0, 255];
+        replacement.main.images[0].data = vec![0, 255, 0, 255].into();
         let updated = replacement.to_view().unwrap();
         assert_ne!(updated.uid(), a.uid());
         let updated_panes = [

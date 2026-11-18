@@ -6,7 +6,8 @@ name = "Gruvbox Material Dark"
 foreground = "#d4be98"
 background = "#282828"
 cursor = "#d4be98"
-selection = "#d4be98c0"
+selection = "#d4be98"
+selection_foreground = "#282828"
 
 [palette]
 black = "#282828"

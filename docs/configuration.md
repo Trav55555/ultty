@@ -32,8 +32,8 @@ theme = "catppuccin-latte"
 
 Names match without regard to case, and a space or underscore is the same as
 a dash: `Rose Pine`, `rose_pine` and `rose-pine` are one theme. Colours you
-set in `[colors]` (`foreground`, `background`, `cursor`, `selection`, and
-single keys of `[colors.palette]`) win over the theme's. The key combination
+set in `[colors]` (`foreground`, `background`, `cursor`, `selection`,
+`selection_foreground`, and single keys of `[colors.palette]`) win over the theme's. The key combination
 `ctrl+shift+n` (`keybindings.cycle_theme`) steps through the themes in name
 order.
 
@@ -42,7 +42,8 @@ order.
 Put a theme in `themes/NAME.toml` next to `config.toml`
 (`~/.config/ultty/themes/` on Linux). It is found by its file name, and
 replaces a bundled theme of the same name. Foreground, background, cursor and
-all 16 palette colours are required; `name` and `selection` are optional. A
+all 16 palette colours are required; `name`, `selection` and
+`selection_foreground` are optional. A
 file that does not parse, or lacks a colour, is skipped with a warning. The
 directory is read when the config is loaded, so a new theme file shows up
 the next time `config.toml` changes or Ultty starts. `[colors.themes.NAME]`
@@ -54,6 +55,7 @@ foreground = "#c0caf5"
 background = "#1a1b26"
 cursor = "#c0caf5"
 selection = "#33467cc0"   # optional; last two digits are opacity
+selection_foreground = "#c0caf5"   # optional; text colour in a selection
 
 [palette]
 black = "#15161e"
@@ -77,6 +79,26 @@ bright_white = "#c0caf5"
 Ultty does not switch between a light and a dark theme with the system
 appearance (Ghostty's `theme = "light:X,dark:Y"`): it does not read the
 system setting. Choose one theme, or cycle with the keybinding.
+
+### Selected text
+
+`selection` is the selection's background. Its opacity is raised to at least
+55% so a faint selection still shows. `selection_foreground` (`[colors]` key
+and theme key, `#rrggbb`) is the text colour inside it, like Ghostty's
+`selection-foreground`; the bundled themes carry the one their authors chose.
+
+Without it, each selected character keeps its own colour while that colour has
+a contrast of at least 4.5:1 against the selection (WCAG relative luminance),
+so syntax colours survive. Otherwise it is drawn in the theme's foreground or
+background colour, whichever contrasts more (black or white if neither
+reaches 3:1). Ghostty, Alacritty and kitty swap
+the cell's foreground and background instead; that makes text vanish when the
+selection is close to the text colour, as it was on Nord.
+
+The importer keeps every bundled theme legible: a selection that is within
+1.3:1 of the background is moved towards the foreground until it shows, and an
+upstream selection foreground under 3:1 on the selection is dropped. A test
+holds all bundled themes to those numbers.
 
 ### Where the bundled themes come from
 
@@ -209,6 +231,21 @@ How many lines each pane keeps after they scroll off the top, up to
 1,000,000 (larger values are clamped, with a warning). A config reload applies
 the new value to open panes as well; lowering it drops their oldest lines. The
 alternate screen, which full-screen programs use, has no scrollback.
+
+## Images
+
+```toml
+[images]
+storage_limit = 256
+```
+
+How much decoded image memory, in MiB, each screen of a pane may hold for
+sixel and Kitty graphics images together. Each pane has two screens (main and
+alternate), so a pane can hold up to twice this. Past the limit the oldest
+images are evicted, those no longer on screen first. `0` turns images off:
+both protocols are ignored, and Kitty graphics queries get no reply, so
+programs fall back to text. A config reload applies the new value to open
+panes as well.
 
 ## When a program exits
 
@@ -403,12 +440,18 @@ bold_italic_family = "Victor Mono Bold"
 `bold_family`, `italic_family` and `bold_italic_family` name the font for
 bold, italic and bold italic text. Each is empty by default. An empty entry
 uses `family`: its own bold or italic face if it has one, and otherwise the
-regular face with a brighter color for bold and a slant for italic.
+regular face with a slant for italic and, for bold, a color brighter on a
+dark background or darker on a light one.
 `bold_italic_family` does not fall back to `bold_family` or `italic_family`.
 A style family is asked for the bold weight and italic slant too, so a family
 with several weights gives its bold one. Cells are sized from `family`, so a
 style family with a different advance width breaks the grid; use families
 meant to go together.
+
+A family that is not installed (the default, DroidSansMono Nerd Font, on a
+fresh machine) is replaced by the system monospace font, and Ultty logs one
+warning naming it. The grid is never drawn in a proportional face. The same
+goes for the style families and `codepoint_map` families.
 
 ## OpenType features
 

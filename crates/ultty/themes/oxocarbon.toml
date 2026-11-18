@@ -2,11 +2,12 @@
 # Converted by scripts/import-themes.py from iTerm2-Color-Schemes (https://github.com/mbadolato/iTerm2-Color-Schemes).
 # Theme licence: MIT. Source: https://github.com/nyoom-engineering/oxocarbon.nvim
 # See THIRD_PARTY_THEMES.md in this directory.
+# Selection: upstream selection foreground #626262 dropped: low contrast.
 name = "Oxocarbon"
 foreground = "#f2f4f8"
 background = "#161616"
 cursor = "#ffffff"
-selection = "#393939c0"
+selection = "#393939"
 
 [palette]
 black = "#161616"
