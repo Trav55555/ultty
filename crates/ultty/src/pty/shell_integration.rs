@@ -6,11 +6,14 @@
 //! and Kitty do:
 //!
 //! - **bash** starts with `--rcfile` pointing at a wrapper that runs the real
-//!   `~/.bashrc`, then the integration. Unlike `--posix` with `ENV`, this
-//!   leaves bash's normal startup untouched (no posix mode to switch off, and
-//!   `/etc/bash.bashrc` still runs first). A login shell (`-l`, `--login`, or
-//!   a leading `-` in argv[0]) ignores `--rcfile`, so it is started as the
-//!   user asked and gets no integration.
+//!   `~/.bashrc`, then the integration. This leaves bash's normal startup
+//!   untouched (no posix mode to switch off, and `/etc/bash.bashrc` still
+//!   runs first). A login shell (`-l`, `--login`, or a leading `-` in
+//!   argv[0]) ignores `--rcfile`, so it starts as `bash [-l] --posix` with
+//!   `ENV` naming a script that restores `ENV`, turns posix mode off, runs
+//!   the login files bash would have (`/etc/profile`, then the first of
+//!   `~/.bash_profile`, `~/.bash_login`, `~/.profile`) and loads the
+//!   integration: the technique Ghostty uses.
 //! - **zsh** starts with `ZDOTDIR` pointing at a directory holding a
 //!   `.zshenv` that restores the original `ZDOTDIR` (kept in
 //!   `ULTTY_ZSH_ZDOTDIR`), runs the user's `.zshenv`, and loads the
@@ -18,7 +21,11 @@
 //! - **fish** starts with Ultty's directory first on `XDG_DATA_DIRS`, so fish
 //!   loads the script from `vendor_conf.d`; the script takes the entry out
 //!   again.
-//! - Any other shell, or a shell given arguments, is left alone.
+//! - **zsh and fish login shells** (`-l`) are injected the same way as the
+//!   others; the login flag is kept. For zsh, `.zshenv` restores `ZDOTDIR`
+//!   before `.zprofile` and `.zlogin` are looked for.
+//! - Any other shell, or a shell given other arguments than `-l`/`--login`,
+//!   is left alone.
 //!
 //! The files are embedded in the binary and written to a private directory
 //! on first use, so nothing needs installing. `ULTTY_SHELL_INTEGRATION=off`
@@ -39,6 +46,9 @@ use std::sync::OnceLock;
 pub const ENV_MODE: &str = "ULTTY_SHELL_INTEGRATION";
 /// Directory holding the integration files, set in injected shells.
 pub const ENV_DIR: &str = "ULTTY_SHELL_INTEGRATION_DIR";
+/// Login bash: the user's own `ENV`, if one was set, which the restore script
+/// puts back.
+const ENV_BASH_ORIG_ENV: &str = "ULTTY_BASH_ORIG_ENV";
 /// zsh: the user's original `ZDOTDIR`, present only if one was set.
 const ENV_ZSH_ZDOTDIR: &str = "ULTTY_ZSH_ZDOTDIR";
 /// fish: the `XDG_DATA_DIRS` entry the script removes again.
@@ -53,6 +63,10 @@ const FILES: &[(&str, &str)] = &[
     (
         "bash/ultty.bashrc",
         include_str!("../../../../dist/shell-integration/inject/bashrc"),
+    ),
+    (
+        "bash/ultty.bashenv",
+        include_str!("../../../../dist/shell-integration/inject/bashenv"),
     ),
     (
         "zsh/ultty.zsh",
@@ -114,16 +128,33 @@ pub fn plan(
 ) -> Option<Injection> {
     let shell = detect(program)?;
     let dir_str = dir.to_str()?;
-    // Only a bare interactive start: anything else is the caller's choice.
+    // Only a bare start, optionally as a login shell: anything else is the
+    // caller's choice.
     let argv0 = args.first().copied().unwrap_or(program);
-    if args.len() > 1 || argv0.starts_with('-') {
-        return None;
-    }
+    let login_flag = match args.get(1..).unwrap_or_default() {
+        [] => None,
+        [flag @ ("-l" | "--login")] => Some(*flag),
+        _ => return None,
+    };
+    let login = login_flag.is_some() || argv0.starts_with('-');
     let mut env: Vec<(OsString, OsString)> = vec![
         (ENV_MODE.into(), "auto".into()),
         (ENV_DIR.into(), dir.as_os_str().to_owned()),
     ];
     let args = match shell {
+        Shell::Bash if login => {
+            // `--posix` makes bash read $ENV even as a login shell; the
+            // script there undoes posix mode and runs the login files.
+            if let Some(original) = var("ENV") {
+                env.push((ENV_BASH_ORIG_ENV.into(), original));
+            }
+            env.push(("ENV".into(), format!("{dir_str}/bash/ultty.bashenv").into()));
+            // bash wants long options before short ones, so `--posix` goes
+            // ahead of `-l`.
+            let mut args = vec![argv0.to_string(), "--posix".to_string()];
+            args.extend(login_flag.map(str::to_string));
+            args
+        }
         Shell::Bash => vec![
             argv0.to_string(),
             "--rcfile".to_string(),
@@ -134,7 +165,9 @@ pub fn plan(
                 env.push((ENV_ZSH_ZDOTDIR.into(), original));
             }
             env.push(("ZDOTDIR".into(), format!("{dir_str}/zsh").into()));
-            vec![argv0.to_string()]
+            let mut args = vec![argv0.to_string()];
+            args.extend(login_flag.map(str::to_string));
+            args
         }
         Shell::Fish => {
             let mut dirs = OsString::from(dir_str);
@@ -146,7 +179,9 @@ pub fn plan(
             );
             env.push(("XDG_DATA_DIRS".into(), dirs));
             env.push((ENV_FISH_XDG_DIR.into(), dir.as_os_str().to_owned()));
-            vec![argv0.to_string()]
+            let mut args = vec![argv0.to_string()];
+            args.extend(login_flag.map(str::to_string));
+            args
         }
     };
     Some(Injection { args, env })
@@ -168,6 +203,23 @@ pub fn for_spawn(program: &str, args: &[&str], env: &[(OsString, OsString)]) -> 
         return None;
     }
     plan(program, args, &var, runtime_dir()?)
+}
+
+/// The argv and the complete extra environment to spawn a shell with.
+pub type SpawnPlan = (Vec<String>, Vec<(OsString, OsString)>);
+
+/// [`for_spawn`] with the injected variables merged into `env`: the argv and
+/// the complete extra environment to spawn with, or `None` to start the shell
+/// unchanged.
+pub fn spawn_plan(program: &str, args: &[&str], env: &[(OsString, OsString)]) -> Option<SpawnPlan> {
+    let injection = for_spawn(program, args, env)?;
+    let mut merged: Vec<_> = env
+        .iter()
+        .filter(|(key, _)| !injection.env.iter().any(|(added, _)| added == key))
+        .cloned()
+        .collect();
+    merged.extend(injection.env);
+    Some((injection.args, merged))
 }
 
 /// The directory the embedded files are written to, once per process.
@@ -338,11 +390,82 @@ mod tests {
     }
 
     #[test]
-    fn login_bash_is_started_as_asked() {
-        assert_eq!(plan_with("/bin/bash", &["/bin/bash", "-l"], &[]), None);
-        assert_eq!(plan_with("/bin/bash", &["/bin/bash", "--login"], &[]), None);
-        assert_eq!(plan_with("/bin/bash", &["-bash"], &[]), None);
-        assert_eq!(plan_with("-bash", &["-bash"], &[]), None);
+    fn login_bash_starts_in_posix_mode_with_env_pointing_at_the_restore_script() {
+        let script = format!("{DIR}/bash/ultty.bashenv");
+        for (program, argv, expected) in [
+            (
+                "/bin/bash",
+                vec!["/bin/bash", "-l"],
+                vec!["/bin/bash", "--posix", "-l"],
+            ),
+            (
+                "/bin/bash",
+                vec!["/bin/bash", "--login"],
+                vec!["/bin/bash", "--posix", "--login"],
+            ),
+            ("/bin/bash", vec!["-bash"], vec!["-bash", "--posix"]),
+            ("-bash", vec!["-bash"], vec!["-bash", "--posix"]),
+        ] {
+            let injection = plan_with(program, &argv, &[]).unwrap();
+            assert_eq!(injection.args, expected, "{argv:?}");
+            assert_eq!(env_of(&injection, "ENV").unwrap(), script);
+            assert!(env_of(&injection, ENV_BASH_ORIG_ENV).is_none());
+            assert_eq!(env_of(&injection, ENV_MODE).unwrap(), "auto");
+        }
+    }
+
+    #[test]
+    fn login_bash_keeps_the_users_env_for_the_restore_script() {
+        let injection =
+            plan_with("/bin/bash", &["/bin/bash", "-l"], &[("ENV", "/home/u/env")]).unwrap();
+        assert_eq!(
+            env_of(&injection, ENV_BASH_ORIG_ENV).unwrap(),
+            "/home/u/env"
+        );
+        let empty = plan_with("/bin/bash", &["/bin/bash", "-l"], &[("ENV", "")]).unwrap();
+        assert_eq!(env_of(&empty, ENV_BASH_ORIG_ENV).unwrap(), "");
+        // A non-login bash never reads ENV, so it is not touched.
+        let plain = plan_with("/bin/bash", &["/bin/bash"], &[("ENV", "/x")]).unwrap();
+        assert!(env_of(&plain, "ENV").is_none());
+    }
+
+    #[test]
+    fn login_zsh_and_fish_keep_their_login_flag() {
+        let zsh = plan_with("/bin/zsh", &["/bin/zsh", "-l"], &[]).unwrap();
+        assert_eq!(zsh.args, ["/bin/zsh", "-l"]);
+        assert_eq!(env_of(&zsh, "ZDOTDIR").unwrap(), format!("{DIR}/zsh"));
+        let dashed = plan_with("-zsh", &["-zsh"], &[]).unwrap();
+        assert_eq!(dashed.args, ["-zsh"]);
+        let fish = plan_with("/bin/fish", &["/bin/fish", "--login"], &[]).unwrap();
+        assert_eq!(fish.args, ["/bin/fish", "--login"]);
+    }
+
+    #[test]
+    fn login_shells_with_more_arguments_are_left_alone() {
+        for shell in ["bash", "zsh", "fish"] {
+            let program = format!("/bin/{shell}");
+            for extra in [&["-l", "-c", "true"][..], &["-i"], &["-l", "-l"]] {
+                let mut argv = vec![program.as_str()];
+                argv.extend(extra);
+                assert_eq!(plan_with(&program, &argv, &[]), None, "{argv:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_plan_merges_the_injection_into_the_env() {
+        let env = [
+            (OsString::from("KEEP"), OsString::from("1")),
+            (OsString::from(ENV_MODE), OsString::from("stale")),
+        ];
+        let (args, merged) = spawn_plan("/bin/bash", &["/bin/bash"], &env).unwrap();
+        assert_eq!(args[1], "--rcfile");
+        assert!(merged.iter().any(|(k, v)| k == "KEEP" && v == "1"));
+        let modes: Vec<_> = merged.iter().filter(|(k, _)| k == ENV_MODE).collect();
+        assert_eq!(modes.len(), 1);
+        assert_eq!(modes[0].1, "auto");
+        let off = [(OsString::from(ENV_MODE), OsString::from("off"))];
+        assert_eq!(spawn_plan("/bin/bash", &["/bin/bash", "-l"], &off), None);
     }
 
     #[test]
@@ -454,7 +577,11 @@ mod tests {
 
         fs::write(dir.join("zsh/.zshenv"), "echo pwned\n").unwrap();
         assert!(install(base.path()).is_err(), "tampered content");
-        fs::write(dir.join("zsh/.zshenv"), FILES[3].1).unwrap();
+        let zshenv = FILES
+            .iter()
+            .find(|(path, _)| *path == "zsh/.zshenv")
+            .unwrap();
+        fs::write(dir.join(zshenv.0), zshenv.1).unwrap();
 
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(install(base.path()).is_err(), "group- or world-readable");

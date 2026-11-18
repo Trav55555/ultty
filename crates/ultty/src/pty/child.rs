@@ -64,16 +64,10 @@ impl Child {
         size: PtySize,
         env: &[(OsString, OsString)],
     ) -> Result<Self> {
-        let Some(injection) = shell_integration::for_spawn(shell, &[shell], env) else {
+        let Some((args, env)) = shell_integration::spawn_plan(shell, &[shell], env) else {
             return Self::spawn(shell, &[shell], working_dir, size, env);
         };
-        let mut env: Vec<_> = env
-            .iter()
-            .filter(|(key, _)| !injection.env.iter().any(|(added, _)| added == key))
-            .cloned()
-            .collect();
-        env.extend(injection.env);
-        let args: Vec<&str> = injection.args.iter().map(String::as_str).collect();
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
         Self::spawn(shell, &args, working_dir, size, &env)
     }
 

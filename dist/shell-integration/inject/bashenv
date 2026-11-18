@@ -1,0 +1,33 @@
+# Ultty's $ENV for a login bash. A login bash ignores `--rcfile`, so Ultty
+# starts it as `bash [-l] --posix` with ENV pointing here: bash in posix mode
+# reads $ENV in place of its login files. This puts everything back, then
+# does what bash would have done for a login shell: /etc/profile, then the
+# first of ~/.bash_profile, ~/.bash_login and ~/.profile (which sources
+# ~/.bashrc itself, if the user wants it). The integration loads last.
+# Keep every command here simple: the first lines are parsed in posix mode.
+
+if [ -n "${ULTTY_BASH_ORIG_ENV+x}" ]; then
+    ENV=$ULTTY_BASH_ORIG_ENV
+    export ENV
+else
+    unset ENV
+fi
+unset ULTTY_BASH_ORIG_ENV
+set +o posix
+unset POSIXLY_CORRECT
+
+if [ -r /etc/profile ]; then
+    . /etc/profile
+fi
+
+for __ultty_profile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+    if [ -r "$__ultty_profile" ]; then
+        . "$__ultty_profile"
+        break
+    fi
+done
+unset __ultty_profile
+
+if [ -n "${ULTTY_SHELL_INTEGRATION_DIR-}" ] && [ -r "$ULTTY_SHELL_INTEGRATION_DIR/bash/ultty.bash" ]; then
+    . "$ULTTY_SHELL_INTEGRATION_DIR/bash/ultty.bash"
+fi
