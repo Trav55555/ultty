@@ -705,8 +705,11 @@ fn parse(source: &str, list: Option<ListState>) -> (Vec<Block>, Option<ReparsePo
     // (`> _\n> : \n\n`); they are shown as the text they are. Without
     // heading attributes: it panics on a heading a task marker was carried
     // into (`1. [x] # x\n[r]: http://r\n  \t\n===\n`), and `{#id}` is
-    // shown as written.
+    // shown as written. Without smart punctuation: it turns `--flag` into an
+    // en dash and straight quotes into curly ones, so commands and JSON in
+    // prose would copy out changed.
     let options = Options::all()
+        - Options::ENABLE_SMART_PUNCTUATION
         - Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
         - Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS
         - Options::ENABLE_DEFINITION_LIST
@@ -1742,6 +1745,27 @@ mod tests {
         let view = MarkdownView::new("");
         assert_eq!(view.children_count(), 0);
         assert_eq!(view.constraints().height, Dimension::Cells(1.0));
+    }
+
+    #[test]
+    fn prose_keeps_dashes_and_straight_quotes_as_typed() {
+        // Smart punctuation would show `--flag` as `–flag` and the quotes as
+        // curly ones, and a selection would copy those out.
+        let source =
+            "Run `cmd` with --flag \"x\" and 'y' -- don't...\n\n| a | b |\n|---|---|\n| 1 | 2 |";
+        let text: String = MarkdownView::new(source)
+            .wrapped_rows(80)
+            .iter()
+            .flat_map(|row| &row.spans)
+            .map(|span| span.text.as_str())
+            .collect();
+        assert!(text.contains("--flag \"x\" and 'y' -- don't..."), "{text}");
+        assert!(
+            !text.contains(['\u{2013}', '\u{2014}', '\u{201c}', '\u{2019}', '\u{2026}']),
+            "{text}"
+        );
+        // Other extensions stay on: the table renders as cells, not pipes.
+        assert!(!text.contains("|---|"), "{text}");
     }
 
     #[test]
