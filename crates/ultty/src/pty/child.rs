@@ -402,10 +402,12 @@ impl ChildExec {
             arg_strings.push(cstring_from_bytes(program.as_bytes())?);
         }
 
+        let strip_vk_driver_files = crate::platform::vulkan_icd::narrowed_env();
         let mut env = Vec::new();
         for (key, value) in std::env::vars_os() {
             if key == "TERM"
                 || key == "COLORTERM"
+                || (strip_vk_driver_files && key == "VK_DRIVER_FILES")
                 || INHERITED_MULTIPLEXER_VARS.iter().any(|var| key == *var)
                 || extra_env.iter().any(|(extra_key, _)| *extra_key == key)
             {

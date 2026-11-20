@@ -322,8 +322,17 @@ fn setup(
         Ok(gpu) => gpu,
         Err(primary) => {
             tracing::info!("No primary GPU backend ({primary:#}); trying GL");
-            request_gpu(&display, &window, wgpu::Backends::SECONDARY)
-                .map_err(|gl| anyhow::anyhow!("{primary:#}; with GL: {gl:#}"))?
+            request_gpu(&display, &window, wgpu::Backends::SECONDARY).map_err(|gl| {
+                if ultty::platform::vulkan_icd::narrowed_env() {
+                    anyhow::anyhow!(
+                        "{primary:#}; with GL: {gl:#} \
+                         (Vulkan ICDs were narrowed by behavior.narrow_vulkan_icd; \
+                         set narrow_vulkan_icd = false or VK_DRIVER_FILES to override)"
+                    )
+                } else {
+                    anyhow::anyhow!("{primary:#}; with GL: {gl:#}")
+                }
+            })?
         }
     };
     tracing::debug!(target: "ultty::startup", "GPU adapter ready");

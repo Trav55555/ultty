@@ -1066,6 +1066,13 @@ pub struct BehaviorConfig {
     /// AccessKit (the default). When false Ultty never connects to the
     /// accessibility bus. Read at start only.
     pub accessibility: bool,
+    /// On Linux, narrow the Vulkan loader (`VK_DRIVER_FILES`) to the detected
+    /// hardware GPU's ICD at startup so unused drivers (such as Mesa's
+    /// software rasterizer and `libLLVM`) are not mapped into the process.
+    /// Ignored when a Vulkan loader environment variable is already set, and
+    /// falls back to all drivers if no matching GPU or ICD is present. Read
+    /// at start only.
+    pub narrow_vulkan_icd: bool,
 }
 
 impl Default for BehaviorConfig {
@@ -1083,6 +1090,7 @@ impl Default for BehaviorConfig {
             restore_session: false, // Disabled by default
             inherit_working_directory: true,
             accessibility: true,
+            narrow_vulkan_icd: true,
         }
     }
 }
@@ -1192,13 +1200,15 @@ impl BehaviorConfig {
         }
     }
 
-    /// Put back the settings a reload cannot apply (`accessibility`) from
-    /// `running`, so the config describes the app as it is. Returns whether
-    /// the reloaded file asked for something different, which takes effect
-    /// after a restart.
+    /// Put back the settings a reload cannot apply (`accessibility`,
+    /// `narrow_vulkan_icd`) from `running`, so the config describes the app as
+    /// it is. Returns whether the reloaded file asked for something different,
+    /// which takes effect after a restart.
     pub fn keep_start_only(&mut self, running: &BehaviorConfig) -> bool {
-        let changed = self.accessibility != running.accessibility;
+        let changed = self.accessibility != running.accessibility
+            || self.narrow_vulkan_icd != running.narrow_vulkan_icd;
         self.accessibility = running.accessibility;
+        self.narrow_vulkan_icd = running.narrow_vulkan_icd;
         changed
     }
 }
@@ -1811,6 +1821,21 @@ copy = "ctrl+c"
         assert!(!reloaded.cursor_blink);
 
         assert!(!reloaded.keep_start_only(&running));
+    }
+
+    #[test]
+    fn narrow_vulkan_icd_defaults_on_and_stays_start_only() {
+        assert!(Config::default().behavior.narrow_vulkan_icd);
+        let config: Config = toml::from_str("[behavior]\nnarrow_vulkan_icd = false\n").unwrap();
+        assert!(!config.behavior.narrow_vulkan_icd);
+
+        let running = BehaviorConfig {
+            narrow_vulkan_icd: false,
+            ..BehaviorConfig::default()
+        };
+        let mut reloaded = BehaviorConfig::default();
+        assert!(reloaded.keep_start_only(&running));
+        assert!(!reloaded.narrow_vulkan_icd);
     }
 
     #[test]

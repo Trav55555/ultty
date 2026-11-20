@@ -620,3 +620,26 @@ What a screen reader sees:
 With `false`, Ultty never connects to the accessibility bus and creates its
 window visible at once. Read at start; restart Ultty after changing it.
 See [accessibility-test.md](accessibility-test.md) for the manual test.
+
+## Vulkan driver narrowing (Linux)
+
+```toml
+[behavior]
+narrow_vulkan_icd = true   # false lets the Vulkan loader enumerate every installed ICD
+```
+
+On Linux, when `mesa-vulkan-drivers` is installed alongside a hardware GPU, the
+Vulkan loader normally opens every ICD manifest during adapter enumeration and
+keeps Mesa's software rasterizer (`libLLVM.so`, ~40+ MiB) mapped even when the
+hardware GPU is selected.
+
+With `true` (the default), Ultty inspects accessible render nodes under
+`/sys/class/drm/renderD*` (and `/dev/nvidiactl`) at startup—before creating any
+threads—and sets `VK_DRIVER_FILES` to the matching hardware ICD manifests.
+The setting is a no-op if a Vulkan loader environment variable
+(`VK_DRIVER_FILES`, `VK_ICD_FILENAMES`, `VK_ADD_DRIVER_FILES`,
+`VK_LOADER_DRIVERS_SELECT`, `VK_LOADER_DRIVERS_DISABLE`) is already set, and
+falls back to all drivers when no accessible hardware GPU, recognized vendor,
+or matching ICD manifest is present. Ultty strips its internal `VK_DRIVER_FILES`
+override when spawning child shells. Read at start; restart Ultty after
+changing it.
