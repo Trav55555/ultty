@@ -450,7 +450,6 @@ mod tests {
         };
         starting.apply_to(&mut renderer);
 
-        // As if the changes had been made to a running renderer.
         let mut live = pollster::block_on(Renderer::new_headless(400, 200)).unwrap();
         live.set_tab_bar_height(24.0);
         live.apply_font_config(&bigger);

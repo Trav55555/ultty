@@ -381,7 +381,6 @@ impl App {
             .input_sent_at
             .filter(|_| self.output_since_input)
             .map(|sent| now.saturating_duration_since(sent));
-        // No frame is due before there is a renderer to draw it.
         let needs_redraw = self.needs_redraw && self.renderer.is_ready();
         should_render(needs_redraw, frame_elapsed, sync_active, echo_after)
             .then_some((frame_elapsed, sync_active))
