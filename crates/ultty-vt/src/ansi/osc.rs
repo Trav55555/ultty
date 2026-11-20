@@ -248,15 +248,11 @@ impl AnsiParser {
                 // colours cannot be changed, so they are always at their
                 // defaults and there is nothing to do.
                 "110" | "111" | "112" => {}
-                // Kitty character width protocol (OSC 66)
-                // Format: 66;w=N;CHAR or 66;s=N;CHAR
-                // We print the character and ignore the width hint (monospace terminal)
+                // OSC 66 width and scale hints are not honoured yet: #177.
                 "66" => {
                     // data format: w=N;CHAR or s=N;CHAR
-                    // Find the second semicolon to get the character(s)
                     if let Some(semi_pos) = data.find(';') {
                         let chars = &data[semi_pos + 1..];
-                        // Print each character
                         for c in chars.chars() {
                             callback(Action::Print(c));
                         }
