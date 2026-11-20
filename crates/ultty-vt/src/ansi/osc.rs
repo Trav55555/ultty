@@ -161,15 +161,12 @@ impl AnsiParser {
                 // Hyperlinks (OSC 8)
                 // Format: 8;params;uri (params typically empty or id=xxx)
                 "8" => {
-                    // data format: params;uri
                     if let Some(semi_pos) = data.find(';') {
                         let _params = &data[..semi_pos];
                         let uri = &data[semi_pos + 1..];
                         if uri.is_empty() {
-                            // End hyperlink
                             callback(Action::EndHyperlink);
                         } else {
-                            // Start hyperlink
                             callback(Action::StartHyperlink(uri.to_string()));
                         }
                     }
@@ -266,7 +263,6 @@ impl AnsiParser {
                     }
                 }
                 _ => {
-                    // Unknown OSC - log for debugging
                     tracing::debug!("Unknown OSC sequence: {}", content);
                 }
             }
@@ -495,9 +491,7 @@ impl AnsiParser {
             return;
         }
 
-        // Find the 'q' that starts sixel data
         if let Some(q_pos) = content.iter().position(|&b| b == b'q') {
-            // Parse params before 'q' (semicolon-separated)
             let param_bytes = &content[..q_pos];
             let mut params = Vec::new();
             let mut current = 0u16;
@@ -514,9 +508,8 @@ impl AnsiParser {
                     _ => {}
                 }
             }
-            params.push(current); // Push last param
+            params.push(current);
 
-            // Get sixel data after 'q'
             let sixel_data = content[q_pos + 1..].to_vec();
 
             if !sixel_data.is_empty() {
@@ -660,10 +653,6 @@ mod tests {
         actions
     }
 
-    // ------------------------------------------------------------------
-    // OSC title changes (OSC 0, 1, 2)
-    // ------------------------------------------------------------------
-
     #[test]
     fn osc_set_title_code_0_bel() {
         assert_eq!(
@@ -710,10 +699,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // OSC clipboard (OSC 52)
-    // ------------------------------------------------------------------
-
     #[test]
     fn osc_clipboard_basic() {
         // "Hello" in base64 is "SGVsbG8="
@@ -757,10 +742,6 @@ mod tests {
         // so this may or may not produce an action, but must not panic
         let _ = actions;
     }
-
-    // ------------------------------------------------------------------
-    // OSC color queries (OSC 10, 11, 12)
-    // ------------------------------------------------------------------
 
     fn query(color: DynamicColor, terminator: StringTerminator) -> Action {
         Action::QueryDynamicColor { color, terminator }
@@ -837,14 +818,9 @@ mod tests {
 
     #[test]
     fn osc_color_set_ignored() {
-        // Setting colors (non-query) should not emit any action
         let actions = parse(b"\x1b]10;rgb:ff/ff/ff\x07");
         assert!(actions.is_empty());
     }
-
-    // ------------------------------------------------------------------
-    // OSC hyperlinks (OSC 8)
-    // ------------------------------------------------------------------
 
     #[test]
     fn osc_hyperlink_start() {
@@ -875,10 +851,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // OSC with different terminators (BEL vs ST)
-    // ------------------------------------------------------------------
-
     #[test]
     fn osc_bel_terminator() {
         assert_eq!(
@@ -897,47 +869,34 @@ mod tests {
 
     #[test]
     fn osc_st_followed_by_text() {
-        // After ST, the parser should return to ground state and handle normal text
         assert_eq!(
             parse(b"\x1b]0;Title\x1b\\A"),
             vec![Action::SetTitle("Title".to_string()), Action::Print('A'),]
         );
     }
 
-    // ------------------------------------------------------------------
-    // Malformed/truncated OSC sequences
-    // ------------------------------------------------------------------
-
     #[test]
     fn osc_no_semicolon_unknown_code() {
-        // OSC with no semicolon and unrecognized code - should not crash
         let actions = parse(b"\x1b]999\x07");
         assert!(actions.is_empty());
     }
 
     #[test]
     fn osc_empty_buffer() {
-        // OSC immediately terminated - empty buffer
         let actions = parse(b"\x1b]\x07");
         assert!(actions.is_empty());
     }
 
     #[test]
     fn osc_bare_133() {
-        // Bare OSC 133 without data = prompt start
         assert_eq!(parse(b"\x1b]133\x07"), vec![Action::PromptStart]);
     }
 
     #[test]
     fn osc_unknown_code_with_data() {
-        // Unknown OSC code should be silently ignored
         let actions = parse(b"\x1b]999;some data\x07");
         assert!(actions.is_empty());
     }
-
-    // ------------------------------------------------------------------
-    // OSC shell integration (OSC 133)
-    // ------------------------------------------------------------------
 
     #[test]
     fn osc_shell_integration_prompt_start() {
@@ -981,14 +940,9 @@ mod tests {
 
     #[test]
     fn osc_shell_integration_unknown_type() {
-        // Unknown shell integration type - should not emit any action
         let actions = parse(b"\x1b]133;Z\x07");
         assert!(actions.is_empty());
     }
-
-    // ------------------------------------------------------------------
-    // OSC notifications (OSC 9, OSC 777)
-    // ------------------------------------------------------------------
 
     #[test]
     fn osc_iterm2_notification() {
@@ -1049,14 +1003,9 @@ mod tests {
 
     #[test]
     fn osc_rxvt_notification_non_notify_ignored() {
-        // OSC 777 with something other than "notify" - should be ignored
         let actions = parse(b"\x1b]777;other;stuff\x07");
         assert!(actions.is_empty());
     }
-
-    // ------------------------------------------------------------------
-    // OSC working directory (OSC 7)
-    // ------------------------------------------------------------------
 
     #[test]
     fn osc_working_directory() {
@@ -1067,10 +1016,6 @@ mod tests {
             )]
         );
     }
-
-    // ------------------------------------------------------------------
-    // base64_decode unit tests
-    // ------------------------------------------------------------------
 
     #[test]
     fn base64_decode_hello() {
@@ -1086,14 +1031,12 @@ mod tests {
 
     #[test]
     fn base64_decode_padding_stripped() {
-        // base64 with padding
         let decoded = super::base64_decode("YQ==").unwrap();
         assert_eq!(decoded, b"a");
     }
 
     #[test]
     fn base64_decode_no_padding() {
-        // base64 without padding should also work
         let decoded = super::base64_decode("YQ").unwrap();
         assert_eq!(decoded, b"a");
     }
@@ -1104,14 +1047,8 @@ mod tests {
         assert_eq!(decoded, b"Hello");
     }
 
-    // ------------------------------------------------------------------
-    // DCS / Sixel
-    // ------------------------------------------------------------------
-
     #[test]
     fn dcs_sixel_basic() {
-        // DCS q <sixel_data> ST
-        // Minimal sixel: ESC P q <data> ESC backslash
         let actions = parse(b"\x1bPq#0!4~\x1b\\");
         assert_eq!(actions.len(), 1);
         match &actions[0] {
@@ -1124,7 +1061,6 @@ mod tests {
 
     #[test]
     fn dcs_sixel_with_params() {
-        // DCS 0;1;0 q <data> ST
         let actions = parse(b"\x1bP0;1;0q~\x1b\\");
         assert_eq!(actions.len(), 1);
         match &actions[0] {
@@ -1145,14 +1081,9 @@ mod tests {
 
     #[test]
     fn dcs_empty_no_action() {
-        // Empty DCS should produce no action
         let actions = parse(b"\x1bP\x1b\\");
         assert!(actions.is_empty());
     }
-
-    // ------------------------------------------------------------------
-    // APC sequences (consumed silently)
-    // ------------------------------------------------------------------
 
     #[test]
     fn apc_consumed_silently() {

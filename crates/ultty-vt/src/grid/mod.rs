@@ -137,7 +137,7 @@ impl Default for Cursor {
             position: CursorPosition::origin(),
             visible: true,
             shape: CursorShape::Block,
-            blinking: true, // Default is blinking
+            blinking: true,
             saved: None,
             wrap_pending: false,
         }
@@ -851,14 +851,12 @@ impl Grid {
                 };
                 self.add_combining_char(row, attach_col, c);
             } else if row > 0 {
-                // Previous row, last column
                 self.add_combining_char(row - 1, self.dims.cols.saturating_sub(1), c);
             }
             // Otherwise ignore (no previous cell to attach to)
             return;
         }
 
-        // If wrap is pending, perform the wrap now before writing
         if self.cursor.wrap_pending {
             self.wrap_pending_cursor();
         }
@@ -958,9 +956,7 @@ impl Grid {
     fn advance_cursor(&mut self, width: u16) {
         self.cursor.position.col = self.cursor.position.col.saturating_add(width);
 
-        // Check if we're now at or past the last column
         if self.cursor.position.col >= self.dims.cols {
-            // Keep cursor at last valid column
             self.cursor.position.col = self.dims.cols.saturating_sub(1);
             // Only set pending wrap if auto-wrap (DECAWM) is enabled;
             // when off, subsequent chars overwrite the last column
@@ -1272,7 +1268,6 @@ impl Grid {
         let region = self.effective_scroll_region();
         let blank = self.erase_key();
         if n > region.bottom - region.top {
-            // Clear the entire scroll region
             self.erase_rows_one_by_one(region.top..=region.bottom, blank);
             return;
         }
@@ -1285,7 +1280,6 @@ impl Grid {
         let region = self.effective_scroll_region();
         let blank = self.erase_key();
         if n > region.bottom - region.top {
-            // Clear the entire scroll region
             self.erase_rows_one_by_one(region.top..=region.bottom, blank);
             return;
         }
@@ -1301,12 +1295,10 @@ impl Grid {
         let blank = self.erase_key();
         let cursor_row = self.cursor.position.row;
 
-        // Only operate if cursor is within scroll region
         if cursor_row < region.top || cursor_row > region.bottom {
             return;
         }
         if n > region.bottom - cursor_row {
-            // Clear from cursor to bottom of region
             self.erase_rows_one_by_one(cursor_row..=region.bottom, blank);
             return;
         }
@@ -1322,12 +1314,10 @@ impl Grid {
         let blank = self.erase_key();
         let cursor_row = self.cursor.position.row;
 
-        // Only operate if cursor is within scroll region
         if cursor_row < region.top || cursor_row > region.bottom {
             return;
         }
         if n > region.bottom - cursor_row {
-            // Clear from cursor to bottom of region
             self.erase_rows_one_by_one(cursor_row..=region.bottom, blank);
             return;
         }
@@ -1341,7 +1331,6 @@ impl Grid {
         self.erase_cells(r, self.cursor.position.col, self.dims.cols);
         let blank = self.erase_key();
 
-        // Erase all lines below cursor
         if r + 1 < self.dims.rows {
             self.erase_rows_one_by_one(r + 1..=self.dims.rows - 1, blank);
         }
@@ -1352,12 +1341,10 @@ impl Grid {
         let r = self.cursor.position.row;
         let blank = self.erase_key();
 
-        // Erase all lines above cursor
         if r > 0 {
             self.erase_rows_one_by_one(0..=r - 1, blank);
         }
 
-        // Erase from start of current line to cursor
         self.erase_cells(r, 0, self.cursor.position.col.saturating_add(1));
     }
 
@@ -1439,7 +1426,6 @@ impl Grid {
         // the bottom.
         self.page = self.page.resized(new_dims.cols, new_dims.rows);
 
-        // Clamp cursor
         self.cursor.position.col = self
             .cursor
             .position
@@ -1479,7 +1465,6 @@ impl Grid {
         // Apps that need one re-set it after SIGWINCH (xterm does the same).
         self.scroll_region = None;
 
-        // Clamp cursor position
         self.cursor.position.col = self
             .cursor
             .position
@@ -1491,7 +1476,6 @@ impl Grid {
             .row
             .min(new_dims.rows.saturating_sub(1));
 
-        // Mark all dirty
         self.dirty = vec![true; new_dims.rows as usize];
         self.content_version = self.content_version.wrapping_add(1);
         self.row_versions = vec![self.content_version; new_dims.rows as usize];
@@ -1522,7 +1506,6 @@ impl Grid {
             }
         }
 
-        // Adjust cursor position down by the number of inserted rows
         self.cursor.position.row = self
             .cursor
             .position
@@ -1530,7 +1513,6 @@ impl Grid {
             .saturating_add(count.min(u16::MAX as usize) as u16)
             .min(self.dims.rows.saturating_sub(1));
 
-        // Mark all dirty
         self.mark_all_dirty();
     }
 
@@ -1546,14 +1528,12 @@ impl Grid {
         self.page
             .rotate_up(0, height - 1, count as u16, StyleKey::DEFAULT);
 
-        // Adjust cursor position up
         self.cursor.position.row = self
             .cursor
             .position
             .row
             .saturating_sub(count.min(u16::MAX as usize) as u16);
 
-        // Mark all dirty
         self.mark_all_dirty();
     }
 
@@ -1700,14 +1680,12 @@ mod tests {
         grid.set_cursor_position(1, 1);
         grid.write_char('A');
         grid.scroll_up(1);
-        // First row should now be empty
         assert_eq!(grid.cell(0, 0).unwrap().char(), ' ');
     }
 
     #[test]
     fn erase_display() {
         let mut grid = Grid::new(Dimensions::new(10, 5));
-        // Fill grid
         for row in 0..5 {
             for col in 0..10 {
                 grid.set_cursor_position(row + 1, col + 1);
@@ -1719,9 +1697,7 @@ mod tests {
         grid.set_cursor_position(3, 5);
         grid.erase_below();
 
-        // Check cells before cursor are unchanged
         assert_eq!(grid.cell(0, 2).unwrap().char(), 'X');
-        // Check cells after cursor are cleared
         assert_eq!(grid.cell(8, 2).unwrap().char(), ' ');
         assert_eq!(grid.cell(0, 3).unwrap().char(), ' ');
     }
@@ -1839,7 +1815,6 @@ mod tests {
         grid.attrs_mut().set_flag(CellFlags::ITALIC);
         grid.save_cursor(false);
 
-        // Change position and attrs
         grid.set_cursor_position(1, 1);
         grid.reset_attrs();
 
@@ -1869,7 +1844,6 @@ mod tests {
     fn scroll_region_full_screen_reset() {
         let mut grid = Grid::new(Dimensions::new(10, 10));
 
-        // Set a scroll region
         grid.set_scroll_region(3, 7);
         assert!(grid.scroll_region().is_some());
 
@@ -1882,39 +1856,6 @@ mod tests {
     fn scroll_up_in_region() {
         let mut grid = Grid::new(Dimensions::new(5, 10));
 
-        // Write content on each row
-        for row in 0..10 {
-            grid.cursor.position.row = row;
-            grid.cursor.position.col = 0;
-            grid.write_char((b'A' + row as u8) as char); // A, B, C, etc.
-        }
-
-        // Set scroll region to rows 3-7 (1-indexed: rows 2-6 in 0-indexed)
-        grid.set_scroll_region(3, 7);
-
-        // Scroll up within region
-        grid.scroll_up(1);
-
-        // Rows outside region should be unchanged
-        assert_eq!(grid.cell(0, 0).unwrap().char(), 'A'); // Row 0 unchanged
-        assert_eq!(grid.cell(0, 1).unwrap().char(), 'B'); // Row 1 unchanged
-
-        // Rows inside region shifted up
-        assert_eq!(grid.cell(0, 2).unwrap().char(), 'D'); // Was row 3, now row 2
-        assert_eq!(grid.cell(0, 5).unwrap().char(), 'G'); // Was row 6, now row 5
-
-        // Bottom of region should be blank
-        assert_eq!(grid.cell(0, 6).unwrap().char(), ' '); // Cleared
-
-        // Row below region unchanged
-        assert_eq!(grid.cell(0, 7).unwrap().char(), 'H');
-    }
-
-    #[test]
-    fn scroll_down_in_region() {
-        let mut grid = Grid::new(Dimensions::new(5, 10));
-
-        // Write content on each row
         for row in 0..10 {
             grid.cursor.position.row = row;
             grid.cursor.position.col = 0;
@@ -1924,21 +1865,42 @@ mod tests {
         // Set scroll region to rows 3-7 (1-indexed: rows 2-6 in 0-indexed)
         grid.set_scroll_region(3, 7);
 
-        // Scroll down within region
-        grid.scroll_down(1);
+        grid.scroll_up(1);
 
-        // Rows outside region should be unchanged
         assert_eq!(grid.cell(0, 0).unwrap().char(), 'A');
         assert_eq!(grid.cell(0, 1).unwrap().char(), 'B');
 
-        // Top of region should be blank
-        assert_eq!(grid.cell(0, 2).unwrap().char(), ' '); // Cleared
+        assert_eq!(grid.cell(0, 2).unwrap().char(), 'D'); // Was row 3, now row 2
+        assert_eq!(grid.cell(0, 5).unwrap().char(), 'G'); // Was row 6, now row 5
 
-        // Rows inside region shifted down
+        assert_eq!(grid.cell(0, 6).unwrap().char(), ' ');
+
+        assert_eq!(grid.cell(0, 7).unwrap().char(), 'H');
+    }
+
+    #[test]
+    fn scroll_down_in_region() {
+        let mut grid = Grid::new(Dimensions::new(5, 10));
+
+        for row in 0..10 {
+            grid.cursor.position.row = row;
+            grid.cursor.position.col = 0;
+            grid.write_char((b'A' + row as u8) as char);
+        }
+
+        // Set scroll region to rows 3-7 (1-indexed: rows 2-6 in 0-indexed)
+        grid.set_scroll_region(3, 7);
+
+        grid.scroll_down(1);
+
+        assert_eq!(grid.cell(0, 0).unwrap().char(), 'A');
+        assert_eq!(grid.cell(0, 1).unwrap().char(), 'B');
+
+        assert_eq!(grid.cell(0, 2).unwrap().char(), ' ');
+
         assert_eq!(grid.cell(0, 3).unwrap().char(), 'C'); // Was row 2, now row 3
         assert_eq!(grid.cell(0, 6).unwrap().char(), 'F'); // Was row 5, now row 6
 
-        // Row below region unchanged
         assert_eq!(grid.cell(0, 7).unwrap().char(), 'H');
     }
 
@@ -1946,7 +1908,6 @@ mod tests {
     fn newline_respects_scroll_region() {
         let mut grid = Grid::new(Dimensions::new(5, 10));
 
-        // Write content
         for row in 0..10 {
             grid.cursor.position.row = row;
             grid.cursor.position.col = 0;
@@ -1960,22 +1921,16 @@ mod tests {
         grid.cursor.position.row = 6;
         grid.cursor.position.col = 0;
 
-        // Newline should scroll within region
         grid.newline();
 
-        // Cursor should still be at bottom of region
         assert_eq!(grid.cursor.position.row, 6);
 
-        // Content above region unchanged
         assert_eq!(grid.cell(0, 1).unwrap().char(), 'B');
 
-        // Region scrolled up
         assert_eq!(grid.cell(0, 2).unwrap().char(), 'D'); // Was C, now D
 
-        // Bottom of region cleared
         assert_eq!(grid.cell(0, 6).unwrap().char(), ' ');
 
-        // Below region unchanged
         assert_eq!(grid.cell(0, 7).unwrap().char(), 'H');
     }
 
@@ -1987,14 +1942,12 @@ mod tests {
         grid.write_char('e');
         grid.write_char('\u{0301}'); // Combining acute accent
 
-        // Base character should be at col 0
         assert_eq!(grid.cell(0, 0).unwrap().char(), 'e');
         assert!(grid.cell(0, 0).unwrap().has_flag(CellFlags::HAS_COMBINING));
 
         // Cursor should still be at col 1 (combining char doesn't advance cursor)
         assert_eq!(grid.cursor().position.col, 1);
 
-        // Full grapheme should include both characters
         let grapheme = grid.grapheme(0, 0).unwrap();
         assert_eq!(grapheme, "e\u{0301}");
     }
@@ -2003,17 +1956,14 @@ mod tests {
     fn combining_char_cleared_on_overwrite() {
         let mut grid = Grid::new(Dimensions::new(10, 5));
 
-        // Write 'e' with combining accent
         grid.write_char('e');
         grid.write_char('\u{0301}');
 
         assert!(grid.cell(0, 0).unwrap().has_flag(CellFlags::HAS_COMBINING));
 
-        // Go back and overwrite
         grid.cursor.position.col = 0;
         grid.write_char('X');
 
-        // Combining chars should be cleared
         assert!(!grid.cell(0, 0).unwrap().has_flag(CellFlags::HAS_COMBINING));
         assert_eq!(grid.grapheme(0, 0).unwrap(), "X");
     }
@@ -2022,27 +1972,22 @@ mod tests {
     fn dirty_tracking() {
         let mut grid = Grid::new(Dimensions::new(10, 5));
 
-        // New grid should have all rows dirty
         assert!(grid.has_dirty());
         assert!(grid.is_dirty(0));
         assert!(grid.is_dirty(4));
 
-        // Clear dirty flags
         grid.clear_dirty();
         assert!(!grid.has_dirty());
         assert!(!grid.is_dirty(0));
 
-        // Writing a character marks that row dirty
         grid.write_char('A');
         assert!(grid.has_dirty());
         assert!(grid.is_dirty(0));
         assert!(!grid.is_dirty(1));
 
-        // Clear and verify
         grid.clear_dirty();
         assert!(!grid.has_dirty());
 
-        // Editing a cell marks its row dirty
         grid.update_cell(5, 2, |_| {});
         assert!(grid.is_dirty(2));
         assert!(!grid.is_dirty(0));
@@ -2053,7 +1998,6 @@ mod tests {
         let mut grid = Grid::new(Dimensions::new(10, 5));
         grid.clear_dirty();
 
-        // Mark specific rows
         grid.update_cell(0, 1, |_| {});
         grid.update_cell(0, 3, |_| {});
 
@@ -2111,7 +2055,6 @@ mod tests {
     fn wrap_respects_scroll_region() {
         let mut grid = Grid::new(Dimensions::new(5, 10));
 
-        // Write content on each row
         for row in 0..10 {
             grid.cursor.position.row = row;
             grid.cursor.position.col = 0;
@@ -2134,9 +2077,7 @@ mod tests {
         // within the region, NOT escape to row 7.
         grid.write_char('Z');
 
-        // Cursor should still be at the bottom of the scroll region
         assert_eq!(grid.cursor().position.row, 6);
-        // Row below region should be unchanged
         assert_eq!(grid.cell(0, 7).unwrap().char(), 'H');
     }
 
@@ -2157,9 +2098,7 @@ mod tests {
         assert!(grid.tab_stops.contains(&32));
         assert!(!grid.tab_stops.contains(&40));
 
-        // Widen to 80 columns
         grid.resize(Dimensions::new(80, 5));
-        // Should now have tabs at 40, 48, 56, 64, 72
         assert!(grid.tab_stops.contains(&40));
         assert!(grid.tab_stops.contains(&48));
         assert!(grid.tab_stops.contains(&72));
@@ -2172,7 +2111,6 @@ mod tests {
         assert!(grid.tab_stops.contains(&72));
         assert!(grid.tab_stops.contains(&40));
 
-        // Shrink to 20 columns
         grid.resize(Dimensions::new(20, 5));
         // Tab stops beyond col 20 should be removed
         assert!(grid.tab_stops.contains(&0));
@@ -2213,7 +2151,6 @@ mod tests {
     fn combining_chars_move_with_scrolled_rows() {
         let mut grid = Grid::new(Dimensions::new(10, 5));
 
-        // Write 'e' with combining accent on row 2
         grid.cursor.position.row = 2;
         grid.cursor.position.col = 0;
         grid.write_char('e');
@@ -2230,12 +2167,10 @@ mod tests {
     fn combining_chars_cleared_on_erase() {
         let mut grid = Grid::new(Dimensions::new(10, 5));
 
-        // Write 'e' with combining accent on row 0
         grid.write_char('e');
         grid.write_char('\u{0301}');
         assert!(grid.combining_chars(0, 0).is_some());
 
-        // Erase line right should clear combining
         grid.cursor.position.col = 0;
         grid.erase_line_right();
         assert!(grid.combining_chars(0, 0).is_none());
@@ -2268,7 +2203,6 @@ mod tests {
         assert_eq!(grid.cursor().position.col, 4);
         // Last column should have 'F' (overwritten 'E')
         assert_eq!(grid.cell(4, 0).unwrap().char(), 'F');
-        // Row 1 should be empty
         assert_eq!(grid.cell(0, 1).unwrap().char(), ' ');
     }
 
@@ -2282,7 +2216,6 @@ mod tests {
             grid.write_char(c);
         }
 
-        // Should have wrapped to row 1
         assert_eq!(grid.cursor().position.row, 1);
         assert_eq!(grid.cell(0, 1).unwrap().char(), 'F');
     }
@@ -2447,13 +2380,11 @@ mod tests {
     #[test]
     fn decstbm_bare_resets_to_full_screen() {
         let mut grid = Grid::new(Dimensions::new(80, 24));
-        // First set a region
         grid.set_scroll_region(5, 10);
         assert!(grid.scroll_region().is_some());
         // CSI r — top=0, bottom=0 (defaults to full screen)
         grid.set_scroll_region(0, 0);
         assert!(grid.scroll_region().is_none());
-        // Cursor should be at home (0,0)
         assert_eq!(grid.cursor().position.row, 0);
         assert_eq!(grid.cursor().position.col, 0);
     }
@@ -2471,7 +2402,6 @@ mod tests {
     #[test]
     fn write_char_clears_orphaned_wide_spacer() {
         let mut grid = Grid::new(Dimensions::new(80, 24));
-        // Write a wide char at col 0
         grid.write_char('中');
         assert!(grid.cell(0, 0).unwrap().is_wide());
         assert!(grid.cell(1, 0).unwrap().is_wide_spacer());
@@ -2480,21 +2410,18 @@ mod tests {
         grid.write_char('A');
         assert_eq!(grid.cell(0, 0).unwrap().char(), 'A');
         assert!(!grid.cell(0, 0).unwrap().is_wide());
-        // The spacer at col 1 should be cleared
         assert!(!grid.cell(1, 0).unwrap().is_wide_spacer());
     }
 
     #[test]
     fn write_char_clears_orphaned_wide_primary() {
         let mut grid = Grid::new(Dimensions::new(80, 24));
-        // Write a wide char at col 0
         grid.write_char('中');
         // Overwrite the spacer (col 1) with a narrow char (1-based: row=1, col=2)
         grid.set_cursor_position(1, 2);
         grid.write_char('B');
         assert_eq!(grid.cell(1, 0).unwrap().char(), 'B');
         assert!(!grid.cell(1, 0).unwrap().is_wide_spacer());
-        // The primary at col 0 should have WIDE_CHAR cleared
         assert!(!grid.cell(0, 0).unwrap().is_wide());
     }
 

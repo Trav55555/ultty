@@ -199,10 +199,6 @@ mod tests {
         actions
     }
 
-    // ------------------------------------------------------------------
-    // Basic attributes
-    // ------------------------------------------------------------------
-
     #[test]
     fn sgr_bold() {
         assert_eq!(
@@ -267,10 +263,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // Reset
-    // ------------------------------------------------------------------
-
     #[test]
     fn sgr_reset_explicit_zero() {
         assert_eq!(parse(b"\x1b[0m"), vec![Action::ResetAttributes]);
@@ -278,13 +270,8 @@ mod tests {
 
     #[test]
     fn sgr_reset_empty_params() {
-        // CSI m with no params = reset
         assert_eq!(parse(b"\x1b[m"), vec![Action::ResetAttributes]);
     }
-
-    // ------------------------------------------------------------------
-    // Disable attributes
-    // ------------------------------------------------------------------
 
     #[test]
     fn sgr_no_bold() {
@@ -342,10 +329,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // Named foreground colors (30-37)
-    // ------------------------------------------------------------------
-
     #[test]
     fn sgr_all_named_foreground_colors() {
         let expected = [
@@ -371,10 +354,6 @@ mod tests {
             );
         }
     }
-
-    // ------------------------------------------------------------------
-    // Named background colors (40-47)
-    // ------------------------------------------------------------------
 
     #[test]
     fn sgr_all_named_background_colors() {
@@ -402,10 +381,6 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Default colors (39, 49)
-    // ------------------------------------------------------------------
-
     #[test]
     fn sgr_default_foreground() {
         assert_eq!(
@@ -425,10 +400,6 @@ mod tests {
             ))]
         );
     }
-
-    // ------------------------------------------------------------------
-    // 256-color (indexed) foreground and background
-    // ------------------------------------------------------------------
 
     #[test]
     fn sgr_256_foreground_color() {
@@ -469,10 +440,6 @@ mod tests {
             ))]
         );
     }
-
-    // ------------------------------------------------------------------
-    // RGB (true color) foreground and background
-    // ------------------------------------------------------------------
 
     #[test]
     fn sgr_rgb_foreground() {
@@ -526,10 +493,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // Bright foreground colors (90-97)
-    // ------------------------------------------------------------------
-
     #[test]
     fn sgr_bright_foreground_colors() {
         let expected = [
@@ -556,10 +519,6 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Bright background colors (100-107)
-    // ------------------------------------------------------------------
-
     #[test]
     fn sgr_bright_background_colors() {
         let expected = [
@@ -585,10 +544,6 @@ mod tests {
             );
         }
     }
-
-    // ------------------------------------------------------------------
-    // Combined attributes
-    // ------------------------------------------------------------------
 
     #[test]
     fn sgr_bold_and_red() {
@@ -652,10 +607,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // Edge cases
-    // ------------------------------------------------------------------
-
     #[test]
     fn sgr_unknown_code_ignored() {
         // Code 6 is not mapped to anything - should be silently ignored
@@ -676,7 +627,6 @@ mod tests {
 
     #[test]
     fn sgr_48_without_enough_params() {
-        // CSI 48 m - extended background with no sub-params
         let actions = parse(b"\x1b[48m");
         assert!(actions.is_empty());
     }
@@ -697,10 +647,6 @@ mod tests {
             vec![Action::SetAttribute(Attribute::Bold)]
         );
     }
-
-    // ------------------------------------------------------------------
-    // named_color_from_index / bright_color_from_index helpers
-    // ------------------------------------------------------------------
 
     #[test]
     fn named_color_from_index_all() {
@@ -771,10 +717,6 @@ mod tests {
             NamedColor::BrightWhite
         );
     }
-
-    // ------------------------------------------------------------------
-    // Sub-parameters (colon form), underline styles and underline color
-    // ------------------------------------------------------------------
 
     fn attr(a: Attribute) -> Action {
         Action::SetAttribute(a)

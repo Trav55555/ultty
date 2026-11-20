@@ -456,7 +456,6 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
     // Allocate pixel buffer (RGBA)
     let mut pixels = vec![0u8; (max_x * max_y * 4) as usize];
 
-    // Set background based on mode
     if background_mode == 0 || background_mode == 2 {
         // Transparent or set to background color
         // Default is transparent (already 0)
@@ -504,7 +503,6 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
 
                 match params.len() {
                     1 => {
-                        // Select color
                         current_color = params[0] as u8;
                     }
                     5 => {
@@ -513,7 +511,6 @@ pub fn decode_sixel(data: &[u8], background_mode: u16) -> Option<(Vec<u8>, u32, 
                         let color_space = params[1];
                         match color_space {
                             1 => {
-                                // HLS
                                 palette.set_hls(index, params[2], params[3], params[4]);
                             }
                             _ => {
@@ -697,13 +694,12 @@ mod tests {
         assert_eq!(width, 1);
         assert_eq!(height, 6);
 
-        // Check that all 6 pixels are red
         for y in 0..6 {
             let offset = y * 4;
-            assert_eq!(pixels[offset], 255, "R at y={}", y); // R
-            assert_eq!(pixels[offset + 1], 0, "G at y={}", y); // G
-            assert_eq!(pixels[offset + 2], 0, "B at y={}", y); // B
-            assert_eq!(pixels[offset + 3], 255, "A at y={}", y); // A
+            assert_eq!(pixels[offset], 255, "R at y={}", y);
+            assert_eq!(pixels[offset + 1], 0, "G at y={}", y);
+            assert_eq!(pixels[offset + 2], 0, "B at y={}", y);
+            assert_eq!(pixels[offset + 3], 255, "A at y={}", y);
         }
     }
 

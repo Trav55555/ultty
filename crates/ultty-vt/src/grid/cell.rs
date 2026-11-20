@@ -119,7 +119,6 @@ pub enum Color {
 }
 
 impl Color {
-    // Named color constants
     pub const BLACK: Color = Color::Named(0);
     pub const RED: Color = Color::Named(1);
     pub const GREEN: Color = Color::Named(2);
@@ -593,7 +592,7 @@ mod tests {
         let mut cell = Cell::new('X');
         cell.copy_attrs_from(&template);
 
-        assert_eq!(cell.char(), 'X'); // Character unchanged
+        assert_eq!(cell.char(), 'X');
         assert_eq!(cell.fg(), Color::GREEN);
         assert_eq!(cell.bg(), Color::BLUE);
         assert!(cell.has_flag(CellFlags::BOLD));
