@@ -56,6 +56,9 @@ The current dated evidence set is:
 - [`2026-11-08-control-latency.md`](./2026-11-08-control-latency.md) for
   control request and event delivery latency, and background tabs no longer
   redrawing the window.
+- [`2026-11-19-t4-rerun.md`](./2026-11-19-t4-rerun.md) for the T4 rerun on
+  `main`: D6 control latency met on a real display; D3 memory and D4 startup
+  still behind Alacritty.
 - [`2026-11-11-t4-three-way.md`](./2026-11-11-t4-three-way.md) for the
   T4 three-way rerun (Ultty, Ghostty, Alacritty) on `main` after page
   storage, with Wayland latency for all three.
@@ -64,6 +67,10 @@ The current dated evidence set is:
   NVIDIA driver's idle wakeups.
 - [`2026-11-08-agent-soak.md`](./2026-11-08-agent-soak.md) for the ten-hour
   agent-session soak: frame time met, memory inconclusive (host reclaimed pages).
+- [`2026-11-13-gpu-soak-heap-trim.md`](./2026-11-13-gpu-soak-heap-trim.md)
+  for the GPU soak's memory: flat once Ultty trims the heap after large frees.
+- [`2026-11-13-gpu-soak-frame-time.md`](./2026-11-13-gpu-soak-frame-time.md)
+  for the GPU soak's frame time on the RX 7900: p99 1.5 ms, D5 met.
 - [`2026-11-07-idle-footprint.md`](./2026-11-07-idle-footprint.md) for idle
   wakeups (now none with the cursor steady), the memory breakdown, and the
   startup stage split.
