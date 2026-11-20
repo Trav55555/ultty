@@ -302,12 +302,10 @@ impl KeyParser {
             if let Key::Char(c) = key {
                 match c {
                     'i' => {
-                        // Inner text object - need next char
-                        // For now, simplified handling
+                        // Text objects are not implemented yet: #176.
                         return Some(ParseResult::Pending);
                     }
                     'a' => {
-                        // A text object - need next char
                         return Some(ParseResult::Pending);
                     }
                     _ => {}

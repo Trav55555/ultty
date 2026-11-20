@@ -724,13 +724,11 @@ impl Terminal {
         let max_col = dims.cols as i32 - 1;
         let max_row = dims.rows as i32 - 1;
 
-        // Clamp row range to valid grid bounds
         let first_row = start.row.max(0);
         let last_row = end.row.min(max_row);
 
         match sel.mode {
             SelectionMode::Normal => {
-                // Character-wise selection
                 for row_idx in first_row..=last_row {
                     if let Some(row) = buffer.visible_row(row_idx as u16) {
                         let start_col = if row_idx == start.row {
@@ -748,7 +746,6 @@ impl Terminal {
                             text.push_str(&row.copy_text(start_col as u16, end_col as u16));
                         }
 
-                        // Add newline between rows (except last)
                         if row_idx < last_row {
                             text.push('\n');
                         }
@@ -756,7 +753,6 @@ impl Terminal {
                 }
             }
             SelectionMode::Line => {
-                // Line-wise selection
                 for row_idx in first_row..=last_row {
                     if let Some(row) = buffer.visible_row(row_idx as u16) {
                         text.push_str(row.copy_text(0, row.width()).trim_end());
@@ -767,7 +763,6 @@ impl Terminal {
                 }
             }
             SelectionMode::Block => {
-                // Block/rectangular selection
                 let (left, right) = if start.col <= end.col {
                     (start.col.max(0), end.col.min(max_col))
                 } else {
@@ -787,7 +782,6 @@ impl Terminal {
             }
         }
 
-        // Trim trailing whitespace from each line
         let trimmed: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
         Some(trimmed.join("\n"))
     }
@@ -902,7 +896,6 @@ impl Terminal {
     /// Set working directory (from OSC 7 file://host/path).
     pub fn set_working_directory(&mut self, uri: String) {
         self.shell_integration.working_directory_uri = Some(uri.clone());
-        // Parse file:// URI to extract path
         let path = if let Some(stripped) = uri.strip_prefix("file://") {
             // Skip file://hostname/ prefix
             if let Some(path_start) = stripped.find('/') {
@@ -914,7 +907,6 @@ impl Terminal {
             uri
         };
 
-        // URL decode the path
         let decoded = percent_decode(&path);
         self.shell_integration.working_directory = Some(decoded);
         tracing::debug!(
@@ -1142,8 +1134,6 @@ impl Terminal {
         self.main.set_image_ids(self.image_ids.clone());
         self.alternate.set_image_ids(self.image_ids.clone());
     }
-
-    // === Hyperlink support (OSC 8) ===
 
     /// Start a hyperlink with the given URI.
     ///
@@ -1426,8 +1416,6 @@ impl Terminal {
         self.pending_column_resize.is_some()
     }
 
-    // === Damage tracking ===
-
     /// Check if the active buffer has any dirty content.
     pub fn has_dirty(&self) -> bool {
         self.buffer().has_dirty()
@@ -1492,7 +1480,6 @@ impl Terminal {
             }
         }
 
-        // Encode based on format
         match self.modes.mouse_encoding {
             MouseEncoding::Sgr => {
                 Some(self.encode_mouse_sgr(button, x, y, pressed, motion, modifiers))
@@ -1857,25 +1844,19 @@ mod tests {
     fn alternate_screen() {
         let mut term = Terminal::new(Dimensions::new(80, 24));
 
-        // Write something to main screen
         term.grid_mut().write_char('M');
 
-        // Enter alternate screen
         term.enter_alternate_screen();
         assert!(term.is_alternate_screen());
 
-        // Alternate should be clear
         assert_eq!(term.grid().cell(0, 0).unwrap().char(), ' ');
 
-        // Write to alternate
         term.grid_mut().write_char('A');
         assert_eq!(term.grid().cell(0, 0).unwrap().char(), 'A');
 
-        // Return to main
         term.leave_alternate_screen();
         assert!(!term.is_alternate_screen());
 
-        // Main should still have original content
         assert_eq!(term.grid().cell(0, 0).unwrap().char(), 'M');
     }
 
@@ -1883,7 +1864,6 @@ mod tests {
     fn selection_normal() {
         let mut term = Terminal::new(Dimensions::new(10, 5));
 
-        // Write some text
         for c in "Hello".chars() {
             term.grid_mut().write_char(c);
         }
@@ -1905,7 +1885,6 @@ mod tests {
     fn selection_multiline() {
         let mut term = Terminal::new(Dimensions::new(10, 5));
 
-        // Write text on two lines
         for c in "Line1".chars() {
             term.grid_mut().write_char(c);
         }
@@ -1932,11 +1911,9 @@ mod tests {
             term.grid_mut().write_char(c);
         }
 
-        // Line selection
         term.start_selection(SelectionPoint::new(2, 0), SelectionMode::Line);
         term.update_selection(SelectionPoint::new(2, 0));
 
-        // Entire line should be selected
         assert!(term.is_selected(0, 0));
         assert!(term.is_selected(5, 0));
         assert!(!term.is_selected(0, 1));
@@ -1948,7 +1925,6 @@ mod tests {
     fn selection_block_mode() {
         let mut term = Terminal::new(Dimensions::new(10, 5));
 
-        // Write a grid
         for row in 0..3 {
             term.grid_mut().set_cursor_position(row + 1, 1);
             for c in "ABCDE".chars() {

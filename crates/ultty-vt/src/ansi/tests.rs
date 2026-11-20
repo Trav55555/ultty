@@ -207,12 +207,10 @@ fn cursor_visibility() {
 
 #[test]
 fn osc_set_title() {
-    // OSC 0 ; title BEL
     assert_eq!(
         parse(b"\x1b]0;My Terminal\x07"),
         vec![Action::SetTitle("My Terminal".to_string())]
     );
-    // OSC 2 ; title BEL
     assert_eq!(
         parse(b"\x1b]2;Window Title\x07"),
         vec![Action::SetTitle("Window Title".to_string())]
@@ -221,7 +219,6 @@ fn osc_set_title() {
 
 #[test]
 fn osc_working_directory() {
-    // OSC 7 ; file://host/path BEL
     assert_eq!(
         parse(b"\x1b]7;file://localhost/home/user\x07"),
         vec![Action::SetWorkingDirectory(
@@ -232,16 +229,12 @@ fn osc_working_directory() {
 
 #[test]
 fn osc_shell_integration() {
-    // Prompt start
     assert_eq!(parse(b"\x1b]133;A\x07"), vec![Action::PromptStart]);
 
-    // Command start
     assert_eq!(parse(b"\x1b]133;B\x07"), vec![Action::CommandStart]);
 
-    // Command executed
     assert_eq!(parse(b"\x1b]133;C\x07"), vec![Action::CommandExecuted]);
 
-    // Command finished with exit code
     assert_eq!(
         parse(b"\x1b]133;D;0\x07"),
         vec![Action::CommandFinished(Some(0))]
@@ -254,19 +247,16 @@ fn osc_shell_integration() {
 
 #[test]
 fn osc_hyperlinks() {
-    // Start hyperlink (OSC 8 ; params ; uri BEL)
     assert_eq!(
         parse(b"\x1b]8;;https://example.com\x07"),
         vec![Action::StartHyperlink("https://example.com".to_string())]
     );
 
-    // Start hyperlink with id parameter
     assert_eq!(
         parse(b"\x1b]8;id=link1;https://github.com\x07"),
         vec![Action::StartHyperlink("https://github.com".to_string())]
     );
 
-    // End hyperlink (empty URI)
     assert_eq!(parse(b"\x1b]8;;\x07"), vec![Action::EndHyperlink]);
 }
 
@@ -290,7 +280,6 @@ fn osc_notifications() {
         }]
     );
 
-    // OSC 777 with just title
     assert_eq!(
         parse(b"\x1b]777;notify;Alert;\x07"),
         vec![Action::Notification {
@@ -302,16 +291,13 @@ fn osc_notifications() {
 
 #[test]
 fn kitty_keyboard_protocol() {
-    // CSI > flags u - push keyboard mode
     assert_eq!(parse(b"\x1b[>1u"), vec![Action::KittyKeyboardPush(1)]);
 
     // Push with multiple flags (disambiguate + report events)
     assert_eq!(parse(b"\x1b[>3u"), vec![Action::KittyKeyboardPush(3)]);
 
-    // CSI < u - pop keyboard mode
     assert_eq!(parse(b"\x1b[<u"), vec![Action::KittyKeyboardPop(1)]);
 
-    // CSI ? u - query keyboard mode
     assert_eq!(parse(b"\x1b[?u"), vec![Action::KittyKeyboardQuery]);
 }
 
@@ -321,25 +307,21 @@ fn osc_66_character_width() {
     // Format: OSC 66 ; w=N ; CHAR ST
     // Should print the character(s) after the width specification
 
-    // Single block character with ST terminator
     assert_eq!(
         parse(b"\x1b]66;w=1;\xE2\x96\x80\x1b\\"),
         vec![Action::Print('\u{2580}')]
     );
 
-    // Block character with BEL terminator
     assert_eq!(
         parse(b"\x1b]66;w=1;\xE2\x96\x88\x07"),
         vec![Action::Print('\u{2588}')]
     );
 
-    // Multiple characters
     assert_eq!(
         parse(b"\x1b]66;w=1;\xE2\x96\x80\xE2\x96\x84\x1b\\"),
         vec![Action::Print('\u{2580}'), Action::Print('\u{2584}')]
     );
 
-    // Screen width (s=N) format
     assert_eq!(
         parse(b"\x1b]66;s=2;\xE2\x96\x84\x1b\\"),
         vec![Action::Print('\u{2584}')]
@@ -354,7 +336,6 @@ fn osc_st_terminator() {
         vec![Action::SetTitle("My Title".to_string())]
     );
 
-    // Verify no extra backslash is printed
     assert_eq!(
         parse(b"\x1b]0;Title\x1b\\X"),
         vec![Action::SetTitle("Title".to_string()), Action::Print('X')]
@@ -366,10 +347,8 @@ fn apc_sequences() {
     // APC sequences (ESC _) other than Ultty's and Kitty graphics are
     // consumed without printing anything.
 
-    // Simple APC with ST terminator
     assert_eq!(parse(b"\x1b_X\x1b\\"), vec![]);
 
-    // APC followed by text - text should print
     assert_eq!(
         parse(b"\x1b_Xi=31337,s=1,v=1,a=q\x1b\\Hello"),
         vec![
@@ -394,7 +373,6 @@ fn utf8_two_byte_chars() {
     assert_eq!(parse(b"\xC3\xA9"), vec![Action::Print('\u{00E9}')]);
     // a with circumflex (U+00E2) = 0xC3 0xA2
     assert_eq!(parse(b"\xC3\xA2"), vec![Action::Print('\u{00E2}')]);
-    // Mixed ASCII and UTF-8
     assert_eq!(
         parse(b"caf\xC3\xA9"),
         vec![
@@ -448,7 +426,6 @@ fn utf8_invalid_lead_bytes() {
 
 #[test]
 fn utf8_mixed_with_escape_sequences() {
-    // UTF-8 chars mixed with ANSI escapes
     assert_eq!(
         parse(b"\xC3\xA9\x1b[1m"),
         vec![
@@ -477,7 +454,6 @@ fn dec_special_graphics_line_drawing() {
 
 #[test]
 fn dec_special_graphics_corners() {
-    // All four corners
     assert_eq!(
         parse(b"\x1b(0lkjm\x1b(B"),
         vec![
@@ -491,7 +467,6 @@ fn dec_special_graphics_corners() {
 
 #[test]
 fn dec_special_graphics_tees_and_cross() {
-    // Tee characters and crossing lines
     assert_eq!(
         parse(b"\x1b(0tuvwn\x1b(B"),
         vec![
@@ -554,10 +529,6 @@ fn secondary_device_attributes() {
     assert_eq!(parse(b"\x1b[>0c"), vec![Action::SecondaryDeviceAttributes]);
 }
 
-// ---------------------------------------------------------------
-// CSI: cursor movement (remaining variants)
-// ---------------------------------------------------------------
-
 #[test]
 fn cursor_forward() {
     assert_eq!(parse(b"\x1b[4C"), vec![Action::CursorForward(4)]);
@@ -600,10 +571,6 @@ fn cursor_position_f_variant() {
     );
 }
 
-// ---------------------------------------------------------------
-// CSI: erase operations
-// ---------------------------------------------------------------
-
 #[test]
 fn erase_in_line() {
     assert_eq!(parse(b"\x1b[K"), vec![Action::EraseInLine(0)]);
@@ -624,10 +591,6 @@ fn erase_display_all_modes() {
     assert_eq!(parse(b"\x1b[1J"), vec![Action::EraseInDisplay(1)]);
     assert_eq!(parse(b"\x1b[3J"), vec![Action::EraseInDisplay(3)]);
 }
-
-// ---------------------------------------------------------------
-// CSI: line/character insert/delete
-// ---------------------------------------------------------------
 
 #[test]
 fn insert_lines() {
@@ -653,10 +616,6 @@ fn delete_characters() {
     assert_eq!(parse(b"\x1b[P"), vec![Action::DeleteCharacters(1)]);
 }
 
-// ---------------------------------------------------------------
-// CSI: scrolling region
-// ---------------------------------------------------------------
-
 #[test]
 fn set_scrolling_region() {
     assert_eq!(
@@ -664,10 +623,6 @@ fn set_scrolling_region() {
         vec![Action::SetScrollingRegion { top: 5, bottom: 20 }]
     );
 }
-
-// ---------------------------------------------------------------
-// CSI: cursor style
-// ---------------------------------------------------------------
 
 #[test]
 fn set_cursor_style() {
@@ -681,18 +636,10 @@ fn set_cursor_style() {
     assert_eq!(parse(b"\x1b[6 q"), vec![Action::SetCursorStyle(6)]);
 }
 
-// ---------------------------------------------------------------
-// CSI: report cursor position
-// ---------------------------------------------------------------
-
 #[test]
 fn report_cursor_position() {
     assert_eq!(parse(b"\x1b[6n"), vec![Action::ReportCursorPosition]);
 }
-
-// ---------------------------------------------------------------
-// CSI: modes (additional)
-// ---------------------------------------------------------------
 
 #[test]
 fn bracketed_paste_mode() {
@@ -747,10 +694,6 @@ fn mouse_tracking_modes() {
     );
     assert_eq!(parse(b"\x1b[?1006h"), vec![Action::SetMode(Mode::MouseSgr)]);
 }
-
-// ---------------------------------------------------------------
-// SGR: all attribute types
-// ---------------------------------------------------------------
 
 #[test]
 fn sgr_dim() {
@@ -840,10 +783,6 @@ fn sgr_disable_attributes() {
     );
 }
 
-// ---------------------------------------------------------------
-// SGR: background colors
-// ---------------------------------------------------------------
-
 #[test]
 fn sgr_background_color() {
     assert_eq!(
@@ -884,10 +823,6 @@ fn sgr_background_true_color() {
     );
 }
 
-// ---------------------------------------------------------------
-// SGR: default colors
-// ---------------------------------------------------------------
-
 #[test]
 fn sgr_default_foreground() {
     assert_eq!(
@@ -907,10 +842,6 @@ fn sgr_default_background() {
         ))]
     );
 }
-
-// ---------------------------------------------------------------
-// SGR: bright colors
-// ---------------------------------------------------------------
 
 #[test]
 fn sgr_bright_foreground() {
@@ -950,10 +881,6 @@ fn sgr_bright_background() {
     );
 }
 
-// ---------------------------------------------------------------
-// SGR: multiple params in one sequence
-// ---------------------------------------------------------------
-
 #[test]
 fn sgr_multiple_params() {
     assert_eq!(
@@ -976,10 +903,6 @@ fn sgr_reset_with_bold_and_color() {
         ]
     );
 }
-
-// ---------------------------------------------------------------
-// SGR: all 8 named foreground colors
-// ---------------------------------------------------------------
 
 #[test]
 fn sgr_all_named_foreground_colors() {
@@ -1007,13 +930,8 @@ fn sgr_all_named_foreground_colors() {
     }
 }
 
-// ---------------------------------------------------------------
-// OSC: clipboard (OSC 52)
-// ---------------------------------------------------------------
-
 #[test]
 fn osc_clipboard() {
-    // OSC 52 ; c ; base64data BEL
     assert_eq!(
         parse(b"\x1b]52;c;SGVsbG8=\x07"),
         vec![Action::SetClipboard {
@@ -1022,10 +940,6 @@ fn osc_clipboard() {
         }]
     );
 }
-
-// ---------------------------------------------------------------
-// OSC: color queries
-// ---------------------------------------------------------------
 
 #[test]
 fn osc_query_colors() {
@@ -1045,10 +959,6 @@ fn osc_query_colors() {
     }
 }
 
-// ---------------------------------------------------------------
-// ESC sequences: index, reverse index, next line
-// ---------------------------------------------------------------
-
 #[test]
 fn esc_reverse_index() {
     assert_eq!(parse(b"\x1bM"), vec![Action::ReverseIndex]);
@@ -1064,19 +974,11 @@ fn esc_next_line() {
     assert_eq!(parse(b"\x1bE"), vec![Action::NextLine]);
 }
 
-// ---------------------------------------------------------------
-// Tab operations
-// ---------------------------------------------------------------
-
 #[test]
 fn tab_clear() {
     assert_eq!(parse(b"\x1b[0g"), vec![Action::ClearTabStop(0)]);
     assert_eq!(parse(b"\x1b[3g"), vec![Action::ClearTabStop(3)]);
 }
-
-// ---------------------------------------------------------------
-// Synchronized update
-// ---------------------------------------------------------------
 
 #[test]
 fn synchronized_update_mode() {
@@ -1090,10 +992,6 @@ fn synchronized_update_mode() {
     );
 }
 
-// ---------------------------------------------------------------
-// DECRQM: request private mode
-// ---------------------------------------------------------------
-
 #[test]
 fn request_private_mode() {
     assert_eq!(
@@ -1101,10 +999,6 @@ fn request_private_mode() {
         vec![Action::RequestPrivateMode(2026)]
     );
 }
-
-// ---------------------------------------------------------------
-// DECSTBM default params
-// ---------------------------------------------------------------
 
 #[test]
 fn decstbm_default_params() {
@@ -1124,19 +1018,11 @@ fn decstbm_one_param() {
     );
 }
 
-// ---------------------------------------------------------------
-// Insert mode (IRM) — CSI 4 h / CSI 4 l
-// ---------------------------------------------------------------
-
 #[test]
 fn insert_mode_set_reset() {
     assert_eq!(parse(b"\x1b[4h"), vec![Action::SetInsertMode(true)]);
     assert_eq!(parse(b"\x1b[4l"), vec![Action::SetInsertMode(false)]);
 }
-
-// ---------------------------------------------------------------
-// SGR double underline, overline
-// ---------------------------------------------------------------
 
 #[test]
 fn sgr_double_underline() {
@@ -1157,10 +1043,6 @@ fn sgr_overline() {
         vec![Action::SetAttribute(Attribute::NoOverline)]
     );
 }
-
-// ---------------------------------------------------------------
-// Full reset (RIS — ESC c)
-// ---------------------------------------------------------------
 
 #[test]
 fn full_reset_esc_c() {
@@ -1196,27 +1078,15 @@ fn full_reset_restores_shift_in_state() {
     );
 }
 
-// ---------------------------------------------------------------
-// Soft reset (DECSTR — CSI ! p)
-// ---------------------------------------------------------------
-
 #[test]
 fn soft_reset_csi_bang_p() {
     assert_eq!(parse(b"\x1b[!p"), vec![Action::SoftReset]);
 }
 
-// ---------------------------------------------------------------
-// Screen alignment pattern (DECALN — ESC # 8)
-// ---------------------------------------------------------------
-
 #[test]
 fn decaln_esc_hash_8() {
     assert_eq!(parse(b"\x1b#8"), vec![Action::ScreenAlignmentPattern]);
 }
-
-// ---------------------------------------------------------------
-// Keypad modes (DECKPAM/DECKPNM)
-// ---------------------------------------------------------------
 
 #[test]
 fn application_keypad_mode() {

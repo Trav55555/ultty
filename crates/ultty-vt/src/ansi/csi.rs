@@ -263,7 +263,6 @@ impl AnsiParser {
             // XTVERSION (CSI > Ps q)
             (Some(b'>'), None, b'q') => callback(Action::RequestTerminalVersion),
 
-            // Kitty keyboard protocol
             (Some(b'?'), None, b'u') => callback(Action::KittyKeyboardQuery),
             (Some(b'>'), None, b'u') => {
                 callback(Action::KittyKeyboardPush(byte_param(first_or_zero)))
@@ -277,7 +276,6 @@ impl AnsiParser {
                 });
             }
 
-            // Secondary device attributes (CSI > c)
             (Some(b'>'), None, b'c') => callback(Action::SecondaryDeviceAttributes),
 
             // Cursor style (DECSCUSR) - CSI Ps SP q
@@ -315,7 +313,6 @@ impl AnsiParser {
         let first_or_zero = self.params.first().copied().unwrap_or(0);
 
         match cmd {
-            // Cursor movement
             b'A' => callback(Action::CursorUp(p1.max(1))),
             b'B' => callback(Action::CursorDown(p1.max(1))),
             b'C' => callback(Action::CursorForward(p1.max(1))),
@@ -341,13 +338,11 @@ impl AnsiParser {
             b'K' => callback(Action::EraseInLine(first_or_zero.min(2) as u8)),
             b'X' => callback(Action::EraseCharacters(p1.max(1))),
 
-            // Line operations
             b'L' => callback(Action::InsertLines(p1.max(1))),
             b'M' => callback(Action::DeleteLines(p1.max(1))),
             b'P' => callback(Action::DeleteCharacters(p1.max(1))),
             b'@' => callback(Action::InsertCharacters(p1.max(1))),
 
-            // Scrolling
             b'S' => callback(Action::ScrollUp(p1.max(1))),
             b'T' => callback(Action::ScrollDown(p1.max(1))),
             b'r' => callback(Action::SetScrollingRegion {
@@ -355,14 +350,11 @@ impl AnsiParser {
                 bottom: self.params.get(1).copied().unwrap_or(0),
             }),
 
-            // Cursor save/restore
             b's' => callback(Action::SaveCursorPosition),
             b'u' => callback(Action::RestoreCursorPosition),
 
-            // SGR (text attributes)
             b'm' => self.dispatch_sgr(callback),
 
-            // Tab clear
             b'g' => callback(Action::ClearTabStop(byte_param(first_or_zero))),
 
             // Status reports (DSR, CPR, DECXCPR)
@@ -486,10 +478,6 @@ mod tests {
         actions
     }
 
-    // ------------------------------------------------------------------
-    // Cursor movement: CUU (A), CUD (B), CUF (C), CUB (D)
-    // ------------------------------------------------------------------
-
     #[test]
     fn cuu_with_param() {
         assert_eq!(parse(b"\x1b[5A"), vec![Action::CursorUp(5)]);
@@ -502,7 +490,6 @@ mod tests {
 
     #[test]
     fn cuu_zero_treated_as_one() {
-        // CSI 0 A - param 0 should be clamped to 1
         assert_eq!(parse(b"\x1b[0A"), vec![Action::CursorUp(1)]);
     }
 
@@ -535,10 +522,6 @@ mod tests {
     fn cub_default() {
         assert_eq!(parse(b"\x1b[D"), vec![Action::CursorBack(1)]);
     }
-
-    // ------------------------------------------------------------------
-    // Cursor movement: CNL (E), CPL (F), CHA (G), CUP (H/f)
-    // ------------------------------------------------------------------
 
     #[test]
     fn cnl_with_param() {
@@ -589,16 +572,11 @@ mod tests {
 
     #[test]
     fn cup_row_only() {
-        // CSI 5 H - only row specified, col defaults to 1
         assert_eq!(
             parse(b"\x1b[5H"),
             vec![Action::CursorPosition { row: 5, col: 1 }]
         );
     }
-
-    // ------------------------------------------------------------------
-    // Erase sequences: ED (J), EL (K), ECH (X)
-    // ------------------------------------------------------------------
 
     #[test]
     fn ed_default_zero() {
@@ -615,7 +593,6 @@ mod tests {
 
     #[test]
     fn ed_clamped_to_3() {
-        // Values > 3 should be clamped
         assert_eq!(parse(b"\x1b[9J"), vec![Action::EraseInDisplay(3)]);
     }
 
@@ -645,10 +622,6 @@ mod tests {
     fn ech_default() {
         assert_eq!(parse(b"\x1b[X"), vec![Action::EraseCharacters(1)]);
     }
-
-    // ------------------------------------------------------------------
-    // Mode set/reset: DECSET (CSI ? ... h) / DECRST (CSI ? ... l)
-    // ------------------------------------------------------------------
 
     #[test]
     fn decset_cursor_visible() {
@@ -832,14 +805,9 @@ mod tests {
 
     #[test]
     fn decset_unknown_mode_no_action() {
-        // Unknown private mode should produce no action
         let actions = parse(b"\x1b[?9999h");
         assert!(actions.is_empty());
     }
-
-    // ------------------------------------------------------------------
-    // CSI with parameters and defaults
-    // ------------------------------------------------------------------
 
     #[test]
     fn csi_large_param() {
@@ -854,10 +822,6 @@ mod tests {
             vec![Action::CursorPosition { row: 1, col: 1 }]
         );
     }
-
-    // ------------------------------------------------------------------
-    // Line operations
-    // ------------------------------------------------------------------
 
     #[test]
     fn insert_lines() {
@@ -879,10 +843,6 @@ mod tests {
         assert_eq!(parse(b"\x1b[3P"), vec![Action::DeleteCharacters(3)]);
     }
 
-    // ------------------------------------------------------------------
-    // Scrolling
-    // ------------------------------------------------------------------
-
     #[test]
     fn scroll_up() {
         assert_eq!(parse(b"\x1b[5S"), vec![Action::ScrollUp(5)]);
@@ -901,10 +861,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // Cursor save/restore
-    // ------------------------------------------------------------------
-
     #[test]
     fn save_cursor_via_csi() {
         assert_eq!(parse(b"\x1b[s"), vec![Action::SaveCursorPosition]);
@@ -914,10 +870,6 @@ mod tests {
     fn restore_cursor_via_csi() {
         assert_eq!(parse(b"\x1b[u"), vec![Action::RestoreCursorPosition]);
     }
-
-    // ------------------------------------------------------------------
-    // Cursor style (DECSCUSR)
-    // ------------------------------------------------------------------
 
     #[test]
     fn set_cursor_style_blinking_block() {
@@ -929,18 +881,10 @@ mod tests {
         assert_eq!(parse(b"\x1b[6 q"), vec![Action::SetCursorStyle(6)]);
     }
 
-    // ------------------------------------------------------------------
-    // Report cursor position
-    // ------------------------------------------------------------------
-
     #[test]
     fn report_cursor_position() {
         assert_eq!(parse(b"\x1b[6n"), vec![Action::ReportCursorPosition]);
     }
-
-    // ------------------------------------------------------------------
-    // Device attributes
-    // ------------------------------------------------------------------
 
     #[test]
     fn primary_device_attributes() {
@@ -952,10 +896,6 @@ mod tests {
         assert_eq!(parse(b"\x1b[>c"), vec![Action::SecondaryDeviceAttributes]);
     }
 
-    // ------------------------------------------------------------------
-    // Tab clear
-    // ------------------------------------------------------------------
-
     #[test]
     fn tab_clear_current() {
         assert_eq!(parse(b"\x1b[0g"), vec![Action::ClearTabStop(0)]);
@@ -966,10 +906,6 @@ mod tests {
         assert_eq!(parse(b"\x1b[3g"), vec![Action::ClearTabStop(3)]);
     }
 
-    // ------------------------------------------------------------------
-    // DECRQM - Request Private Mode
-    // ------------------------------------------------------------------
-
     #[test]
     fn request_private_mode() {
         assert_eq!(
@@ -977,10 +913,6 @@ mod tests {
             vec![Action::RequestPrivateMode(2026)]
         );
     }
-
-    // ------------------------------------------------------------------
-    // Kitty keyboard protocol
-    // ------------------------------------------------------------------
 
     #[test]
     fn kitty_keyboard_push() {
@@ -996,10 +928,6 @@ mod tests {
     fn kitty_keyboard_query() {
         assert_eq!(parse(b"\x1b[?u"), vec![Action::KittyKeyboardQuery]);
     }
-
-    // ------------------------------------------------------------------
-    // Malformed CSI sequences
-    // ------------------------------------------------------------------
 
     #[test]
     fn csi_aborted_by_esc() {
@@ -1022,7 +950,6 @@ mod tests {
 
     #[test]
     fn csi_sgr_dispatches_via_m() {
-        // Verify CSI m dispatches SGR
         assert_eq!(
             parse(b"\x1b[1m"),
             vec![Action::SetAttribute(Attribute::Bold)]
@@ -1059,14 +986,12 @@ mod tests {
 
     #[test]
     fn csi_unknown_final_byte_ignored() {
-        // Unknown CSI final byte (e.g., '|') should produce no action
         let actions = parse(b"\x1b[5|");
         assert!(actions.is_empty());
     }
 
     #[test]
     fn csi_followed_by_normal_text() {
-        // After CSI completion, parser should return to ground
         assert_eq!(
             parse(b"\x1b[1AX"),
             vec![Action::CursorUp(1), Action::Print('X')]
@@ -1083,7 +1008,6 @@ mod tests {
 
     #[test]
     fn csi_private_mode_set_multiple_params() {
-        // CSI ? 1049 ; 2004 h - enable alternate screen + bracketed paste
         let actions = parse(b"\x1b[?1049;2004h");
         assert_eq!(
             actions,
@@ -1096,7 +1020,6 @@ mod tests {
 
     #[test]
     fn csi_private_mode_reset_multiple_params() {
-        // CSI ? 1049 ; 2004 l - disable alternate screen + bracketed paste
         let actions = parse(b"\x1b[?1049;2004l");
         assert_eq!(
             actions,
@@ -1113,10 +1036,6 @@ mod tests {
         let actions = parse(b"\x1b[99999A");
         assert_eq!(actions, vec![Action::CursorUp(u16::MAX)]);
     }
-
-    // ------------------------------------------------------------------
-    // Private markers, intermediates, sub-parameters, controls
-    // ------------------------------------------------------------------
 
     #[test]
     fn xtmodkeys_is_not_sgr() {

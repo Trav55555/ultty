@@ -54,10 +54,6 @@ fn rows(lines: &[&str]) -> Vec<String> {
     lines.iter().map(|s| s.to_string()).collect()
 }
 
-// ---------------------------------------------------------------------------
-// Tab stops across resize
-// ---------------------------------------------------------------------------
-
 #[test]
 fn widening_gives_default_tab_stops_in_new_columns() {
     for alternate in [false, true] {
@@ -105,10 +101,6 @@ fn tab_stops_survive_a_height_only_resize() {
     assert_eq!(snapshot(&term).0[0], "     A");
 }
 
-// ---------------------------------------------------------------------------
-// DECCOLM (mode 3) and its gate, mode 40
-// ---------------------------------------------------------------------------
-
 #[test]
 fn deccolm_is_ignored_unless_mode_40_allows_it() {
     // `tput reset` sends CSI ?3 l; without mode 40 it must neither clear the
@@ -126,10 +118,6 @@ fn deccolm_with_mode_40_resizes_clears_and_homes() {
     feed(&mut term, b"\x1b[?3l");
     assert_eq!(term.take_column_resize_request(), Some(80));
 }
-
-// ---------------------------------------------------------------------------
-// ED / EL
-// ---------------------------------------------------------------------------
 
 #[test]
 fn erase_in_display_variants() {
@@ -159,10 +147,6 @@ fn erase_in_line_variants() {
     assert_eq!(erased(b"\x1b[1K"), rows(&["   de"]));
     assert_eq!(erased(b"\x1b[2K"), rows(&[""]));
 }
-
-// ---------------------------------------------------------------------------
-// DECSTBM, IL/DL at margins, DECOM
-// ---------------------------------------------------------------------------
 
 #[test]
 fn invalid_decstbm_is_ignored() {
@@ -211,10 +195,6 @@ fn origin_mode_addresses_relative_to_the_region_and_clamps() {
     assert_eq!(snapshot(&term).1, (0, 0));
 }
 
-// ---------------------------------------------------------------------------
-// Scrollback and scroll regions
-// ---------------------------------------------------------------------------
-
 #[test]
 fn main_screen_region_at_the_top_scrolls_into_history() {
     // apt-style: rows 1-4 scroll, row 5 is a status line.
@@ -260,10 +240,6 @@ fn regions_not_at_the_top_and_the_alternate_screen_keep_no_history() {
     assert_eq!(term.buffer().history_len(), 0);
 }
 
-// ---------------------------------------------------------------------------
-// DECSTR, DECSC/DECRC
-// ---------------------------------------------------------------------------
-
 #[test]
 fn decstr_keeps_the_cursor_and_resets_state() {
     let mut term = run(
@@ -306,10 +282,6 @@ fn decsc_decrc_restore_position_attributes_and_origin_mode() {
     assert!(term.modes().origin_mode);
 }
 
-// ---------------------------------------------------------------------------
-// Alternate screens 1047 / 1049
-// ---------------------------------------------------------------------------
-
 #[test]
 fn mode_1049_saves_cursor_clears_and_restores() {
     let mut term = run(6, 3, b"main\x1b[2;2H\x1b[?1049h");
@@ -328,10 +300,6 @@ fn mode_1047_clears_on_entry_and_keeps_the_main_cursor() {
     assert_eq!(snapshot(&term), (rows(&["main", "", ""]), (0, 4)));
 }
 
-// ---------------------------------------------------------------------------
-// Wide characters at the right margin
-// ---------------------------------------------------------------------------
-
 #[test]
 fn wide_char_that_does_not_fit_without_autowrap_is_dropped() {
     let (s, c) = screen(4, 2, "\x1b[?7labc\u{4e2d}".as_bytes());
@@ -340,10 +308,6 @@ fn wide_char_that_does_not_fit_without_autowrap_is_dropped() {
     let (s, _) = screen(4, 2, "abc\u{4e2d}".as_bytes());
     assert_eq!(s, rows(&["abc", "\u{4e2d}"]));
 }
-
-// ---------------------------------------------------------------------------
-// LNM (mode 20) and DECSC via mode 1048
-// ---------------------------------------------------------------------------
 
 #[test]
 fn lnm_makes_line_feeds_return_the_carriage() {
@@ -360,10 +324,6 @@ fn mode_1048_saves_and_restores_the_cursor() {
         (1, 2)
     );
 }
-
-// ---------------------------------------------------------------------------
-// Identity and status reports
-// ---------------------------------------------------------------------------
 
 fn version_number() -> u32 {
     let mut parts = env!("CARGO_PKG_VERSION")
@@ -452,10 +412,6 @@ fn title_stack_depth_is_bounded() {
     assert_eq!(term.title(), format!("t{}", 50 - popped));
 }
 
-// ---------------------------------------------------------------------------
-// DECRQM
-// ---------------------------------------------------------------------------
-
 /// The DECRQM status the terminal reports for private mode `mode`.
 fn private_mode_status(term: &mut Terminal, mode: u16) -> String {
     let reply = replies(term, format!("\x1b[?{mode}$p").as_bytes());
@@ -530,10 +486,6 @@ fn decrqm_for_ansi_modes() {
     );
     assert_eq!(replies(&mut term, b"\x1b[99$p"), "\x1b[99;0$y");
 }
-
-// ---------------------------------------------------------------------------
-// DECRQSS and XTGETTCAP
-// ---------------------------------------------------------------------------
 
 #[test]
 fn decrqss_reports_sgr_margins_and_cursor_style() {
@@ -638,10 +590,6 @@ fn xtgettcap_reports_the_term_the_program_was_started_with() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Mouse mode 1005 (UTF-8 coordinates)
-// ---------------------------------------------------------------------------
-
 #[test]
 fn utf8_mouse_encodes_large_coordinates_as_utf8() {
     use ultty_vt::grid::{MouseButton, MouseModifiers};
@@ -667,10 +615,6 @@ fn utf8_mouse_encodes_large_coordinates_as_utf8() {
         .unwrap();
     assert_eq!(release, b"\x1b[M\x23\x21\x21");
 }
-
-// ---------------------------------------------------------------------------
-// Sixel placement
-// ---------------------------------------------------------------------------
 
 #[test]
 fn sixel_images_span_cells_of_the_reported_size() {
@@ -936,10 +880,6 @@ fn oversized_dcs_strings_are_swallowed_to_the_terminator() {
     assert_eq!(term.images().images().count(), 0);
 }
 
-// ---------------------------------------------------------------------------
-// Colour queries and the palette (OSC 4, 10, 11, 12, 104)
-// ---------------------------------------------------------------------------
-
 fn everforest() -> ThemeColors {
     let mut ansi = ThemeColors::default().ansi;
     ansi[1] = [0xe6, 0x7e, 0x80];
@@ -1022,10 +962,6 @@ fn ris_resets_the_palette() {
     );
 }
 
-// ----------------------------------------------------------------------
-// Control sequences never print their own bytes
-// ----------------------------------------------------------------------
-
 #[test]
 fn colon_sub_parameters_are_not_printed() {
     let (text, cursor) = screen(20, 2, b"A\x1b[4:3mB\x1b[58:2::255:0:0mC\x1b[38:2:1:2:3mD");
@@ -1078,10 +1014,6 @@ fn malformed_sequences_are_swallowed_whole() {
     let (text, _) = screen(10, 1, b"a\x1b[1?2hb\x1b[1 2qc\x1b[1\xc3\xa92md");
     assert_eq!(text, rows(&["abcd"]));
 }
-
-// ----------------------------------------------------------------------
-// SGR: underline styles and underline color
-// ----------------------------------------------------------------------
 
 fn underline_of(bytes: &[u8]) -> (UnderlineStyle, Color) {
     let terminal = run(10, 1, bytes);
@@ -1148,10 +1080,6 @@ fn colon_colors_set_foreground_and_background() {
     assert_eq!(cell.bg(), Color::Indexed(200));
 }
 
-// ----------------------------------------------------------------------
-// Private markers select their own commands
-// ----------------------------------------------------------------------
-
 #[test]
 fn xtmodkeys_does_not_change_attributes() {
     let terminal = run(10, 1, b"\x1b[>4;2mx");
@@ -1210,10 +1138,6 @@ fn main_and_alternate_screens_keep_their_own_kitty_keyboard_modes() {
     assert_eq!(term.modes().kitty_keyboard_flags, 3);
 }
 
-// ----------------------------------------------------------------------
-// UTF-8 decoding
-// ----------------------------------------------------------------------
-
 #[test]
 fn invalid_utf8_shows_replacement_characters() {
     let (text, cursor) = screen(20, 1, b"a\xF5\x80\x80\x80b\xED\xA0\x80c\xC0\xAFd\xE2\x82");
@@ -1224,10 +1148,6 @@ fn invalid_utf8_shows_replacement_characters() {
     // The truncated E2 82 at the end is still pending.
     assert_eq!(cursor, (0, 13));
 }
-
-// ---------------------------------------------------------------------------
-// Inline images under erases and text, and sixel scrolling
-// ---------------------------------------------------------------------------
 
 /// A red sixel `cols` cells wide and `rows` cells high at the default 8x16
 /// cell size. `rows` must be a multiple of 3: 48 pixels are eight bands.

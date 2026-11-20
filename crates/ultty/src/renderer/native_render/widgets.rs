@@ -334,9 +334,7 @@ impl Renderer {
                     ]);
                 }
             }
-            // Deprecated by ADR 0018: the terminal no longer interprets
-            // Markdown or highlights Code. It shows the source verbatim so
-            // older apps stay legible during the overlap release.
+            // Deprecated; removal tracked in #175.
             WidgetContent::Markdown(md) => {
                 self.render_plain_source(&md.source, x, y, text_vertices, text_indices);
             }
