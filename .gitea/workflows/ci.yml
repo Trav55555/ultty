@@ -43,6 +43,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cargo fmt --all -- --check
+      # Plain comments may only go down; see scripts/comment-ratchet.py.
+      - run: python3 scripts/comment-ratchet.py
 
   security-audit:
     name: Security Audit
