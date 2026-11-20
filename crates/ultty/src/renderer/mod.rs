@@ -28,7 +28,7 @@ mod text_cache;
 pub use atlas::{AtlasStats, GlyphAtlas};
 pub use color::{ColorScheme, Rgba};
 pub use pipeline::RenderPipeline;
-pub use text::TextRenderer;
+pub use text::{Fonts, TextRenderer};
 
 use crate::config::{ColorConfig, FontConfig};
 #[cfg(test)]
@@ -420,6 +420,16 @@ pub fn present_mode(
     }
 }
 
+/// The font size one step up or down from `current`: larger steps for
+/// larger sizes.
+pub fn stepped_font_size(current: f32, increase: bool) -> f32 {
+    if increase {
+        current + if current >= 20.0 { 2.0 } else { 1.0 }
+    } else {
+        current - if current > 20.0 { 2.0 } else { 1.0 }
+    }
+}
+
 impl Renderer {
     /// Create a new renderer with configuration. `paced_by_frame_callbacks`
     /// is whether the window system paces frames (see [`present_mode`]).
@@ -432,12 +442,35 @@ impl Renderer {
         font_config: &FontConfig,
         paced_by_frame_callbacks: bool,
     ) -> anyhow::Result<Self> {
+        Self::with_fonts(
+            surface,
+            adapter,
+            width,
+            height,
+            color_config,
+            Fonts::load(font_config),
+            paced_by_frame_callbacks,
+        )
+        .await
+    }
+
+    /// Create a renderer drawing with `fonts`, measured beforehand (see
+    /// [`Fonts`]); its cell size is theirs.
+    pub async fn with_fonts(
+        surface: &wgpu::Surface<'_>,
+        adapter: &wgpu::Adapter,
+        width: u32,
+        height: u32,
+        color_config: &ColorConfig,
+        fonts: Fonts,
+        paced_by_frame_callbacks: bool,
+    ) -> anyhow::Result<Self> {
         let mut renderer = Self::new(
             surface,
             adapter,
             width,
             height,
-            font_config,
+            fonts,
             paced_by_frame_callbacks,
         )
         .await?;
@@ -445,13 +478,13 @@ impl Renderer {
         Ok(renderer)
     }
 
-    /// Create a new renderer.
+    /// Create a new renderer drawing with `fonts`.
     pub async fn new(
         surface: &wgpu::Surface<'_>,
         adapter: &wgpu::Adapter,
         width: u32,
         height: u32,
-        font_config: &FontConfig,
+        fonts: Fonts,
         paced_by_frame_callbacks: bool,
     ) -> anyhow::Result<Self> {
         let (device, queue) = adapter
@@ -546,12 +579,12 @@ impl Renderer {
         tracing::debug!(target: "ultty::startup", "background pipeline ready");
 
         // Create text renderer
-        let text_renderer = TextRenderer::with_config(
+        let text_renderer = TextRenderer::with_fonts(
             device.clone(),
             queue.clone(),
             surface_format,
             &uniform_bind_group_layout,
-            font_config,
+            fonts,
         )?;
 
         // Get cell dimensions from text renderer
@@ -1023,20 +1056,10 @@ impl Renderer {
         self.text_renderer.font_size()
     }
 
-    /// Increase font size by a step.
-    pub fn increase_font_size(&mut self) -> f32 {
-        let current = self.font_size();
-        // Use larger steps for larger sizes
-        let step = if current >= 20.0 { 2.0 } else { 1.0 };
-        self.set_font_size(current + step)
-    }
-
-    /// Decrease font size by a step.
-    pub fn decrease_font_size(&mut self) -> f32 {
-        let current = self.font_size();
-        // Use larger steps for larger sizes
-        let step = if current > 20.0 { 2.0 } else { 1.0 };
-        self.set_font_size(current - step)
+    /// Change the font size by one step (see [`stepped_font_size`]).
+    /// Returns the new font size (may be clamped).
+    pub fn step_font_size(&mut self, increase: bool) -> f32 {
+        self.set_font_size(stepped_font_size(self.font_size(), increase))
     }
 
     /// Draw the terminal into `view`, a view of a surface frame. The frame
@@ -2128,6 +2151,42 @@ mod tests {
         assert!(renderer.apply_font_config(&taller));
         assert_eq!(renderer.cell_dimensions().0, after.0);
         assert!(renderer.cell_dimensions().1 > after.1);
+    }
+
+    /// Startup sizes the grid from [`super::Fonts`] before the GPU is up;
+    /// the renderer must then report the same cell, or the shell starts at
+    /// one size and is resized to another on the first frame.
+    #[test]
+    fn cpu_cell_metrics_match_the_renderers() {
+        use crate::config::FontConfig;
+        let Ok(mut renderer) = pollster::block_on(super::Renderer::new_headless(400, 200)) else {
+            eprintln!("no GPU adapter; skipped");
+            return;
+        };
+        let default = FontConfig::default();
+        let configs = [
+            default.clone(),
+            FontConfig {
+                size: 23.0,
+                line_height: 1.3,
+                ..default.clone()
+            },
+            FontConfig {
+                size: 9.5,
+                family: "a family nobody has installed".into(),
+                ..default
+            },
+        ];
+        for config in configs {
+            renderer.apply_font_config(&config);
+            let fonts = super::Fonts::load(&config);
+            assert_eq!(
+                fonts.cell_dimensions(),
+                renderer.cell_dimensions(),
+                "{config:?}"
+            );
+            assert_eq!(fonts.font_size(), renderer.font_size(), "{config:?}");
+        }
     }
 
     #[test]

@@ -618,6 +618,55 @@ fn font_metrics(font_config: &FontConfig) -> Metrics {
     Metrics::new(font_size, line_height)
 }
 
+/// The fonts text is shaped with and the cell size they give, measured on
+/// the CPU. Nothing here needs a GPU device, so startup can size the grid
+/// and spawn the shell while the GPU comes up on another thread; the text
+/// renderer is then built from these same fonts, so its cell size is the one
+/// measured here.
+pub struct Fonts {
+    font_system: FontSystem,
+    metrics: Metrics,
+    selection: FontSelection,
+    emoji_family: Option<String>,
+    ligatures: bool,
+    cell_width: f32,
+    cell_height: f32,
+    /// Baseline in px from the cell top.
+    baseline: f32,
+}
+
+impl Fonts {
+    /// Load the system fonts and measure the cell for `font_config`.
+    pub fn load(font_config: &FontConfig) -> Self {
+        let mut font_system = FontSystem::new();
+        let metrics = font_metrics(font_config);
+        let selection = FontSelection::new(font_system.db(), font_config);
+        let (cell_width, cell_height, baseline) =
+            TextRenderer::measure_cell_with_font(&mut font_system, metrics, selection.family());
+        let emoji_family = installed_emoji_family(font_system.db(), &font_config.emoji);
+        Self {
+            font_system,
+            metrics,
+            selection,
+            emoji_family,
+            ligatures: font_config.ligatures,
+            cell_width,
+            cell_height,
+            baseline,
+        }
+    }
+
+    /// Cell width and height in pixels.
+    pub fn cell_dimensions(&self) -> (f32, f32) {
+        (self.cell_width, self.cell_height)
+    }
+
+    /// The font size in pixels.
+    pub fn font_size(&self) -> f32 {
+        self.metrics.font_size
+    }
+}
+
 impl TextRenderer {
     /// Create a new text renderer with configuration.
     pub fn with_config(
@@ -627,15 +676,33 @@ impl TextRenderer {
         uniform_bind_group_layout: &wgpu::BindGroupLayout,
         font_config: &FontConfig,
     ) -> anyhow::Result<Self> {
-        // Create font system with system fonts
-        let mut font_system = FontSystem::new();
+        Self::with_fonts(
+            device,
+            queue,
+            format,
+            uniform_bind_group_layout,
+            Fonts::load(font_config),
+        )
+    }
 
-        let metrics = font_metrics(font_config);
-
-        // Measure cell dimensions using a sample character
-        let fonts = FontSelection::new(font_system.db(), font_config);
-        let (cell_width, cell_height, baseline) =
-            Self::measure_cell_with_font(&mut font_system, metrics, fonts.family());
+    /// Create a text renderer drawing with `fonts`, keeping their cell size.
+    pub fn with_fonts(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        format: wgpu::TextureFormat,
+        uniform_bind_group_layout: &wgpu::BindGroupLayout,
+        fonts: Fonts,
+    ) -> anyhow::Result<Self> {
+        let Fonts {
+            mut font_system,
+            metrics,
+            selection,
+            emoji_family,
+            ligatures,
+            cell_width,
+            cell_height,
+            baseline,
+        } = fonts;
 
         // Create glyph atlas
         let atlas = GlyphAtlas::new(device.clone(), Arc::clone(&queue));
@@ -650,7 +717,6 @@ impl TextRenderer {
 
         let styled_text_buffer = Buffer::new(&mut font_system, metrics);
 
-        let emoji_family = installed_emoji_family(font_system.db(), &font_config.emoji);
         let mut renderer = Self {
             font_system,
             atlas,
@@ -664,9 +730,9 @@ impl TextRenderer {
                 thickness: 1.0,
             },
             device,
-            fonts,
+            fonts: selection,
             emoji_family,
-            ligatures: font_config.ligatures,
+            ligatures,
             font_generation: 0,
             shaping_cache: HashMap::with_capacity(256),
             run_cache: Default::default(),
