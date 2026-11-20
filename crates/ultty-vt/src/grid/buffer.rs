@@ -756,17 +756,13 @@ impl Buffer {
         let total_history = self.history.len();
         let visible_rows = self.grid.dimensions().rows as usize;
 
-        // Calculate which row this maps to
         if self.scroll_offset > 0 {
-            // We're scrolled back
             let history_start = total_history.saturating_sub(self.scroll_offset);
             let absolute_index = history_start + visual_index as usize;
 
             if absolute_index < total_history {
-                // This row is in history
                 self.history.row(absolute_index).map(RowView::history)
             } else {
-                // This row is in the visible grid
                 let grid_index = absolute_index - total_history;
                 if grid_index < visible_rows {
                     self.grid.row(grid_index as u16)
@@ -775,7 +771,6 @@ impl Buffer {
                 }
             }
         } else {
-            // Not scrolled, show grid directly
             self.grid.row(visual_index)
         }
     }
@@ -1245,7 +1240,6 @@ impl Buffer {
         if new_dims.cols != old_dims.cols {
             self.reflow_all(new_dims);
         } else {
-            // Only height changed - handle specially
             self.resize_height(new_dims);
         }
 
@@ -1291,7 +1285,6 @@ impl Buffer {
                 rows_to_move,
             );
             self.save_top_rows(rows_to_move);
-            // Remove those rows from the grid (shift everything up)
             self.grid.remove_top_rows(rows_to_move);
         }
 
@@ -1308,7 +1301,6 @@ impl Buffer {
                     .map(|row| RowView::history(row).to_row())
                     .collect();
                 self.history.truncate(start);
-                // Insert at beginning of grid
                 self.grid.prepend_rows(pulled);
                 self.unsettle_anchors();
             }
@@ -1699,8 +1691,6 @@ impl Buffer {
         }
     }
 
-    // === Damage tracking ===
-
     /// Check if any visible content is dirty.
     pub fn has_dirty(&self) -> bool {
         self.grid.has_dirty()
@@ -1758,7 +1748,6 @@ mod tests {
     fn scroll_up_down() {
         let mut buf = Buffer::new(Dimensions::new(80, 24));
 
-        // Add some history
         for i in 0..50 {
             let mut row = Row::new(80);
             row[0].set_char((b'A' + (i % 26)) as char);
@@ -2012,20 +2001,16 @@ mod tests {
     fn visible_row_with_scroll() {
         let mut buf = Buffer::new(Dimensions::new(10, 5));
 
-        // Write to grid
         buf.grid_mut().write_char('X');
 
-        // Add history
         for i in 0..10 {
             let mut row = Row::new(10);
             row[0].set_char((b'0' + i) as char);
             buf.push_to_history(vec![row]);
         }
 
-        // Not scrolled - should see grid
         assert_eq!(buf.visible_row(0).unwrap().cell(0).unwrap().char(), 'X');
 
-        // Scroll up 5 lines
         buf.scroll_up(5);
 
         // Should now see history row at index (10-5) = 5
@@ -2036,17 +2021,13 @@ mod tests {
     fn scroll_grid_up_saves_history() {
         let mut buf = Buffer::new(Dimensions::new(10, 5));
 
-        // Write on first row
         buf.grid_mut().write_char('A');
 
-        // Scroll up
         buf.scroll_grid_up(1);
 
-        // First row should be in history now
         assert_eq!(buf.history_len(), 1);
         assert_eq!(buf.row_at(0).unwrap().cell(0).unwrap().char(), 'A');
 
-        // Grid first row should be empty
         assert_eq!(buf.grid().cell(0, 0).unwrap().char(), ' ');
     }
 
@@ -2060,13 +2041,10 @@ mod tests {
             buf.grid_mut().write_char(c);
         }
 
-        // Verify initial state - should fit on one row
         assert_eq!(buf.grid().row(0).unwrap().text_trimmed(), text);
 
-        // Narrow to 10 columns
         buf.resize(Dimensions::new(10, 5));
 
-        // Content should now span two rows
         assert_eq!(buf.grid().row(0).unwrap().text_trimmed(), "Hello Worl");
         assert_eq!(buf.grid().row(1).unwrap().text_trimmed(), "d!!!!!");
         assert!(buf.grid().row(0).unwrap().is_wrapped());
@@ -2082,13 +2060,10 @@ mod tests {
             buf.grid_mut().write_char(c);
         }
 
-        // Should be wrapped across two rows
         assert!(buf.grid().row(0).unwrap().is_wrapped());
 
-        // Widen to 20 columns
         buf.resize(Dimensions::new(20, 5));
 
-        // Content should now fit on one row
         assert_eq!(buf.grid().row(0).unwrap().text_trimmed(), text);
         assert!(!buf.grid().row(0).unwrap().is_wrapped());
     }
@@ -2170,10 +2145,8 @@ mod tests {
         assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'A');
         assert_eq!(buf.grid().cell(0, 4).unwrap().char(), 'E');
 
-        // Shrink height from 5 to 3 (width stays same)
         buf.resize(Dimensions::new(20, 3));
 
-        // Top 2 rows (A, B) should move to history
         assert_eq!(buf.history_len(), 2);
         assert_eq!(buf.row_at(0).unwrap().cell(0).unwrap().char(), 'A');
         assert_eq!(buf.row_at(1).unwrap().cell(0).unwrap().char(), 'B');
@@ -2237,14 +2210,12 @@ mod tests {
     fn resize_height_grow_pulls_from_history() {
         let mut buf = Buffer::new(Dimensions::new(20, 3));
 
-        // Add history
         let mut row_a = Row::new(20);
         row_a[0].set_char('A');
         let mut row_b = Row::new(20);
         row_b[0].set_char('B');
         buf.push_to_history(vec![row_a, row_b]);
 
-        // Directly set cells in grid
         {
             let grid = buf.grid_mut();
             grid.row_mut(0)
@@ -2257,18 +2228,17 @@ mod tests {
 
         // Verify state: 2 in history (A, B), grid has C, D, empty - cell() takes (col, row)
         assert_eq!(buf.history_len(), 2);
-        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'C'); // col 0, row 0
+        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'C');
 
-        // Grow height from 3 to 5 (width stays same)
         buf.resize(Dimensions::new(20, 5));
 
         // History should be pulled into grid
         // History rows A, B should now be at top of grid - cell() takes (col, row)
         assert_eq!(buf.history_len(), 0);
-        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'A'); // col 0, row 0
-        assert_eq!(buf.grid().cell(0, 1).unwrap().char(), 'B'); // col 0, row 1
-        assert_eq!(buf.grid().cell(0, 2).unwrap().char(), 'C'); // col 0, row 2
-        assert_eq!(buf.grid().cell(0, 3).unwrap().char(), 'D'); // col 0, row 3
+        assert_eq!(buf.grid().cell(0, 0).unwrap().char(), 'A');
+        assert_eq!(buf.grid().cell(0, 1).unwrap().char(), 'B');
+        assert_eq!(buf.grid().cell(0, 2).unwrap().char(), 'C');
+        assert_eq!(buf.grid().cell(0, 3).unwrap().char(), 'D');
     }
 
     #[test]
@@ -2308,7 +2278,7 @@ mod tests {
         // Write enough to fill screen and scroll several times
         // Each row holds 5 chars, we have 3 rows = 15 chars before scroll
         // Then each additional 5 chars scrolls once
-        let text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"; // 26 chars
+        let text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
         for c in text.chars() {
             buf.write_char(c);
@@ -2323,7 +2293,6 @@ mod tests {
             buf.history_len()
         );
 
-        // First history row should start with 'A'
         assert_eq!(buf.row_at(0).unwrap().cell(0).unwrap().char(), 'A');
     }
 
@@ -2331,7 +2300,6 @@ mod tests {
     fn reflow_preserves_cursor_on_narrow() {
         let mut buf = Buffer::new(Dimensions::new(20, 5));
 
-        // Write "Hello World" on row 0
         for c in "Hello World".chars() {
             buf.grid_mut().write_char(c);
         }
@@ -2363,7 +2331,6 @@ mod tests {
         // Widen to 20 — everything fits on one row
         buf.resize(Dimensions::new(20, 5));
 
-        // Cursor should be back on row 0, col 11
         assert_eq!(buf.grid().cursor().position.row, 0);
         assert_eq!(buf.grid().cursor().position.col, 11);
     }

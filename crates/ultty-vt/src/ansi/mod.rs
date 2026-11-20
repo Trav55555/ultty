@@ -52,7 +52,6 @@ pub enum Action {
     /// Execute a C0 control code (0x00-0x1F)
     Execute(u8),
 
-    // === Cursor Movement ===
     /// Move cursor up N lines (CSI A)
     CursorUp(u16),
 
@@ -92,7 +91,6 @@ pub enum Action {
     /// Set/reset insert mode (IRM) — CSI 4 h / CSI 4 l
     SetInsertMode(bool),
 
-    // === Erase Operations ===
     /// Erase in display (CSI J)
     /// 0 = cursor to end, 1 = start to cursor, 2 = entire, 3 = entire + scrollback
     EraseInDisplay(u8),
@@ -104,7 +102,6 @@ pub enum Action {
     /// Erase N characters from cursor (CSI X)
     EraseCharacters(u16),
 
-    // === Line Operations ===
     /// Insert N blank lines (CSI L)
     InsertLines(u16),
 
@@ -117,7 +114,6 @@ pub enum Action {
     /// Insert N blank characters (CSI @)
     InsertCharacters(u16),
 
-    // === Scrolling ===
     /// Scroll up N lines (CSI S)
     ScrollUp(u16),
 
@@ -136,28 +132,24 @@ pub enum Action {
     /// Next Line (ESC E) - CR + LF
     NextLine,
 
-    // === Cursor Save/Restore ===
     /// Save cursor position (ESC 7 or CSI s)
     SaveCursorPosition,
 
     /// Restore cursor position (ESC 8 or CSI u)
     RestoreCursorPosition,
 
-    // === Text Attributes (SGR) ===
     /// Set graphic rendition (CSI m)
     SetAttribute(Attribute),
 
     /// Reset all attributes to default (CSI 0 m)
     ResetAttributes,
 
-    // === Modes ===
     /// Set mode (CSI h)
     SetMode(Mode),
 
     /// Reset mode (CSI l)
     ResetMode(Mode),
 
-    // === Tabs ===
     /// Horizontal tab (0x09)
     Tab,
 
@@ -167,7 +159,6 @@ pub enum Action {
     /// Clear tab stop (CSI g)
     ClearTabStop(u8),
 
-    // === Terminal Queries ===
     /// Report cursor position (CSI 6 n)
     ReportCursorPosition,
 
@@ -177,11 +168,9 @@ pub enum Action {
     /// Secondary device attributes request (CSI > c or CSI > 0 c) - DA2
     SecondaryDeviceAttributes,
 
-    // === Bell ===
     /// Bell character (0x07)
     Bell,
 
-    // === Newline/Carriage Return ===
     /// Newline (0x0A, 0x0B, 0x0C)
     Newline,
 
@@ -191,7 +180,6 @@ pub enum Action {
     /// Backspace (0x08)
     Backspace,
 
-    // === Screen Modes ===
     /// Switch to alternate screen buffer (CSI ?1049h)
     EnterAlternateScreen,
 
@@ -203,7 +191,6 @@ pub enum Action {
     /// 4 = steady underline, 5 = blinking bar, 6 = steady bar
     SetCursorStyle(u8),
 
-    // === OSC Sequences ===
     /// Set window/icon title (OSC 0, 1, 2)
     SetTitle(String),
 
@@ -390,10 +377,8 @@ pub enum Attribute {
     Hidden,
     Strikethrough,
 
-    // Foreground colors
     ForegroundColor(Color),
 
-    // Background colors
     BackgroundColor(Color),
 
     DoubleUnderline,
@@ -408,7 +393,6 @@ pub enum Attribute {
     /// Underline color (SGR 58); `Default` (SGR 59) follows the foreground.
     UnderlineColor(Color),
 
-    // Disable specific attributes
     NoBold,
     NoItalic,
     NoUnderline,
@@ -985,17 +969,14 @@ impl AnsiParser {
                 self.dcs_overflow = false;
                 self.dcs_params.clear();
             }
-            // Save cursor (ESC 7)
             b'7' => {
                 callback(Action::SaveCursorPosition);
                 self.reset();
             }
-            // Restore cursor (ESC 8)
             b'8' => {
                 callback(Action::RestoreCursorPosition);
                 self.reset();
             }
-            // Set tab stop (ESC H)
             b'H' => {
                 callback(Action::SetTabStop);
                 self.reset();
@@ -1043,11 +1024,9 @@ impl AnsiParser {
             0x1B => {
                 // Stay in escape state
             }
-            // G0 character set designation (ESC ()
             b'(' => {
                 self.state = State::CharsetDesignateG0;
             }
-            // G1 character set designation (ESC ))
             b')' => {
                 self.state = State::CharsetDesignateG1;
             }
@@ -1066,7 +1045,6 @@ impl AnsiParser {
             b'X' => {
                 self.state = State::SosString;
             }
-            // Anything else - abort and return to ground
             _ => {
                 self.reset();
             }
@@ -1081,7 +1059,6 @@ impl AnsiParser {
     {
         let _ = callback; // May be used in future for charset change notifications
 
-        // Determine if this is G0 or G1 based on the state we entered from
         let is_g0 = self.state == State::CharsetDesignateG0;
 
         // Common character set designators:

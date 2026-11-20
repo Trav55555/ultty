@@ -27,10 +27,6 @@ fn term() -> Terminal {
     Terminal::new(Dimensions::new(20, 5))
 }
 
-// ---------------------------------------------------------------------------
-// Refusals (slice 1)
-// ---------------------------------------------------------------------------
-
 #[test]
 fn file_temp_file_and_shared_memory_media_are_refused_with_ebadf() {
     // The payload names a file that exists; it must not be opened.
@@ -145,10 +141,6 @@ fn replies_never_echo_request_bytes() {
     let got = replies(&mut term, &apc("i=0007,t=f,k=evil", "ZXZpbCB0ZXh0"));
     assert_eq!(got, "<i=7;EBADF:Only direct transmission is supported>");
 }
-
-// ---------------------------------------------------------------------------
-// Transmission, decoding and storage
-// ---------------------------------------------------------------------------
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -484,10 +476,6 @@ fn sixel_and_kitty_images_share_one_quota() {
     term.check_integrity().unwrap();
 }
 
-// ---------------------------------------------------------------------------
-// Chunk reassembly, for any chunking and any split of the byte stream
-// ---------------------------------------------------------------------------
-
 mod chunking {
     use super::*;
     use proptest::prelude::*;
@@ -577,10 +565,6 @@ mod chunking {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Placement
-// ---------------------------------------------------------------------------
 
 /// A 20 x 5 terminal with 10 x 20 pixel cells.
 fn sized() -> Terminal {
@@ -732,10 +716,6 @@ fn an_anonymous_image_lives_as_long_as_its_placements() {
     assert!(stored(&term).is_empty());
 }
 
-// ---------------------------------------------------------------------------
-// Deleting: every `d=` value
-// ---------------------------------------------------------------------------
-
 /// Image 1 placed at row 0 col 0 (z 0, p=1), image 2 at row 2 col 5 (z 5,
 /// p=2), each one cell, plus unplaced image 3.
 fn scene() -> Terminal {
@@ -821,10 +801,6 @@ fn deletes_leave_sixel_images_alone() {
     feed(&mut term, b"\x1b_Ga=d,d=A\x1b\\");
     assert_eq!(term.images().len(), 1);
 }
-
-// ---------------------------------------------------------------------------
-// Interaction with other terminal actions
-// ---------------------------------------------------------------------------
 
 #[test]
 fn placements_scroll_with_text_into_scrollback_and_are_dropped_on_eviction() {

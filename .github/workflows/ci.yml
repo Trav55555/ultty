@@ -37,6 +37,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - run: python3 scripts/comment-ratchet.py
 
   security-audit:
     name: Security Audit

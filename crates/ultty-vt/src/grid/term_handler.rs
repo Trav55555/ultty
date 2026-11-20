@@ -95,7 +95,6 @@ impl<'a> TerminalHandler<'a> {
                 rows,
             }),
 
-            // Cursor movement
             Action::CursorUp(n) => self.terminal.grid_mut().cursor_up(n),
             Action::CursorDown(n) => self.terminal.grid_mut().cursor_down(n),
             Action::CursorForward(n) => self.terminal.grid_mut().cursor_right(n),
@@ -158,7 +157,6 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.modes_mut().insert_mode = enabled;
             }
 
-            // Erase operations
             Action::EraseInDisplay(mode) => match mode {
                 0 => self.terminal.buffer_mut().erase_below(),
                 1 => self.terminal.buffer_mut().erase_above(),
@@ -181,7 +179,6 @@ impl<'a> TerminalHandler<'a> {
             },
             Action::EraseCharacters(n) => self.terminal.buffer_mut().erase_characters(n),
 
-            // Line operations
             Action::InsertLines(n) => {
                 self.terminal.buffer_mut().insert_lines(n);
                 self.terminal.grid_mut().carriage_return();
@@ -252,20 +249,16 @@ impl<'a> TerminalHandler<'a> {
                 }
             }
 
-            // Text attributes
             Action::SetAttribute(attr) => self.apply_attribute(attr),
             Action::ResetAttributes => self.terminal.grid_mut().reset_attrs(),
 
-            // Modes
             Action::SetMode(mode) => self.set_mode(mode, true),
             Action::ResetMode(mode) => self.set_mode(mode, false),
 
-            // Tabs
             Action::Tab => self.terminal.grid_mut().tab(),
             Action::SetTabStop => self.terminal.grid_mut().set_tab_stop(),
             Action::ClearTabStop(mode) => self.terminal.grid_mut().clear_tab_stop(mode),
 
-            // Terminal queries
             Action::ReportCursorPosition => {
                 let (row, col) = self.cursor_report_position();
                 self.reply(format!("\x1b[{row};{col}R"));
@@ -298,7 +291,6 @@ impl<'a> TerminalHandler<'a> {
                 self.reply(format!("\x1b[{mode};{status}$y"));
             }
 
-            // Control characters
             Action::Bell => {
                 // Bell is handled by the event loop emitting TerminalEvent::Bell
             }
@@ -332,7 +324,7 @@ impl<'a> TerminalHandler<'a> {
                         cursor.shape = CursorShape::Bar;
                         cursor.blinking = false;
                     }
-                    _ => {} // Unknown style, ignore
+                    _ => {}
                 }
             }
             Action::Newline => {
@@ -344,7 +336,6 @@ impl<'a> TerminalHandler<'a> {
             Action::CarriageReturn => self.terminal.grid_mut().carriage_return(),
             Action::Backspace => self.terminal.grid_mut().backspace(),
 
-            // Screen modes
             Action::EnterAlternateScreen => {
                 self.terminal.enter_alternate_screen();
             }
@@ -352,7 +343,6 @@ impl<'a> TerminalHandler<'a> {
                 self.terminal.leave_alternate_screen();
             }
 
-            // OSC sequences
             Action::ProgramStatus(report) => self.terminal.apply_program_status(report),
             Action::ProgramStatusQuery => self
                 .terminal
@@ -728,7 +718,6 @@ impl<'a> TerminalHandler<'a> {
             Mode::FocusReporting => {
                 self.terminal.modes_mut().focus_reporting = enabled;
             }
-            // Mouse tracking modes
             Mode::MouseX10 => {
                 self.terminal.modes_mut().mouse_mode = if enabled {
                     MouseMode::X10
@@ -757,7 +746,6 @@ impl<'a> TerminalHandler<'a> {
                     MouseMode::None
                 };
             }
-            // Mouse encoding modes
             Mode::MouseUtf8 => {
                 if enabled {
                     self.terminal.modes_mut().mouse_encoding = MouseEncoding::Utf8;
@@ -877,13 +865,11 @@ impl<'a> TerminalHandler<'a> {
 
     /// Handle a Sixel image.
     fn handle_sixel_image(&mut self, data: &[u8], background: u16) {
-        // Decode the sixel data
         let Some((pixels, width, height)) = decode_sixel(data, background) else {
             tracing::warn!("Failed to decode sixel image");
             return;
         };
 
-        // Get current cursor position for image placement
         let cursor = self.terminal.grid().cursor();
         let start_col = cursor.position.col;
         let line = self
@@ -904,7 +890,6 @@ impl<'a> TerminalHandler<'a> {
         let cell_width = width.div_ceil(cell_pixel_width).min(u16::MAX as u32) as u16;
         let cell_height = height.div_ceil(cell_pixel_height).min(u16::MAX as u32) as u16;
 
-        // Allocate image ID and create the image
         let id = self.terminal.allocate_image_id();
         let image = TerminalImage {
             id,
@@ -929,7 +914,6 @@ impl<'a> TerminalHandler<'a> {
             line
         );
 
-        // Add the image to the terminal
         self.terminal.add_image(image);
     }
 
@@ -1289,7 +1273,6 @@ mod tests {
     fn alternate_screen_escape() {
         let mut term = Terminal::new(Dimensions::new(80, 24));
 
-        // Write to main
         process(&mut term, b"Main");
         assert_eq!(term.grid().cell(0, 0).unwrap().char(), 'M');
 
@@ -1298,7 +1281,6 @@ mod tests {
         assert!(term.is_alternate_screen());
         assert_eq!(term.grid().cell(0, 0).unwrap().char(), ' ');
 
-        // Write to alternate
         process(&mut term, b"Alt");
         assert_eq!(term.grid().cell(0, 0).unwrap().char(), 'A');
 
@@ -1312,13 +1294,11 @@ mod tests {
     fn scroll_to_history() {
         let mut term = Terminal::new(Dimensions::new(10, 3));
 
-        // Fill screen and scroll
         process(&mut term, b"Line1\r\n");
         process(&mut term, b"Line2\r\n");
         process(&mut term, b"Line3\r\n");
         process(&mut term, b"Line4\r\n");
 
-        // Line1 should be in history now
         assert!(term.buffer().history_len() > 0);
     }
 
@@ -1347,7 +1327,6 @@ mod tests {
     fn mouse_tracking_modes() {
         let mut term = Terminal::new(Dimensions::new(80, 24));
 
-        // Default: no mouse tracking
         assert_eq!(term.modes().mouse_mode, MouseMode::None);
         assert!(!term.mouse_tracking_enabled());
 
@@ -1385,7 +1364,6 @@ mod tests {
     fn mouse_encoding_modes() {
         let mut term = Terminal::new(Dimensions::new(80, 24));
 
-        // Default: X10 encoding
         assert_eq!(term.modes().mouse_encoding, MouseEncoding::X10);
 
         // UTF-8 encoding
@@ -1456,7 +1434,6 @@ mod tests {
             .unwrap();
         assert_eq!(event, b"\x1b[<0;11;6m"); // lowercase 'm' for release
 
-        // Test scroll up
         let event = term
             .encode_mouse_event(
                 crate::grid::MouseButton::ScrollUp,
@@ -1469,7 +1446,6 @@ mod tests {
             .unwrap();
         assert_eq!(event, b"\x1b[<64;11;6M"); // scroll up is button code 64
 
-        // Test motion tracking
         process(&mut term, b"\x1b[?1003h"); // Any event mode
         let event = term
             .encode_mouse_event(crate::grid::MouseButton::Left, 10, 5, true, true, no_mods)
@@ -1529,7 +1505,6 @@ mod tests {
             .unwrap();
         assert_eq!(event, b"\x1b[<28;11;6M"); // 0 + 4 + 8 + 16 = 28
 
-        // Test shift+middle click
         let event = term
             .encode_mouse_event(
                 crate::grid::MouseButton::Middle,
@@ -1563,7 +1538,6 @@ mod tests {
     fn synchronized_update_mode() {
         let mut term = Terminal::new(Dimensions::new(80, 24));
 
-        // Default: disabled
         assert!(!term.modes().synchronized_update);
 
         // Enable synchronized update mode
@@ -1587,15 +1561,12 @@ mod tests {
         // This simulates what OpenCode does to draw filled backgrounds
         process(&mut term, b"\x1b[48;2;64;73;74m ");
 
-        // Verify the cell has the correct background color
         let cell = term.grid().cell(0, 0).unwrap();
         assert_eq!(cell.char(), ' ');
         assert_eq!(cell.bg(), Color::Rgb(64, 73, 74));
 
-        // Print more characters with the same background
         process(&mut term, b"ABC");
 
-        // All cells should have the background
         assert_eq!(term.grid().cell(1, 0).unwrap().bg(), Color::Rgb(64, 73, 74));
         assert_eq!(term.grid().cell(2, 0).unwrap().bg(), Color::Rgb(64, 73, 74));
         assert_eq!(term.grid().cell(3, 0).unwrap().bg(), Color::Rgb(64, 73, 74));
