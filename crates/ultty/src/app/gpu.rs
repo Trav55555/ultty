@@ -264,6 +264,8 @@ impl App {
         };
         starting.clone().apply_to(&mut gpu.renderer);
         self.renderer = RendererState::Ready(gpu);
+        // Before the GPU's first present: see `cpu_frames`.
+        self.cpu_frames = None;
         tracing::debug!(target: "ultty::startup", "renderer handed over");
         // The window may have been resized, and the fonts changed, while
         // the GPU started: size the surface and every grid again.
