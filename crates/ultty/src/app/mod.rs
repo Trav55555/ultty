@@ -8,6 +8,7 @@ mod control;
 mod control_events;
 mod control_resize;
 mod control_wait;
+mod gpu;
 mod input;
 mod native_panes;
 mod native_selection;
@@ -23,7 +24,6 @@ use ultty::config::{Config, ShellIntegration, TerminalConfig};
 use ultty::config_watcher::ConfigWatcher;
 use ultty::control::ControlServer;
 use ultty::protocol::ProtocolServer;
-use ultty::renderer::Renderer;
 use ultty::tabs::TabBarState;
 use ultty::terminal_manager::{TabId, TerminalId, TerminalManager};
 use ultty::url::UrlDetector;
@@ -136,6 +136,8 @@ enum AppEvent {
     Accessibility(accesskit_winit::Event),
     /// SIGTERM, SIGHUP or SIGINT: exit as if the window were closed.
     ShutdownSignal,
+    /// The GPU setup finished, or failed; see `gpu`.
+    Renderer(gpu::Handoff),
 }
 
 impl From<accesskit_winit::Event> for AppEvent {
@@ -156,10 +158,8 @@ pub struct App {
     window: Arc<Window>,
     /// Bridge to assistive technology; `None` with `accessibility = false`.
     accessibility: Option<ultty::a11y::Adapter>,
-    /// wgpu surface
-    surface: wgpu::Surface<'static>,
-    /// GPU renderer
-    renderer: Renderer,
+    /// The GPU renderer and its surface, once the GPU is up; see `gpu`.
+    renderer: gpu::RendererState,
     /// Terminal manager (handles multiple tabs/panes)
     runtime: ultty::runtime::SessionRuntime,
     /// Where the session is saved on exit; `None` for an `ultty -e` window,
@@ -319,6 +319,31 @@ impl App {
         let window = event_loop.create_window(attributes)?;
         let window = Arc::new(window);
         tracing::debug!(target: "ultty::startup", "window created");
+        let size = window.inner_size();
+        let scale_factor = window.scale_factor() as f32;
+
+        // The GPU comes up on a worker thread while this one measures the
+        // fonts, starts the shells and runs the loop; see `gpu`.
+
+        // On Wayland, winit holds redraws for the compositor's frame
+        // callbacks (see `pacing`), which lets the swapchain skip FIFO.
+        let paced_by_frame_callbacks = {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            window
+                .window_handle()
+                .is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)))
+        };
+        let (fonts_sender, fonts_receiver) = std::sync::mpsc::channel();
+        gpu::spawn_setup(
+            event_loop.owned_display_handle(),
+            Arc::clone(&window),
+            size,
+            config.colors.clone(),
+            fonts_receiver,
+            paced_by_frame_callbacks,
+            event_proxy.clone(),
+        )?;
+
         // The adapter connects to the session bus on its own thread, so
         // neither a slow nor a missing bus holds up the window.
         let accessibility = config.behavior.accessibility.then(|| {
@@ -332,59 +357,17 @@ impl App {
         // users cannot type Chinese, Japanese or Korean.
         window.set_ime_allowed(true);
 
-        let size = window.inner_size();
-        let scale_factor = window.scale_factor() as f32;
-
-        // Vulkan (or the platform's primary API) first, GL only if that
-        // finds no adapter. An instance with every backend brings up GL as
-        // well, which loads and initializes the EGL driver even when Vulkan
-        // is then chosen: startup time and resident memory for nothing.
-        // `WGPU_BACKEND` (vulkan, gl, ...) picks one for diagnosis.
-        let primary = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY);
-        let (surface, adapter) = match request_gpu(event_loop, &window, primary) {
-            Ok(gpu) => gpu,
-            Err(primary) => {
-                tracing::info!("No primary GPU backend ({primary:#}); trying GL");
-                request_gpu(event_loop, &window, wgpu::Backends::SECONDARY)
-                    .map_err(|gl| anyhow::anyhow!("{primary:#}; with GL: {gl:#}"))?
-            }
-        };
-        tracing::debug!(target: "ultty::startup", "GPU adapter ready");
-        let info = adapter.get_info();
-        tracing::info!(
-            "GPU: {} ({:?}, {:?}, {})",
-            info.name,
-            info.backend,
-            info.device_type,
-            info.driver
-        );
-
         // Scale font size to physical pixels so cosmic-text metrics match
         // the orthographic projection (which uses physical window dimensions).
         let mut scaled_font = config.font.clone();
         scaled_font.size *= scale_factor;
-
-        // On Wayland, winit holds redraws for the compositor's frame
-        // callbacks (see `pacing`), which lets the swapchain skip FIFO.
-        let paced_by_frame_callbacks = {
-            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            window
-                .window_handle()
-                .is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)))
-        };
-        let mut renderer = pollster::block_on(Renderer::with_config(
-            &surface,
-            &adapter,
-            size.width,
-            size.height,
-            &config.colors,
-            &scaled_font,
-            paced_by_frame_callbacks,
-        ))?;
-
-        tracing::debug!(target: "ultty::startup", "renderer ready");
-        // Set window opacity
-        renderer.set_opacity(config.behavior.opacity);
+        let fonts = ultty::renderer::Fonts::load(&scaled_font);
+        tracing::debug!(target: "ultty::startup", "cell metrics ready");
+        let mut renderer =
+            gpu::RendererState::Starting(gpu::Starting::new(&fonts, size, config.behavior.opacity));
+        // This fails only when the GPU setup has already failed, and the
+        // worker reports that.
+        let _ = fonts_sender.send(fonts);
 
         // Create tab bar state at the window's scale. It is always visible
         // (CSD), so set its height before sizing the terminal.
@@ -394,7 +377,7 @@ impl App {
         tab_bar.title_letters = 0;
         renderer.set_tab_bar_height(tab_bar.content_top());
 
-        // Get terminal dimensions from renderer
+        // Get terminal dimensions from the cell metrics
         let (cols, rows) = renderer.terminal_dimensions();
         tracing::info!("Terminal size: {}x{}", cols, rows);
 
@@ -468,7 +451,6 @@ impl App {
         let mut app = Self {
             window,
             accessibility,
-            surface,
             renderer,
             runtime,
             session_file: session_file(
@@ -1515,7 +1497,7 @@ impl App {
         }
 
         // Resize renderer
-        self.renderer.resize(&self.surface, size.width, size.height);
+        self.renderer.resize(size.width, size.height);
         self.update_window_corner_radius();
         self.clear_tab_width_freeze();
         self.update_tab_bar();
@@ -1553,7 +1535,9 @@ impl App {
         } else {
             WINDOW_CORNER_RADIUS
         };
-        self.renderer.set_window_corner_radius(radius);
+        if let Some(renderer) = self.renderer.ready_mut() {
+            renderer.set_window_corner_radius(radius);
+        }
     }
 }
 
@@ -1684,30 +1668,6 @@ fn tab_shell_env(
     Ok(env)
 }
 
-/// A surface for `window` and an adapter that can draw to it, from an
-/// instance limited to `backends`.
-fn request_gpu(
-    event_loop: &ActiveEventLoop,
-    window: &Arc<Window>,
-    backends: wgpu::Backends,
-) -> Result<(wgpu::Surface<'static>, wgpu::Adapter)> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends,
-        // GL presents through the display connection (Wayland needs it).
-        display: Some(Box::new(event_loop.owned_display_handle())),
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
-    let surface = instance.create_surface(Arc::clone(window))?;
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: Some(&surface),
-        force_fallback_adapter: false,
-        ..Default::default()
-    }))
-    .map_err(|e| anyhow::anyhow!("Failed to find suitable GPU adapter: {e}"))?;
-    Ok((surface, adapter))
-}
-
 /// Sleep until `deadline`, or with none, until an event arrives.
 fn control_flow(deadline: Option<Instant>) -> ControlFlow {
     deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
@@ -1814,6 +1774,24 @@ impl ApplicationHandler<AppEvent> for AppHandler {
                     app.save_session();
                 }
                 event_loop.exit();
+            }
+            AppEvent::Renderer(gpu::Handoff(gpu)) => {
+                let Some(app) = self.app.as_mut() else {
+                    return;
+                };
+                match gpu {
+                    Ok(gpu) => {
+                        app.install_renderer(gpu);
+                        app.update_and_schedule(event_loop);
+                    }
+                    // As when the GPU was set up before the window's loop
+                    // ran: no frame was ever drawn, and Ultty exits with
+                    // the error.
+                    Err(error) => {
+                        self.init_error = Some(error);
+                        event_loop.exit();
+                    }
+                }
             }
         }
     }

@@ -13,7 +13,9 @@ impl App {
     pub(super) fn next_update_deadline(&self, now: Instant) -> Option<Instant> {
         WakeState {
             needs_redraw: self.needs_redraw,
-            frame_timer: self.frame_pacing.frame_timer_applies(),
+            // Without a renderer there is no frame to time; the handoff
+            // wakes the loop (see `gpu`).
+            frame_timer: self.frame_pacing.frame_timer_applies() && self.renderer.is_ready(),
             last_render: self.last_render,
             sync_active: self.needs_redraw && self.sync_update_active(),
             cursor_blink: self.cursor_blink.next_toggle(),
@@ -353,7 +355,10 @@ impl App {
         }
         // A frame that skipped glyphs (atlas overflow) must draw again
         // once the deferred eviction has run.
-        self.needs_redraw = self.renderer.frame_incomplete();
+        self.needs_redraw = self
+            .renderer
+            .ready()
+            .is_some_and(|renderer| renderer.frame_incomplete());
     }
 
     /// The window was hidden or shown again (`WindowEvent::Occluded`).
@@ -376,7 +381,8 @@ impl App {
             .input_sent_at
             .filter(|_| self.output_since_input)
             .map(|sent| now.saturating_duration_since(sent));
-        should_render(self.needs_redraw, frame_elapsed, sync_active, echo_after)
+        let needs_redraw = self.needs_redraw && self.renderer.is_ready();
+        should_render(needs_redraw, frame_elapsed, sync_active, echo_after)
             .then_some((frame_elapsed, sync_active))
     }
 }

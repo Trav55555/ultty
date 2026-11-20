@@ -86,6 +86,7 @@ impl App {
         );
         let panes = super::render::pane_draws(&locked, self.runtime.protocol.as_ref());
         self.renderer
+            .for_screenshot()?
             .capture_panes_screenshot(&panes, &overlay, path)
     }
 
@@ -264,11 +265,7 @@ impl App {
 
     /// Change font size (increase or decrease).
     pub(super) fn change_font_size(&mut self, increase: bool) {
-        let new_size = if increase {
-            self.renderer.increase_font_size()
-        } else {
-            self.renderer.decrease_font_size()
-        };
+        let new_size = self.renderer.step_font_size(increase);
 
         tracing::info!("Font size: {:.1}pt", new_size);
 
@@ -340,12 +337,9 @@ impl App {
             })
             .unwrap_or_default();
 
-        match self.renderer.capture_screenshot_with_native(
-            &terminal,
-            &overlay,
-            &path,
-            &native_sessions,
-        ) {
+        match self.renderer.for_screenshot().and_then(|renderer| {
+            renderer.capture_screenshot_with_native(&terminal, &overlay, &path, &native_sessions)
+        }) {
             Ok(()) => self.notify_screenshot_saved(&path),
             Err(e) => {
                 tracing::error!("Failed to capture screenshot: {}", e);

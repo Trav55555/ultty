@@ -2,6 +2,7 @@
 
 use std::time::Instant;
 
+use super::gpu::RendererState;
 use super::update::pipeline_trace_enabled;
 use super::App;
 use ultty::event_loop::TerminalGuard;
@@ -12,6 +13,11 @@ use ultty::terminal_manager::{TerminalId, TerminalManager};
 impl App {
     /// Render the terminal.
     pub(super) fn render(&mut self) {
+        // Nothing is drawn until the GPU is up; see `gpu`.
+        let Some(renderer) = self.renderer.ready() else {
+            return;
+        };
+        let palette_caret = renderer.command_palette_caret_cell(&self.command_palette);
         self.update_window_corner_radius();
         if self.frames_drawn == 0 {
             tracing::debug!(target: "ultty::startup", "drawing the first frame");
@@ -23,15 +29,15 @@ impl App {
         // Where the cursor is, read before the frame is acquired and the
         // terminals are locked for drawing.
         let cursor_cell = self.cursor_cell_rect();
-        let palette_caret = self
-            .renderer
-            .command_palette_caret_cell(&self.command_palette);
         self.update_ime_cursor_area(super::command_palette::ime_cell(palette_caret, cursor_cell));
 
         // Acquire the frame before locking any terminal: this can block
         // until the next vsync, and the terminals' I/O threads must keep
         // parsing meanwhile.
-        let (output, suboptimal) = match self.surface.get_current_texture() {
+        let RendererState::Ready(gpu) = &self.renderer else {
+            return;
+        };
+        let (output, suboptimal) = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(output) => (output, false),
             wgpu::CurrentSurfaceTexture::Suboptimal(output) => (output, true),
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
@@ -55,8 +61,9 @@ impl App {
             .create_view(&wgpu::TextureViewDescriptor::default());
         // Tabs and panes close from many places; whatever their images left
         // in the texture cache goes here.
-        self.renderer
-            .retain_terminal_images(&self.runtime.manager.terminal_uids());
+        if let Some(renderer) = self.renderer.ready_mut() {
+            renderer.retain_terminal_images(&self.runtime.manager.terminal_uids());
+        }
         let drawn = if pane_count > 1 {
             self.render_multi_pane(&view, cursor_cell)
         } else {
@@ -71,8 +78,10 @@ impl App {
             // On Wayland this asks for a frame callback with this commit;
             // winit holds the next `RedrawRequested` until it arrives. Only
             // call it when a present follows, or no callback ever comes.
-            self.window.pre_present_notify();
-            self.renderer.present(output);
+            if let Some(renderer) = self.renderer.ready() {
+                self.window.pre_present_notify();
+                renderer.present(output);
+            }
         }
         let presented_at = trace_start.map(|_| Instant::now());
 
@@ -171,7 +180,7 @@ impl App {
     /// Configure the surface again for the window's current size.
     fn reconfigure_surface(&mut self) {
         let size = self.window.inner_size();
-        self.renderer.resize(&self.surface, size.width, size.height);
+        self.renderer.resize(size.width, size.height);
     }
 
     /// Draw a single terminal pane into `view`, returning whether there
@@ -261,9 +270,12 @@ impl App {
                         .sessions()
                         .flat_map(|s| s.scene().iter_all().map(move |r| (s.session_id(), r.id)))
                         .collect();
-                self.renderer.retain_native_images(&live_regions);
+                let Some(renderer) = self.renderer.ready_mut() else {
+                    return false;
+                };
+                renderer.retain_native_images(&live_regions);
 
-                self.renderer.render_with_native_sessions(
+                renderer.render_with_native_sessions(
                     view,
                     &terminal,
                     &overlay,
@@ -277,7 +289,10 @@ impl App {
             }
         }
 
-        self.renderer.render_with_overlay(view, &terminal, &overlay);
+        let Some(renderer) = self.renderer.ready_mut() else {
+            return false;
+        };
+        renderer.render_with_overlay(view, &terminal, &overlay);
         true
     }
 
@@ -353,7 +368,10 @@ impl App {
                 .then_some(&self.command_palette),
         };
 
-        self.renderer.render_panes(view, &panes, &overlay);
+        let Some(renderer) = self.renderer.ready_mut() else {
+            return false;
+        };
+        renderer.render_panes(view, &panes, &overlay);
         true
     }
 }

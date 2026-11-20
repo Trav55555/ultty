@@ -1482,12 +1482,14 @@ impl App {
                     if let Some(parent) = path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
-                    Some(self.renderer.capture_screenshot_with_native(
-                        &term,
-                        &overlay,
-                        &path,
-                        &native_sessions,
-                    ))
+                    Some(self.renderer.for_screenshot().and_then(|renderer| {
+                        renderer.capture_screenshot_with_native(
+                            &term,
+                            &overlay,
+                            &path,
+                            &native_sessions,
+                        )
+                    }))
                 } else {
                     None
                 };
