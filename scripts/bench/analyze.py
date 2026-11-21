@@ -92,6 +92,8 @@ def bootstrap_ratio(a_by_block, b_by_block, resamples, rng):
             if a_med > 0:
                 estimates.append(b_med / a_med)
         paired = False
+    if not estimates:
+        return None, None, paired
     estimates.sort()
     return quantile(estimates, 0.025), quantile(estimates, 0.975), paired
 
@@ -192,8 +194,14 @@ def compare(groups, units, a, b, args, mde):
         if a not in arms or b not in arms:
             continue
         av, bv = arms[a], arms[b]
-        ratio = median(list(bv.values())) / median(list(av.values()))
-        lo, hi, paired = bootstrap_ratio(av, bv, args.resamples, rng)
+        a_summary = summarize(list(av.values()))
+        b_summary = summarize(list(bv.values()))
+        ratio = None
+        lo, hi = None, None
+        paired = len(av.keys() & bv.keys()) >= 2
+        if a_summary["median"] != 0:
+            ratio = b_summary["median"] / a_summary["median"]
+            lo, hi, paired = bootstrap_ratio(av, bv, args.resamples, rng)
         _, p = mann_whitney(list(av.values()), list(bv.values()))
         unit = units[key]
         higher = unit in HIGHER_IS_BETTER
@@ -203,8 +211,8 @@ def compare(groups, units, a, b, args, mde):
             "suite": key[0],
             "case": key[1],
             "unit": unit,
-            "a": summarize(list(av.values())),
-            "b": summarize(list(bv.values())),
+            "a": a_summary,
+            "b": b_summary,
             "ratio": ratio,
             "ci": [lo, hi],
             "paired": paired,
@@ -213,7 +221,11 @@ def compare(groups, units, a, b, args, mde):
             "mde": floor,
         }
         n = min(len(av), len(bv))
-        if n < MIN_SAMPLES:
+        if ratio is None:
+            entry["verdict"] = "ratio unavailable (zero baseline)"
+        elif lo is None:
+            entry["verdict"] = "ratio interval unavailable"
+        elif n < MIN_SAMPLES:
             # A bootstrap of one or two values has a CI of zero width, which
             # would turn any difference into a confident verdict.
             entry["verdict"] = f"too few samples (n={n})"
@@ -296,8 +308,10 @@ def print_comparison(results, a, b, aa, markdown, out):
             last = f"{r['mde_half_width'] * 100:.1f}% {r['verdict']}"
         else:
             last = r["verdict"]
+        ratio = "-" if r["ratio"] is None else f"{r['ratio']:.3f}"
+        ci = "-" if r["ci"][0] is None else f"[{r['ci'][0]:.3f}, {r['ci'][1]:.3f}]"
         cells = [r["suite"], r["case"], fmt(r["a"]["median"]), fmt(r["b"]["median"]),
-                 f"{r['ratio']:.3f}", f"[{r['ci'][0]:.3f}, {r['ci'][1]:.3f}]",
+                 ratio, ci,
                  f"{r['mann_whitney_p']:.3g}", last]
         if markdown:
             out.write("| " + " | ".join(f"`{c}`" if i == 1 else c
@@ -433,6 +447,21 @@ class SelfTest(unittest.TestCase):
     def test_too_few_samples_get_no_verdict(self):
         r = self.run_compare(self.arms(0.5, n=2))
         self.assertEqual(r["verdict"], "too few samples (n=2)")
+
+    def test_zero_baseline_keeps_absolute_measurements(self):
+        rows = [dict(row, value=0) if row["arm"] == "A" else row
+                for row in self.arms(1.0)]
+        r = self.run_compare(rows)
+        self.assertEqual(r["a"]["median"], 0)
+        self.assertGreater(r["b"]["median"], 0)
+        self.assertIsNone(r["ratio"])
+        self.assertEqual(r["ci"], [None, None])
+        self.assertEqual(r["verdict"], "ratio unavailable (zero baseline)")
+
+    def test_bootstrap_without_nonzero_baseline_estimates(self):
+        lo, hi, paired = bootstrap_ratio({0: 0, 1: 0, 2: 5}, {0: 1, 1: 1},
+                                         20, random.Random(7))
+        self.assertEqual((lo, hi, paired), (None, None, True))
 
     def test_neutral_wording_names_the_arm(self):
         r = self.run_compare(self.arms(0.8), neutral=True)
