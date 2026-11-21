@@ -60,7 +60,12 @@ fn main() -> Result<ExitCode> {
 
     tracing::info!("Starting Ultty");
 
-    app::App::run(command)?;
+    let config = ultty::config::Config::load();
+    if config.behavior.narrow_vulkan_icd {
+        ultty::platform::vulkan_icd::narrow_to_detected_gpu();
+    }
+
+    app::App::run(command, config)?;
     Ok(ExitCode::SUCCESS)
 }
 

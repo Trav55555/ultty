@@ -9,6 +9,7 @@ pub mod macos;
 pub mod runtime_files;
 pub mod shutdown;
 pub mod socket;
+pub mod vulkan_icd;
 
 use crate::pty::Child;
 

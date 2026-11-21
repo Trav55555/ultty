@@ -301,9 +301,9 @@ impl App {
         event_loop: &ActiveEventLoop,
         event_proxy: EventLoopProxy<AppEvent>,
         startup_command: Option<&StartupCommand>,
+        config: Config,
     ) -> Result<Self> {
         // Load configuration
-        let config = Config::load();
         tracing::info!("Loaded configuration");
 
         // Create window with transparency support if opacity < 1
@@ -840,7 +840,7 @@ impl App {
 
     /// Run the application. The first tab runs `startup_command`, or the
     /// configured shell, profile or restored session when there is none.
-    pub fn run(startup_command: Option<StartupCommand>) -> Result<()> {
+    pub fn run(startup_command: Option<StartupCommand>, config: Config) -> Result<()> {
         let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
         let signal_proxy = event_loop.create_proxy();
         if let Err(e) = ultty::platform::shutdown::on_shutdown_signal(move || {
@@ -854,6 +854,7 @@ impl App {
         let mut handler = AppHandler {
             proxy: event_loop.create_proxy(),
             startup_command,
+            config: Some(config),
             app: None,
             init_error: None,
         };
@@ -1735,6 +1736,9 @@ struct AppHandler {
     proxy: EventLoopProxy<AppEvent>,
     /// What the first tab runs instead of the shell (`ultty -e`).
     startup_command: Option<StartupCommand>,
+    /// Configuration loaded in `main` before the event loop and any threads
+    /// start; taken once on the first `resumed`.
+    config: Option<Config>,
     app: Option<App>,
     /// A startup failure, returned from [`App::run`] after the loop exits.
     init_error: Option<anyhow::Error>,
@@ -1745,10 +1749,12 @@ impl ApplicationHandler<AppEvent> for AppHandler {
         if self.app.is_some() {
             return;
         }
+        let config = self.config.take().unwrap_or_else(Config::load);
         match App::new(
             event_loop,
             self.proxy.clone(),
             self.startup_command.as_ref(),
+            config,
         ) {
             Ok(mut app) => {
                 app.update_tab_bar();
