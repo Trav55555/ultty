@@ -76,6 +76,22 @@ impl<'a> TerminalHandler<'a> {
         match action {
             Action::Print(c) => self.print(c),
 
+            Action::SizedText {
+                width,
+                scale: _,
+                text,
+            } => {
+                if let Some(w) = width {
+                    self.terminal
+                        .buffer_mut()
+                        .write_text_with_width(&text, u16::from(w));
+                } else {
+                    for c in text.chars() {
+                        self.terminal.buffer_mut().write_char(c);
+                    }
+                }
+            }
+
             Action::Execute(_code) => {
                 // C0 controls handled separately
             }
@@ -1592,6 +1608,145 @@ mod tests {
         assert_eq!(cell.char(), '▀');
         assert_eq!(cell.fg(), Color::Rgb(122, 132, 120));
         assert_eq!(cell.bg(), Color::Rgb(64, 73, 74));
+    }
+
+    #[test]
+    fn osc_66_honours_width_hints_and_graphemes() {
+        let mut term = Terminal::new(Dimensions::new(20, 4));
+        process(&mut term, "\x1b]66;w=1;😀\x1b\\A".as_bytes());
+        assert_eq!(term.grid().cell(0, 0).unwrap().char(), '😀');
+        assert!(!term.grid().cell(0, 0).unwrap().is_wide());
+        assert_eq!(term.grid().cell(1, 0).unwrap().char(), 'A');
+        assert_eq!(term.grid().cursor().position.col, 2);
+
+        process(&mut term, b"\x1b]66;w=2;X\x1b\\B");
+        assert_eq!(term.grid().cell(2, 0).unwrap().char(), 'X');
+        assert!(term.grid().cell(2, 0).unwrap().is_wide());
+        assert!(term.grid().cell(3, 0).unwrap().is_wide_spacer());
+        assert_eq!(term.grid().cell(4, 0).unwrap().char(), 'B');
+        assert_eq!(term.grid().cursor().position.col, 5);
+
+        process(&mut term, b"\x1b]66;w=3;Y\x1b\\C");
+        assert_eq!(term.grid().cell(5, 0).unwrap().char(), 'Y');
+        assert!(term.grid().cell(5, 0).unwrap().is_wide());
+        assert!(term.grid().cell(6, 0).unwrap().is_wide_spacer());
+        assert!(term.grid().cell(7, 0).unwrap().is_wide_spacer());
+        assert_eq!(term.grid().cell(8, 0).unwrap().char(), 'C');
+        assert_eq!(term.grid().cursor().position.col, 9);
+        assert_eq!(term.grid().row(0).unwrap().copy_text(0, 8), "😀AXBYC");
+        assert_eq!(term.check_integrity(), Ok(()));
+
+        let mut term = Terminal::new(Dimensions::new(10, 2));
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        process(&mut term, format!("\x1b]66;w=1;{family}\x1b\\Z").as_bytes());
+        assert!(!term.grid().cell(0, 0).unwrap().is_wide());
+        assert_eq!(term.grid().cell(1, 0).unwrap().char(), 'Z');
+        assert_eq!(
+            term.grid().row(0).unwrap().text_trimmed(),
+            format!("{family}Z")
+        );
+        assert_eq!(term.check_integrity(), Ok(()));
+    }
+
+    #[test]
+    fn osc_66_applies_one_width_to_the_entire_payload() {
+        let mut term = Terminal::new(Dimensions::new(10, 2));
+        process(&mut term, b"\x1b]66;w=1;ab\x1b\\Z");
+        assert_eq!(term.grid().cell(1, 0).unwrap().char(), 'Z');
+        assert_eq!(term.grid().cursor().position.col, 2);
+        assert_eq!(term.grid().row(0).unwrap().copy_text(0, 1), "abZ");
+        assert_eq!(term.check_integrity(), Ok(()));
+    }
+
+    #[test]
+    fn osc_66_wraps_at_right_margin_and_handles_narrow_grid() {
+        let mut term = Terminal::new(Dimensions::new(5, 3));
+        process(&mut term, b"abc\x1b]66;w=3;W\x1b\\d");
+        assert_eq!(term.grid().row(0).unwrap().text_trimmed(), "abc");
+        assert!(term.grid().row(0).unwrap().is_wrapped());
+        assert_eq!(term.grid().cell(0, 1).unwrap().char(), 'W');
+        assert!(term.grid().cell(0, 1).unwrap().is_wide());
+        assert!(term.grid().cell(1, 1).unwrap().is_wide_spacer());
+        assert!(term.grid().cell(2, 1).unwrap().is_wide_spacer());
+        assert_eq!(term.grid().cell(3, 1).unwrap().char(), 'd');
+        assert_eq!(term.grid().cursor().position.row, 1);
+        assert_eq!(term.grid().cursor().position.col, 4);
+        assert_eq!(term.check_integrity(), Ok(()));
+
+        let mut narrow = Terminal::new(Dimensions::new(2, 2));
+        process(&mut narrow, b"\x1b]66;w=3;W\x1b\\x");
+        assert_eq!(narrow.grid().cell(0, 0).unwrap().char(), 'x');
+        assert_eq!(narrow.grid().cursor().position.col, 1);
+        assert_eq!(narrow.check_integrity(), Ok(()));
+
+        let mut no_wrap = Terminal::new(Dimensions::new(5, 3));
+        process(&mut no_wrap, b"\x1b[?7labcd\x1b]66;w=3;W\x1b\\");
+        assert_eq!(no_wrap.grid().cell(2, 0).unwrap().char(), 'W');
+        assert!(no_wrap.grid().cell(3, 0).unwrap().is_wide_spacer());
+        assert!(no_wrap.grid().cell(4, 0).unwrap().is_wide_spacer());
+        assert_eq!(no_wrap.grid().cursor().position.col, 4);
+        assert_eq!(no_wrap.check_integrity(), Ok(()));
+    }
+
+    #[test]
+    fn osc_66_overwrite_erase_edit_and_reflow_preserve_integrity() {
+        let mut term = Terminal::new(Dimensions::new(8, 3));
+        process(&mut term, b"\x1b]66;w=3;W\x1b\\abc");
+        process(&mut term, b"\x1b[1;2H!");
+        assert_eq!(term.grid().cell(0, 0).unwrap().char(), ' ');
+        assert!(!term.grid().cell(0, 0).unwrap().is_wide());
+        assert_eq!(term.grid().cell(1, 0).unwrap().char(), '!');
+        assert!(!term.grid().cell(2, 0).unwrap().is_wide_spacer());
+        assert_eq!(term.grid().cell(3, 0).unwrap().char(), 'a');
+        assert_eq!(term.check_integrity(), Ok(()));
+
+        for seq in [
+            &b"\x1b[1;2H\x1b[K"[..],
+            &b"\x1b[1;2H\x1b[1K"[..],
+            &b"\x1b[1;2H\x1b[1X"[..],
+            &b"\x1b[1;2H\x1b[1P"[..],
+            &b"\x1b[1;2H\x1b[1@"[..],
+            &b"\x1b[1;1H\x1b[6@"[..],
+        ] {
+            let mut t = Terminal::new(Dimensions::new(8, 2));
+            process(&mut t, b"\x1b]66;w=3;W\x1b\\xyz");
+            process(&mut t, seq);
+            assert_eq!(t.check_integrity(), Ok(()), "failed after {seq:?}");
+        }
+
+        let mut reflow = Terminal::new(Dimensions::new(6, 3));
+        process(&mut reflow, b"ab\x1b]66;w=3;W\x1b\\c");
+        reflow.resize(Dimensions::new(4, 4));
+        assert_eq!(reflow.check_integrity(), Ok(()));
+        assert_eq!(reflow.grid().row(0).unwrap().text_trimmed(), "ab");
+        assert_eq!(reflow.grid().cell(0, 1).unwrap().char(), 'W');
+        assert!(reflow.grid().cell(0, 1).unwrap().is_wide());
+        assert!(reflow.grid().cell(1, 1).unwrap().is_wide_spacer());
+        assert!(reflow.grid().cell(2, 1).unwrap().is_wide_spacer());
+        assert_eq!(reflow.grid().cell(3, 1).unwrap().char(), 'c');
+
+        reflow.resize(Dimensions::new(2, 4));
+        assert_eq!(reflow.check_integrity(), Ok(()));
+    }
+
+    #[test]
+    fn osc_66_invalid_width_and_scale_metadata_fall_back_safely() {
+        let mut term = Terminal::new(Dimensions::new(20, 2));
+        process(
+            &mut term,
+            b"\x1b]66;w=0;A\x1b\\\x1b]66;w=99;B\x1b\\\x1b]66;w=abc;C\x1b\\\x1b]66;s=2;D\x1b\\\x1b]66;s=2:w=3;E\x1b\\F",
+        );
+        assert_eq!(term.grid().cell(0, 0).unwrap().char(), 'A');
+        assert_eq!(term.grid().cell(1, 0).unwrap().char(), 'B');
+        assert_eq!(term.grid().cell(2, 0).unwrap().char(), 'C');
+        assert_eq!(term.grid().cell(3, 0).unwrap().char(), 'D');
+        assert_eq!(term.grid().cell(4, 0).unwrap().char(), 'E');
+        assert!(term.grid().cell(4, 0).unwrap().is_wide());
+        assert!(term.grid().cell(5, 0).unwrap().is_wide_spacer());
+        assert!(term.grid().cell(6, 0).unwrap().is_wide_spacer());
+        assert_eq!(term.grid().cell(7, 0).unwrap().char(), 'F');
+        assert_eq!(term.grid().cursor().position.col, 8);
+        assert_eq!(term.check_integrity(), Ok(()));
     }
 
     #[test]

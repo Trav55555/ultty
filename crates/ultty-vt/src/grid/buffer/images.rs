@@ -257,9 +257,19 @@ impl Buffer {
         let Some(last) = end.checked_sub(1) else {
             return;
         };
-        let cells = cells.unwrap_or_else(|| match self.grid.cell(last, row) {
-            Some(cell) if cell.is_wide_spacer() => 2,
-            _ => 1,
+        let cells = cells.unwrap_or_else(|| {
+            let mut count = 1u16;
+            let mut col = last;
+            while self
+                .grid
+                .cell(col, row)
+                .is_some_and(|cell| cell.is_wide_spacer())
+                && col > 0
+            {
+                count += 1;
+                col -= 1;
+            }
+            count
         });
         self.overwrite_images(row..=row, end.saturating_sub(cells)..end);
     }

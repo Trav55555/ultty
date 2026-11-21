@@ -28,3 +28,4 @@ and, for key encoding, `crates/ultty/src/keys.rs`. The README's
 | Terminal name (XTVERSION) | Yes | Detecting the terminal without guessing from TERM |  |
 | Sixel images | Yes | Inline images and plots |  |
 | Kitty graphics protocol (direct transmission) | Yes | Inline images in programs that only speak kitty's protocol: kitten icat, yazi, timg, chafa | RGB, RGBA and PNG, zlib, chunked; place, delete, query, z-index. File, temp-file and shared-memory media are refused; no Unicode placeholders or animation yet |
+| Kitty text sizing (OSC 66) | Yes | Keeping emoji, symbols and box glyphs at a known cell width | Honours `w=1..=7` cell width hints; `s=` scaled text is not supported (rendered at scale 1) |
