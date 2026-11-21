@@ -82,11 +82,9 @@ fn buffer_to_string(buffer: &ratatui::buffer::Buffer) -> String {
         if let Some(finished) = run.take() {
             style_runs.push((y, finished));
         }
-        // Trim trailing spaces but keep the line
         lines.push(line.trim_end().to_string());
     }
 
-    // Remove trailing empty lines
     while lines.last().map(|l| l.is_empty()).unwrap_or(false) {
         lines.pop();
     }
@@ -197,7 +195,6 @@ fn snapshot_stack_overlay() {
 
 #[test]
 fn snapshot_complex_ui() {
-    // Simulate a typical TUI application layout
     let ui = Column::new()
         .child(Text::new("=== Application Title ==="))
         .child(
@@ -320,8 +317,6 @@ fn snapshot_badge_native_content() {
     insta::assert_snapshot!(format!("{content:?}"));
 }
 
-// ── Checkbox ──────────────────────────────────────────────────────────
-
 #[test]
 fn snapshot_checkbox_unchecked() {
     let cb = Checkbox::new("Accept terms");
@@ -335,8 +330,6 @@ fn snapshot_checkbox_checked() {
     let output = render_to_string(&cb, 25, 1);
     insta::assert_snapshot!(output);
 }
-
-// ── Toggle ────────────────────────────────────────────────────────────
 
 #[test]
 fn snapshot_toggle_off() {
@@ -352,8 +345,6 @@ fn snapshot_toggle_on() {
     insta::assert_snapshot!(output);
 }
 
-// ── Select ────────────────────────────────────────────────────────────
-
 #[test]
 fn snapshot_select_collapsed() {
     let select = Select::new(vec![
@@ -364,8 +355,6 @@ fn snapshot_select_collapsed() {
     let output = render_to_string(&select, 30, 1);
     insta::assert_snapshot!(output);
 }
-
-// ── TextInput ─────────────────────────────────────────────────────────
 
 #[test]
 fn snapshot_text_input_empty() {
@@ -381,8 +370,6 @@ fn snapshot_text_input_with_value() {
     insta::assert_snapshot!(output);
 }
 
-// ── Table ─────────────────────────────────────────────────────────────
-
 #[test]
 fn snapshot_table_basic() {
     let table = Table::new()
@@ -397,16 +384,12 @@ fn snapshot_table_basic() {
     insta::assert_snapshot!(output);
 }
 
-// ── Tabs ──────────────────────────────────────────────────────────────
-
 #[test]
 fn snapshot_tabs_widget() {
     let tabs = Tabs::new().labels(vec!["Home", "Settings", "About"]);
     let output = render_to_string(&tabs, 40, 1);
     insta::assert_snapshot!(output);
 }
-
-// ── Tree ──────────────────────────────────────────────────────────────
 
 #[test]
 fn snapshot_tree_expanded() {
@@ -425,8 +408,6 @@ fn snapshot_tree_expanded() {
     insta::assert_snapshot!(output);
 }
 
-// ── ScrollView ────────────────────────────────────────────────────────
-
 #[test]
 fn snapshot_scrollview_basic() {
     let sv = ScrollView::new().child(
@@ -439,8 +420,6 @@ fn snapshot_scrollview_basic() {
     insta::assert_snapshot!(output);
 }
 
-// ── DockLayout ────────────────────────────────────────────────────────
-
 #[test]
 fn snapshot_dock_layout() {
     let dock = DockLayout::new()
@@ -450,8 +429,6 @@ fn snapshot_dock_layout() {
     let output = render_to_string(&dock, 30, 5);
     insta::assert_snapshot!(output);
 }
-
-// ── Modal ─────────────────────────────────────────────────────────────
 
 #[test]
 fn snapshot_modal_visible() {
@@ -463,8 +440,6 @@ fn snapshot_modal_visible() {
     let output = render_to_string(&modal, 60, 12);
     insta::assert_snapshot!(output);
 }
-
-// ── Collapsible ───────────────────────────────────────────────────────
 
 #[test]
 fn snapshot_collapsible_expanded() {
@@ -481,8 +456,6 @@ fn snapshot_collapsible_collapsed() {
     insta::assert_snapshot!(output);
 }
 
-// ── DiffView ──────────────────────────────────────────────────────────
-
 #[test]
 fn snapshot_diff_view() {
     use ulttui::widgets::parse_unified_diff;
@@ -492,8 +465,6 @@ fn snapshot_diff_view() {
     let output = render_to_string(&diff, 50, 6);
     insta::assert_snapshot!(output);
 }
-
-// ── MarkdownView ──────────────────────────────────────────────────────
 
 #[test]
 fn snapshot_markdown_basic() {
@@ -718,16 +689,12 @@ fn list_and_tabs_mark_only_their_selected_item_selected() {
     assert_eq!(selected_positions(&tabs), vec![Some(3)]);
 }
 
-// ── Image ─────────────────────────────────────────────────────────────
-
 #[test]
 fn snapshot_image_placeholder() {
     let img = Image::new(vec![0u8; 400], 10, 10);
     let output = render_to_string(&img, 30, 3);
     insta::assert_snapshot!(output);
 }
-
-// ── Card / Section / Inset ────────────────────────────────────────────
 
 #[test]
 fn snapshot_card() {
@@ -766,8 +733,6 @@ fn snapshot_inset() {
     insta::assert_snapshot!(output);
 }
 
-// ── Spacer ────────────────────────────────────────────────────────────
-
 #[test]
 fn snapshot_column_with_spacer() {
     let col = Column::new()
@@ -777,10 +742,6 @@ fn snapshot_column_with_spacer() {
     let output = render_to_string(&col, 20, 5);
     insta::assert_snapshot!(output);
 }
-
-// ══════════════════════════════════════════════════════════════════════
-// Widget state variant tests
-// ══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn snapshot_progress_bar_zero() {
@@ -806,8 +767,6 @@ fn snapshot_modal_hidden() {
     assert!(output.is_empty(), "hidden modal must draw nothing");
     insta::assert_snapshot!(output);
 }
-
-// ── Layout edge cases ────────────────────────────────────────────────
 
 #[test]
 fn snapshot_narrow_column() {

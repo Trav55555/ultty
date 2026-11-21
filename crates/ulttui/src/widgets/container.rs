@@ -290,7 +290,6 @@ impl View for Column {
             bordered.height.saturating_sub(pad.0 + pad.2),
         );
 
-        // Reserve space for gaps between children
         let total_gap = self.gap * (children.len().saturating_sub(1)) as u16;
         let available = inner.height.saturating_sub(total_gap);
 

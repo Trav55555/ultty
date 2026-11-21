@@ -962,7 +962,6 @@ mod tests {
         let second = drain_messages(&mut reader);
         assert!(second.is_empty(), "an unchanged view sent {second:?}");
 
-        // A real change still goes out as one complete frame.
         backend.render(&buttons(&["a", "c"])).unwrap();
         let third = drain_messages(&mut reader);
         assert!(matches!(third.first(), Some(AppMessage::BeginFrame { .. })));

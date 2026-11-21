@@ -192,8 +192,6 @@ mod tests {
         }
     }
 
-    // --- Event variant construction ---
-
     #[test]
     fn event_quit() {
         let e = Event::Quit;
@@ -301,8 +299,6 @@ mod tests {
         assert!(s.contains("Quit"));
     }
 
-    // --- Key variant construction ---
-
     #[test]
     fn key_char() {
         let k = Key::Char('z');
@@ -363,8 +359,6 @@ mod tests {
         let k2 = k.clone();
         assert_eq!(k, k2);
     }
-
-    // --- KeyEvent ---
 
     #[test]
     fn key_event_construction() {
@@ -445,8 +439,6 @@ mod tests {
         assert!(ke.focused_id.is_none());
     }
 
-    // --- Modifiers ---
-
     #[test]
     fn modifiers_default_all_false() {
         let m = Modifiers::default();
@@ -492,8 +484,8 @@ mod tests {
             alt: false,
             meta: false,
         };
-        let m2 = m; // copy
-        assert!(m.shift); // original still usable
+        let m2 = m;
+        assert!(m.shift);
         assert!(m2.shift);
     }
 
@@ -509,8 +501,6 @@ mod tests {
         assert!(s.contains("shift"));
         assert!(s.contains("ctrl"));
     }
-
-    // --- MouseEvent ---
 
     #[test]
     fn mouse_event_construction() {
@@ -555,8 +545,6 @@ mod tests {
         assert_eq!(me2.y, 7);
     }
 
-    // --- MouseEventKind ---
-
     #[test]
     fn mouse_event_kind_variants() {
         let _down = MouseEventKind::Down(MouseButton::Left);
@@ -567,12 +555,10 @@ mod tests {
         let _scroll_down = MouseEventKind::ScrollDown;
     }
 
-    // --- MouseButton ---
-
     #[test]
     fn mouse_button_is_copy() {
         let btn = MouseButton::Left;
-        let btn2 = btn; // copy
+        let btn2 = btn;
         assert!(matches!(btn, MouseButton::Left));
         assert!(matches!(btn2, MouseButton::Left));
     }

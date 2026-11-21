@@ -322,7 +322,6 @@ mod tests {
                 ..
             }
         ));
-        // The bad frame is consumed; the following frame is intact.
         assert!(matches!(
             backend.try_decode_message().unwrap(),
             Some(TerminalMessage::Ping)

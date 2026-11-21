@@ -114,8 +114,6 @@ fn colour_overrides_leave_a_focused_widget_its_focus_colours() {
     });
     FocusManager::set_current(previous);
 
-    // ANSI: the focused button keeps the theme's focus colours, the other
-    // takes the override.
     let focused = &buffer[(0, 0)];
     assert_eq!(focused.fg, to_ratatui_color(theme.button.focused_fg));
     assert_eq!(focused.bg, to_ratatui_color(theme.button.focused_bg));
@@ -125,7 +123,6 @@ fn colour_overrides_leave_a_focused_widget_its_focus_colours() {
         (ratatui::style::Color::Red, ratatui::style::Color::Blue)
     );
 
-    // Native: the same, in the regions' styles.
     let styles: Vec<_> = native
         .iter()
         .filter_map(|m| match m {
