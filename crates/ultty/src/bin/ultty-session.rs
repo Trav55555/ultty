@@ -6,11 +6,13 @@ use std::io::{self, BufRead, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ultty::attach::auth::{new_owner, Authority};
 use ultty::attach::control::HostControl;
-use ultty::attach::host::{serve, HostState};
+use ultty::attach::host::{serve_until, HostState};
 use ultty::attach::transport::{self, AttachmentClient, Server};
 use ultty::attach::wire::{self, Capability, Command, Reply, Response};
 use ultty::platform::socket::{ensure_private_dir, private_socket_dir};
@@ -65,6 +67,13 @@ fn main() -> anyhow::Result<()> {
             } else {
                 anyhow::bail!("usage: ultty-session host NAME [-e PROGRAM ARGS...]");
             };
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let signal_flag = Arc::clone(&shutdown);
+            if let Err(error) = ultty::platform::shutdown::on_shutdown_signal(move || {
+                signal_flag.store(true, Ordering::Release);
+            }) {
+                tracing::warn!(%error, "could not install shutdown signal handler");
+            }
             let server = Server::bind(&session)?;
             let owner = new_owner()?;
             let authority = Authority::new(&session, owner.clone())?;
@@ -83,7 +92,7 @@ fn main() -> anyhow::Result<()> {
                 args: arguments,
                 cwd: None,
             }) {
-                Reply::Applied { .. } => serve(host, server, authority, control)?,
+                Reply::Applied { .. } => serve_until(host, server, authority, control, &shutdown)?,
                 Reply::Error { message, .. } => anyhow::bail!("could not start session: {message}"),
                 _ => anyhow::bail!("unexpected initial session result"),
             }
