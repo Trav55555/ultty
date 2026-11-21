@@ -143,6 +143,25 @@ pub enum VimMotion {
     SearchPrev,
 }
 
+impl VimMotion {
+    /// Returns true if this motion represents a text object (`iw`, `a"`, `i(`, etc.).
+    pub fn is_text_object(&self) -> bool {
+        matches!(
+            self,
+            VimMotion::InnerWord
+                | VimMotion::AWord
+                | VimMotion::InnerWordBig
+                | VimMotion::AWordBig
+                | VimMotion::InnerSentence
+                | VimMotion::ASentence
+                | VimMotion::InnerParagraph
+                | VimMotion::AParagraph
+                | VimMotion::InnerBlock(_)
+                | VimMotion::ABlock(_)
+        )
+    }
+}
+
 /// Vim operator - action to perform on a motion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VimOperator {

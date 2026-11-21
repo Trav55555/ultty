@@ -28,7 +28,7 @@
  "crates/ulttui/src/overrides/script.rs": 16,
  "crates/ulttui/src/theme.rs": 14,
  "crates/ulttui/src/vim/mod.rs": 15,
- "crates/ulttui/src/vim/parser.rs": 35,
+ "crates/ulttui/src/vim/parser.rs": 34,
  "crates/ulttui/src/vim/types.rs": 9,
  "crates/ulttui/src/wake.rs": 7,
  "crates/ulttui/src/widgets/badge.rs": 1,

@@ -15,6 +15,8 @@ pub struct KeyParser {
     pending_g: bool,
     /// Pending 'z' prefix.
     pending_z: bool,
+    /// Pending text-object scope ('i' for inner, 'a' for around).
+    pending_text_object: Option<TextObjectScope>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -23,6 +25,12 @@ enum FindType {
     FindBack, // F
     Till,     // t
     TillBack, // T
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextObjectScope {
+    Inner,
+    Around,
 }
 
 impl KeyParser {
@@ -41,6 +49,10 @@ impl KeyParser {
     ) -> Option<ParseResult> {
         // Handle pending find character
         if let Some(find_type) = self.pending_find.take() {
+            if matches!(key, Key::Escape) {
+                state.reset_to_normal();
+                return Some(ParseResult::Action(VimAction::ExitToNormal));
+            }
             if let Key::Char(c) = key {
                 let motion = match find_type {
                     FindType::Find => VimMotion::FindChar(*c),
@@ -55,7 +67,13 @@ impl KeyParser {
                 ));
                 return Some(self.complete_motion(state, motion));
             }
+            state.take_operator();
+            state.take_count();
             return None;
+        }
+
+        if let Some(scope) = self.pending_text_object.take() {
+            return self.parse_text_object(state, scope, key, modifiers);
         }
 
         // Handle pending 'g' commands
@@ -253,6 +271,22 @@ impl KeyParser {
                 return Some(ParseResult::Pending);
             }
 
+            // Text object prefixes (valid after an operator or in visual mode)
+            Key::Char('i')
+                if !modifiers.ctrl()
+                    && (state.has_pending_operator() || state.mode.is_visual()) =>
+            {
+                self.pending_text_object = Some(TextObjectScope::Inner);
+                return Some(ParseResult::Pending);
+            }
+            Key::Char('a')
+                if !modifiers.ctrl()
+                    && (state.has_pending_operator() || state.mode.is_visual()) =>
+            {
+                self.pending_text_object = Some(TextObjectScope::Around);
+                return Some(ParseResult::Pending);
+            }
+
             // Insert mode entries
             Key::Char('i') => return Some(ParseResult::Action(VimAction::InsertAtCursor)),
             Key::Char('a') => return Some(ParseResult::Action(VimAction::InsertAfterCursor)),
@@ -290,6 +324,7 @@ impl KeyParser {
             Key::Char(':') => return Some(ParseResult::Action(VimAction::CommandMode)),
 
             Key::Escape => {
+                self.reset_pending();
                 state.reset_to_normal();
                 return Some(ParseResult::Action(VimAction::ExitToNormal));
             }
@@ -297,23 +332,46 @@ impl KeyParser {
             _ => {}
         }
 
-        // Text objects (only valid after operator)
         if state.has_pending_operator() {
-            if let Key::Char(c) = key {
-                match c {
-                    'i' => {
-                        // Text objects are not implemented yet: #176.
-                        return Some(ParseResult::Pending);
-                    }
-                    'a' => {
-                        return Some(ParseResult::Pending);
-                    }
-                    _ => {}
-                }
-            }
+            state.take_operator();
+            state.take_count();
         }
 
         None
+    }
+
+    fn reset_pending(&mut self) {
+        self.pending_find = None;
+        self.pending_g = false;
+        self.pending_z = false;
+        self.pending_text_object = None;
+    }
+
+    fn parse_text_object(
+        &mut self,
+        state: &mut VimState,
+        scope: TextObjectScope,
+        key: &Key,
+        modifiers: Modifiers,
+    ) -> Option<ParseResult> {
+        if matches!(key, Key::Escape) {
+            self.reset_pending();
+            state.reset_to_normal();
+            return Some(ParseResult::Action(VimAction::ExitToNormal));
+        }
+
+        let motion = match key {
+            Key::Char(c) if !modifiers.ctrl() => text_object_motion(scope, *c),
+            _ => None,
+        };
+
+        if let Some(motion) = motion {
+            Some(self.complete_motion(state, motion))
+        } else {
+            state.take_operator();
+            state.take_count();
+            None
+        }
     }
 
     fn parse_g_command(
@@ -467,6 +525,30 @@ impl KeyParser {
     }
 }
 
+fn text_object_motion(scope: TextObjectScope, ch: char) -> Option<VimMotion> {
+    match (scope, ch) {
+        (TextObjectScope::Inner, 'w') => Some(VimMotion::InnerWord),
+        (TextObjectScope::Around, 'w') => Some(VimMotion::AWord),
+        (TextObjectScope::Inner, 'W') => Some(VimMotion::InnerWordBig),
+        (TextObjectScope::Around, 'W') => Some(VimMotion::AWordBig),
+        (TextObjectScope::Inner, 's') => Some(VimMotion::InnerSentence),
+        (TextObjectScope::Around, 's') => Some(VimMotion::ASentence),
+        (TextObjectScope::Inner, 'p') => Some(VimMotion::InnerParagraph),
+        (TextObjectScope::Around, 'p') => Some(VimMotion::AParagraph),
+        (TextObjectScope::Inner, '"' | '\'' | '`') => Some(VimMotion::InnerBlock(ch)),
+        (TextObjectScope::Around, '"' | '\'' | '`') => Some(VimMotion::ABlock(ch)),
+        (TextObjectScope::Inner, '(' | ')' | 'b') => Some(VimMotion::InnerBlock('(')),
+        (TextObjectScope::Around, '(' | ')' | 'b') => Some(VimMotion::ABlock('(')),
+        (TextObjectScope::Inner, '[' | ']') => Some(VimMotion::InnerBlock('[')),
+        (TextObjectScope::Around, '[' | ']') => Some(VimMotion::ABlock('[')),
+        (TextObjectScope::Inner, '{' | '}' | 'B') => Some(VimMotion::InnerBlock('{')),
+        (TextObjectScope::Around, '{' | '}' | 'B') => Some(VimMotion::ABlock('{')),
+        (TextObjectScope::Inner, '<' | '>') => Some(VimMotion::InnerBlock('<')),
+        (TextObjectScope::Around, '<' | '>') => Some(VimMotion::ABlock('<')),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,6 +636,178 @@ mod tests {
         assert!(matches!(
             result,
             Some(ParseResult::Action(VimAction::InsertAtCursor))
+        ));
+    }
+
+    #[test]
+    fn test_text_object_all_inner_and_around_objects() {
+        let cases = [
+            ("diw", VimOperator::Delete, VimMotion::InnerWord),
+            ("daw", VimOperator::Delete, VimMotion::AWord),
+            ("diW", VimOperator::Delete, VimMotion::InnerWordBig),
+            ("daW", VimOperator::Delete, VimMotion::AWordBig),
+            ("dis", VimOperator::Delete, VimMotion::InnerSentence),
+            ("das", VimOperator::Delete, VimMotion::ASentence),
+            ("dip", VimOperator::Delete, VimMotion::InnerParagraph),
+            ("dap", VimOperator::Delete, VimMotion::AParagraph),
+            ("ci\"", VimOperator::Change, VimMotion::InnerBlock('"')),
+            ("ca\"", VimOperator::Change, VimMotion::ABlock('"')),
+            ("yi'", VimOperator::Yank, VimMotion::InnerBlock('\'')),
+            ("ya'", VimOperator::Yank, VimMotion::ABlock('\'')),
+            ("di`", VimOperator::Delete, VimMotion::InnerBlock('`')),
+            ("da`", VimOperator::Delete, VimMotion::ABlock('`')),
+            ("di(", VimOperator::Delete, VimMotion::InnerBlock('(')),
+            ("di)", VimOperator::Delete, VimMotion::InnerBlock('(')),
+            ("dib", VimOperator::Delete, VimMotion::InnerBlock('(')),
+            ("da(", VimOperator::Delete, VimMotion::ABlock('(')),
+            ("da)", VimOperator::Delete, VimMotion::ABlock('(')),
+            ("dab", VimOperator::Delete, VimMotion::ABlock('(')),
+            ("yi[", VimOperator::Yank, VimMotion::InnerBlock('[')),
+            ("yi]", VimOperator::Yank, VimMotion::InnerBlock('[')),
+            ("ya[", VimOperator::Yank, VimMotion::ABlock('[')),
+            ("ya]", VimOperator::Yank, VimMotion::ABlock('[')),
+            ("ca{", VimOperator::Change, VimMotion::ABlock('{')),
+            ("ca}", VimOperator::Change, VimMotion::ABlock('{')),
+            ("caB", VimOperator::Change, VimMotion::ABlock('{')),
+            ("ci{", VimOperator::Change, VimMotion::InnerBlock('{')),
+            ("ci}", VimOperator::Change, VimMotion::InnerBlock('{')),
+            ("ciB", VimOperator::Change, VimMotion::InnerBlock('{')),
+            ("di<", VimOperator::Delete, VimMotion::InnerBlock('<')),
+            ("da>", VimOperator::Delete, VimMotion::ABlock('<')),
+            ("gUiw", VimOperator::Uppercase, VimMotion::InnerWord),
+            ("guiw", VimOperator::Lowercase, VimMotion::InnerWord),
+            ("g~aw", VimOperator::SwapCase, VimMotion::AWord),
+        ];
+
+        for (seq, expected_op, expected_motion) in cases {
+            let mut parser = KeyParser::new();
+            let mut state = VimState::new();
+            let chars: Vec<char> = seq.chars().collect();
+            for &ch in &chars[..chars.len() - 1] {
+                let res = parser.parse_key(&mut state, &Key::Char(ch), Modifiers::NONE);
+                assert!(
+                    matches!(res, Some(ParseResult::Pending)),
+                    "prefix of {seq:?} at {ch:?} should be pending, got {res:?}"
+                );
+            }
+            let final_res = parser.parse_key(
+                &mut state,
+                &Key::Char(*chars.last().unwrap()),
+                Modifiers::NONE,
+            );
+            assert!(
+                matches!(
+                    final_res,
+                    Some(ParseResult::Command(VimCommand {
+                        count: None,
+                        operator,
+                        motion,
+                    })) if operator == expected_op && motion == expected_motion
+                ),
+                "sequence {seq:?} got {final_res:?}"
+            );
+            assert!(!state.has_pending_operator());
+            assert_eq!(state.pending_count, None);
+        }
+    }
+
+    #[test]
+    fn test_text_object_with_counts() {
+        for seq in ["2diw", "d2iw"] {
+            let result = parse_keys(seq);
+            assert!(
+                matches!(
+                    result,
+                    Some(ParseResult::Command(VimCommand {
+                        count: Some(2),
+                        operator: VimOperator::Delete,
+                        motion: VimMotion::InnerWord,
+                    }))
+                ),
+                "sequence {seq:?} got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_text_object_invalid_char_resets_pending_state() {
+        let mut parser = KeyParser::new();
+        let mut state = VimState::new();
+
+        assert!(matches!(
+            parser.parse_key(&mut state, &Key::Char('2'), Modifiers::NONE),
+            Some(ParseResult::Pending)
+        ));
+        assert!(matches!(
+            parser.parse_key(&mut state, &Key::Char('d'), Modifiers::NONE),
+            Some(ParseResult::Pending)
+        ));
+        assert!(matches!(
+            parser.parse_key(&mut state, &Key::Char('i'), Modifiers::NONE),
+            Some(ParseResult::Pending)
+        ));
+        assert!(parser
+            .parse_key(&mut state, &Key::Char('z'), Modifiers::NONE)
+            .is_none());
+        assert!(!state.has_pending_operator());
+        assert_eq!(state.pending_count, None);
+
+        let next = parser.parse_key(&mut state, &Key::Char('w'), Modifiers::NONE);
+        assert!(matches!(
+            next,
+            Some(ParseResult::Command(VimCommand {
+                count: None,
+                operator: VimOperator::None,
+                motion: VimMotion::Word,
+            }))
+        ));
+    }
+
+    #[test]
+    fn test_text_object_escape_aborts_cleanly() {
+        let mut parser = KeyParser::new();
+        let mut state = VimState::new();
+
+        assert!(matches!(
+            parser.parse_key(&mut state, &Key::Char('c'), Modifiers::NONE),
+            Some(ParseResult::Pending)
+        ));
+        assert!(matches!(
+            parser.parse_key(&mut state, &Key::Char('a'), Modifiers::NONE),
+            Some(ParseResult::Pending)
+        ));
+        assert!(matches!(
+            parser.parse_key(&mut state, &Key::Escape, Modifiers::NONE),
+            Some(ParseResult::Action(VimAction::ExitToNormal))
+        ));
+        assert!(!state.has_pending_operator());
+        assert_eq!(state.mode, VimMode::Normal);
+
+        let next = parser.parse_key(&mut state, &Key::Char('i'), Modifiers::NONE);
+        assert!(matches!(
+            next,
+            Some(ParseResult::Action(VimAction::InsertAtCursor))
+        ));
+    }
+
+    #[test]
+    fn test_visual_mode_text_objects() {
+        let mut parser = KeyParser::new();
+        let mut state = VimState::new();
+        state.mode = VimMode::Visual;
+
+        assert!(matches!(
+            parser.parse_key(&mut state, &Key::Char('i'), Modifiers::NONE),
+            Some(ParseResult::Pending)
+        ));
+        let res = parser.parse_key(&mut state, &Key::Char('w'), Modifiers::NONE);
+        assert!(matches!(
+            res,
+            Some(ParseResult::Command(VimCommand {
+                count: None,
+                operator: VimOperator::None,
+                motion: VimMotion::InnerWord,
+            }))
         ));
     }
 }
