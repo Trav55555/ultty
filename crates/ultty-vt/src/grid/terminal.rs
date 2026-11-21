@@ -1199,7 +1199,7 @@ impl Terminal {
 
     /// Push the current Kitty keyboard flags and switch to `flags`
     /// (`CSI > flags u`). The stack keeps the newest
-    /// [`KITTY_KEYBOARD_STACK_LIMIT`] entries.
+    /// `KITTY_KEYBOARD_STACK_LIMIT` entries.
     pub fn push_kitty_keyboard_mode(&mut self, flags: u8) {
         if self.kitty_keyboard_stack.len() == KITTY_KEYBOARD_STACK_LIMIT {
             self.kitty_keyboard_stack.remove(0);

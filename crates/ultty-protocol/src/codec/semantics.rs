@@ -1,10 +1,10 @@
 //! Wire encoding of `Semantics` (the `SetSemantics` payload after the id).
 //!
-//! Field order, as in spec §10.5: role u8, label Option<string>,
-//! description Option<string>, live u8, flags u8, toggled u8, expanded u8,
-//! value Option<(f32 now, f32 min, f32 max)>, value_text Option<string>,
-//! position Option<(u32 index, u32 size)>, level u8, labelled_by
-//! Option<u32>, described_by Option<u32>, controls Option<u32>.
+//! Field order, as in spec §10.5: role u8, label `Option<string>`,
+//! description `Option<string>`, live u8, flags u8, toggled u8, expanded u8,
+//! value `Option<(f32 now, f32 min, f32 max)>`, value_text `Option<string>`,
+//! position `Option<(u32 index, u32 size)>`, level u8, labelled_by
+//! `Option<u32>`, described_by `Option<u32>`, controls `Option<u32>`.
 
 use bytes::{Buf, BufMut, BytesMut};
 
