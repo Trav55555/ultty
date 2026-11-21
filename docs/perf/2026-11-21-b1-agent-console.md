@@ -193,8 +193,50 @@ tests the comparison helpers without a display.
 
 ## Filed
 
-- #196: output snaps a scrolled-back view to the bottom (scroll held, both modes).
-- #197: native resize corrupts frozen inline cards and the blank lines around them.
+- #196: output snaps a scrolled-back view to the bottom (scroll held, both modes) — fixed below.
+- #197: native resize corrupts frozen inline cards and the blank lines around them — fixed below.
 - #198: the left-edge resize band swallows clicks in column 0.
 - #199: cells are much smaller than other terminals' at the same font size.
-- #200: ANSI-mode resize leaves the screen one row off.
+- #200: ANSI-mode resize leaves the screen one row off — fixed below.
+
+## After fixes (#196, #197, #200) and 10-hour soak
+
+Three changes addressed the scroll and resize failures:
+
+1. **VT viewport and cursor anchoring (`crates/ultty-vt/src/grid/buffer.rs`):**
+   `write_char`, `write_ascii_span` and `write_text_with_width` no longer reset
+   `scroll_offset = 0`; appending lines to history advances `scroll_offset` so a
+   scrolled-back view stays on the same history line; `App::send_input` returns
+   a scrolled-back view to the bottom on user input; and reflow keeps the
+   cursor's blank line anchored (fixing both #196 and #200).
+2. **Reflowable frozen console blocks (`examples/agent-console/src/native.rs`,
+   `crates/ulttui/src/inline.rs`):** live tool/approval blocks render inside the
+   live inline card and print their full unwrapped text to scrollback on
+   completion so terminal reflow at any width matches a fresh render (fixing
+   #197).
+
+### Rerun of numbers 1 to 3 (`scripts/bench/b1-agent-console.sh --targets ultty-native,ultty-ansi --numbers scroll,copy,resize`)
+
+Measured on Xvfb (lavapipe, 120 columns, Ultty `5902e94`):
+
+| Number | Native (Ultty) | ANSI (Ultty) | Target |
+|---|---:|---:|---:|
+| 1. Scroll held, `short.jsonl` | **0 rows moved** | **0 rows moved** | 0 |
+| 1. Scroll held, long tool output | **0 rows moved** | **0 rows moved** | 0 |
+| 2. Copy errors (11/11 blocks) | **0** (0 chars, 0 trailing, 0 indent, 0 breaks) | **0** | 0 |
+| 3. Resize: transcript lines differing | **0 of 80** | **0 of 80** | 0 |
+| 3. Resize: screen rows differing (bottom / top) | **0 / 0 of 30** | **0 / 0 of 30** | 0 |
+
+### Number 4: 10-hour live soak (seeded replay, Xvfb + lavapipe)
+
+Measured on the same scroll/resize fixes (`28e1590`, `replay-12h.jsonl`, 600
+one-minute samples per mode, 30-minute warm-up):
+
+| Measure | Native (Ultty) | ANSI (Ultty) | Target |
+|---|---:|---:|---:|
+| Anonymous RSS + swap (after warm-up → end, peak) | 33.9 → 36.7 MiB (peak 38.0) | 33.3 → 36.5 MiB (peak 38.2) | — |
+| **Anonymous RSS + swap trend** | **+0.18 MiB/hour** | **+0.18 MiB/hour** | < 1 MiB/hour |
+| Live Rust heap (after warm-up → end, peak) | 7.1 → 9.0 MiB (peak 10.3) | 6.9 → 8.9 MiB (peak 10.2) | — |
+| **Live Rust heap trend** | **+0.13 MiB/hour** | **+0.11 MiB/hour** | < 1 MiB/hour |
+
+All four B1 acceptance criteria are met in both native and ANSI mode.

@@ -126,15 +126,13 @@ Three things differ from the table in section 1:
   In both modes, finished prose lines go into the normal transcript as styled
   Markdown source, unwrapped, so the terminal wraps and reflows them and a
   copy returns the source. Only the line being typed is live.
-- **The status line is the bottom row of a 2-row live card.** It is not a
-  region pinned below the transcript, because a region under `ROOT` makes the
-  session full-scene and hides the grid; pinning would need a protocol change.
-  The live card holds the typing line and the status. It is closed and its
-  rows are erased before anything is printed, then reopened under the new
-  text.
-- **Tool cards are a fixed 8 rows.** Short output leaves blank rows in the
-  frozen card. Long lines are clipped in the native card and printed whole in
-  ANSI mode.
+- **The status line is the bottom row of the live card.** The card follows
+  the transcript and can include open blocks above the typing and status
+  lines. Before printing finished text, the console closes the card and
+  erases its rows.
+- **Each running tool has up to eight rows in the live preview.** Both modes
+  print completed blocks into scrollback with their full text, in completion
+  order. The terminal can reflow their text at any width.
 
 Inside an Ultty tab, `ULTTY_IN_BAND=0` alone does not force ANSI mode,
 because the tab's socket is tried first. The ANSI measurements also unset

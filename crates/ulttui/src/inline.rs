@@ -392,6 +392,15 @@ impl Console {
         }
     }
 
+    /// Largest card that leaves room for the cursor on the row after it.
+    pub fn tail_card_rows(&self) -> u16 {
+        let height = match &self.link {
+            Link::Native(native) => native.session().client.viewport_height(),
+            Link::Fallback(fallback) => fallback.size().1,
+        };
+        height.saturating_sub(1).min(MAX_SURFACE_ROWS)
+    }
+
     /// Print `text` as it is; each `\n` ends a line.
     pub fn print(&mut self, text: &str) -> crate::Result<()> {
         if text.is_empty() {
@@ -400,7 +409,7 @@ impl Console {
         self.check_session();
         let lines = text.replace("\r\n", "\n").replace('\n', self.newline());
         self.write(lines.as_bytes())?;
-        self.last = if text.ends_with('\n') {
+        self.last = if text.ends_with(['\n', '\r']) {
             Last::LineStart
         } else {
             Last::MidLine

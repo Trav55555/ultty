@@ -888,9 +888,21 @@ impl App {
             .map(|t| t.event_loop.terminal_mut())
     }
 
-    /// Send input to the focused terminal.
+    /// Send input to the focused terminal, returning a scrolled-back viewport
+    /// to the live bottom so typed input is immediately visible.
     fn send_input(&mut self, data: &[u8]) -> std::io::Result<()> {
         if let Some(terminal) = self.runtime.manager.focused_terminal_mut() {
+            let mut scrolled_back = false;
+            {
+                let mut term = terminal.event_loop.terminal_mut();
+                if !term.is_alternate_screen() && term.buffer().is_scrolled() {
+                    term.buffer_mut().scroll_to_bottom();
+                    scrolled_back = true;
+                }
+            }
+            if scrolled_back {
+                self.needs_redraw = true;
+            }
             self.input_sent_at = Some(Instant::now());
             self.output_since_input = false;
             terminal.event_loop.send_input(data)

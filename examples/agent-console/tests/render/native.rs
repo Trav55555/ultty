@@ -43,6 +43,10 @@ impl Cards for Recorder {
         80
     }
 
+    fn live_row_limit(&self) -> u16 {
+        23
+    }
+
     fn print(&mut self, text: &str) -> Result<()> {
         self.calls.push(Call::Print(text.to_string()));
         Ok(())
@@ -133,111 +137,65 @@ fn opened(calls: &[Call], kind: CardKind) -> Vec<(u32, u16, Vec<String>)> {
         .collect()
 }
 
-/// The last view card `card` showed before it closed.
-fn final_view(calls: &[Call], card: u32) -> Vec<String> {
-    let close = calls.iter().position(|c| *c == Call::Close(card)).unwrap();
-    calls[..close]
-        .iter()
-        .rev()
-        .find_map(|c| match c {
-            Call::Update { card: id, text } | Call::Open { card: id, text, .. } if *id == card => {
-                Some(text.clone())
-            }
-            _ => None,
-        })
-        .unwrap()
-}
-
 #[test]
-fn test_blocks_are_cards_of_fixed_height_frozen_with_their_final_view() {
+fn test_native_blocks_preview_live_and_print_their_final_source() {
     let calls = record().calls;
     let blocks = opened(&calls, CardKind::Block);
-    let shape: Vec<(u16, &str)> = blocks
+
+    assert!(blocks
         .iter()
-        .map(|(_, rows, text)| (*rows, text[0].as_str()))
+        .any(|(_, _, text)| text[0] == "[bash] cargo test -p pager parse:: (running, 0.0s)"));
+    assert!(blocks
+        .iter()
+        .any(|(_, _, text)| text[0] == "[approve] cargo test -p pager"));
+    assert!(calls.iter().any(|call| matches!(
+        call,
+        Call::Update { text, .. } if text.iter().any(|line| line.contains("running 4 tests"))
+    )));
+
+    let printed: String = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::Print(text) => Some(plain(text)),
+            _ => None,
+        })
         .collect();
-    assert_eq!(
-        shape,
-        [
-            (8, "[bash] cargo test -p pager parse:: (running, 0.0s)"),
-            (21, "[diff] src/parse.rs"),
-            (4, "[approve] cargo test -p pager"),
-            (8, "[bash] cargo test -p pager (running, 0.0s)"),
-        ]
-    );
-    let (tool, _, _) = &blocks[0];
-    let updates = calls
-        .iter()
-        .filter(|c| matches!(c, Call::Update { card, .. } if card == tool))
-        .count();
-    assert!(updates >= 4, "the tool card was updated {updates} times");
-    let last = final_view(&calls, *tool);
-    assert_eq!(last.len(), 8);
-    assert_eq!(
-        last[0],
-        "[bash] cargo test -p pager parse:: (failed, exit 101, 10 lines, 3.9s)"
-    );
-    assert_eq!(
-        last[7],
-        "test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
-    );
-    assert_eq!(
-        final_view(&calls, blocks[2].0),
-        [
-            "[approve] cargo test -p pager (Allow once)",
-            "> 1. Allow once",
-            "  2. Always allow `cargo test`",
-            "  3. Deny"
-        ]
-    );
-    for (card, _, _) in &blocks {
-        let closes = calls.iter().filter(|c| **c == Call::Close(*card)).count();
-        assert_eq!(closes, 1, "card {card} closed {closes} times");
-        let close = calls.iter().position(|c| *c == Call::Close(*card)).unwrap();
-        assert!(
-            !calls[close..]
-                .iter()
-                .any(|c| matches!(c, Call::Update { card: id, .. } if id == card)),
-            "card {card} updated after it closed"
-        );
+    for line in [
+        "[bash] cargo test -p pager parse:: (failed, exit 101, 10 lines, 3.9s)",
+        "test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "+    let mut column = 0;",
+        "[approve] cargo test -p pager (Allow once)",
+        "  3. Deny",
+    ] {
+        assert_eq!(printed.lines().filter(|printed| *printed == line).count(), 1, "{line}");
     }
 }
 
 #[test]
-fn test_the_live_card_sits_at_the_bottom_and_is_erased_before_anything_follows() {
+fn test_a_preview_is_erased_before_anything_is_printed_under_it() {
     let calls = record().calls;
-    let live = opened(&calls, CardKind::Live);
-    assert!(!live.is_empty(), "no live card");
-    for (card, rows, text) in &live {
-        assert_eq!(*rows, 2);
-        assert_eq!(text.len(), 2);
-        let close = calls
-            .iter()
-            .position(|c| *c == Call::Close(*card))
-            .expect("every live card is closed");
-        let Some(Call::Print(next)) = calls.get(close + 1) else {
-            panic!("live card {card} closed without its rows being erased");
-        };
-        assert!(
-            next.starts_with("\x1b[2A\r\x1b[2K\x1b[J"),
-            "after live card {card}: {next:?}"
-        );
-        let open = calls
-            .iter()
-            .position(|c| matches!(c, Call::Open { card: id, .. } if id == card))
-            .unwrap();
-        assert!(
-            !calls[open + 1..close]
+    for kind in [CardKind::Block, CardKind::Live] {
+        for (card, rows, _) in opened(&calls, kind) {
+            let close = calls
                 .iter()
-                .any(|c| matches!(c, Call::Print(_) | Call::Open { .. })),
-            "something was printed or opened under live card {card}"
-        );
+                .position(|call| *call == Call::Close(card))
+                .expect("every preview is closed");
+            let Some(Call::Print(next)) = calls.get(close + 1) else {
+                panic!("preview {card} closed without its rows being erased");
+            };
+            assert_eq!(next, &format!("\x1b[{rows}A\r\x1b[2K\x1b[J\r"));
+            let open = calls
+                .iter()
+                .position(|call| matches!(call, Call::Open { card: id, .. } if *id == card))
+                .unwrap();
+            assert!(!calls[open + 1..close]
+                .iter()
+                .any(|call| matches!(call, Call::Print(_) | Call::Open { .. })));
+        }
     }
-    assert!(
-        live.iter()
-            .any(|(_, _, text)| text[1] == "example-model-1 | in 921 | out 254 | editing | 4.4s"),
-        "the status never showed in the live card"
-    );
+    assert!(opened(&calls, CardKind::Live)
+        .iter()
+        .any(|(_, _, text)| text[1] == "example-model-1 | in 921 | out 254 | editing | 4.4s"));
 }
 
 #[test]
