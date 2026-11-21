@@ -58,9 +58,19 @@ jobs:
     runs-on: ultty
     steps:
       - uses: actions/checkout@v4
-      - run: scripts/ci-runner-step.sh cargo clippy --workspace --all-targets -- -D warnings
-      # The headless build ultty-session uses (docs/SESSION_ATTACHMENT.md).
-      - run: scripts/ci-runner-step.sh cargo check -p ultty --no-default-features
+      - run: scripts/ci-runner-step.sh cargo clippy --locked --workspace --all-targets -- -D warnings
+      # Feature combinations workspace unification hides: headless ultty-session
+      # (docs/SESSION_ATTACHMENT.md), heap-stats soak instrumentation, and ulttui
+      # without lua-overrides.
+      - run: scripts/ci-runner-step.sh cargo check --locked -p ultty --no-default-features
+      - run: scripts/ci-runner-step.sh cargo check --locked -p ultty --features heap-stats
+      - run: scripts/ci-runner-step.sh cargo check --locked -p ulttui --no-default-features
+        env:
+          CI_SCCACHE_STATS: "1"
+      - name: Library docs
+        run: scripts/ci-runner-step.sh cargo doc --locked --no-deps -p ultty-vt -p ultty-protocol -p ultty-client -p ulttui
+        env:
+          RUSTDOCFLAGS: -Dwarnings
 
   test:
     name: Test
@@ -74,24 +84,28 @@ jobs:
         run: python3 -S -m unittest discover -s scripts/deploy -p 'test_*.py'
       - name: Theme importer
         run: python3 -S -m unittest discover -s scripts/themes -p 'test_*.py'
+      - name: Benchmark helpers
+        run: |
+          python3 -I scripts/bench/test_k2p_wayland.py
+          python3 -I scripts/bench/analyze.py --self-test
       - name: Installer against current and older releases
         run: scripts/install-sh-test.sh
       - name: Runner step wrapper
         run: scripts/ci-runner-step-test.sh
-      - run: scripts/ci-runner-step.sh cargo test --workspace
+      - run: scripts/ci-runner-step.sh cargo test --locked --workspace
       - name: Protocol roundtrip property tests
-        run: scripts/ci-runner-step.sh cargo test -p ultty-protocol --test roundtrip -- --ignored
+        run: scripts/ci-runner-step.sh cargo test --locked -p ultty-protocol --test roundtrip -- --ignored
         env:
           RUST_MIN_STACK: 8388608
-      - name: Snapshot tests
-        run: scripts/ci-runner-step.sh cargo test -p ulttui --test snapshots
       # Heap bytes from a counting allocator: deterministic, so it gates
       # without flaking. Fails when a case exceeds its budget (+5%).
       - name: Memory budgets
-        run: scripts/ci-runner-step.sh cargo test -p ultty --bench memory
+        run: scripts/ci-runner-step.sh cargo test --locked -p ultty --bench memory
       # The compatibility scorecard page must match its scorecard_ tests.
       - name: Compatibility scorecard
         run: scripts/ci-runner-step.sh scripts/compat-scorecard.sh --check
+        env:
+          CI_SCCACHE_STATS: "1"
 
   msrv:
     name: MSRV
@@ -103,18 +117,20 @@ jobs:
       - run: rustup toolchain install "$RUST_MSRV" --profile minimal
       # RUSTUP_TOOLCHAIN overrides the pinned rust-toolchain.toml so this job
       # really builds with the MSRV.
-      - run: scripts/ci-runner-step.sh cargo check --workspace --all-targets
+      - run: scripts/ci-runner-step.sh cargo check --locked --workspace --all-targets
         env:
           RUSTUP_TOOLCHAIN: ${{ env.RUST_MSRV }}
+          CI_SCCACHE_STATS: "1"
 
   vt-integrity:
     name: VT integrity (deep property run)
     runs-on: ultty
     steps:
       - uses: actions/checkout@v4
-      - run: scripts/ci-runner-step.sh cargo test -p ultty-vt --test integrity
+      - run: scripts/ci-runner-step.sh cargo test --locked -p ultty-vt --test integrity
         env:
           PROPTEST_CASES: "20000"
+          CI_SCCACHE_STATS: "1"
 
   fuzz:
     name: Fuzz (smoke)
@@ -125,23 +141,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # fuzz/ inherits the repository's pinned stable rust-toolchain.toml, so
-      # each run names the nightly; cargo-fuzz needs -Z sanitizer flags.
-      - name: VT parser and grid
-        working-directory: fuzz
-        run: ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run vt_terminal -- -max_total_time=120 -max_len=4096
-      - name: Protocol decoders
-        working-directory: fuzz
-        run: |
-          ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run decode_app -- -max_total_time=30
-          ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run decode_terminal -- -max_total_time=30
-      - name: In-band stream splitter
-        working-directory: fuzz
-        run: ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run in_band_split -- -max_total_time=60 -max_len=4096
-      - name: Kitty graphics commands and image decoders
-        working-directory: fuzz
-        run: |
-          ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run kitty_graphics -- -max_total_time=60 -max_len=8192
-          ../scripts/ci-runner-step.sh cargo "+$RUST_NIGHTLY" fuzz run image_decode -- -max_total_time=60 -max_len=65536 -rss_limit_mb=4096
+      # the script names the nightly; cargo-fuzz needs -Z sanitizer flags.
+      - name: Fuzz targets (parallel waves)
+        run: scripts/ci-runner-step.sh scripts/ci-fuzz-smoke.sh "$RUST_NIGHTLY"
+        env:
+          CI_SCCACHE_STATS: "1"
 
   # Instruction counts (callgrind) of the VT core, this commit against its
   # merge-base, built and measured in this job so toolchain and libc cancel
@@ -159,6 +163,7 @@ jobs:
       - run: scripts/ci-runner-step.sh scripts/ci-icount.sh "$ICOUNT_BASE"
         env:
           ICOUNT_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          CI_SCCACHE_STATS: "1"
 
   gui-smoke:
     name: GUI smoke (Xvfb, software Vulkan)
@@ -169,9 +174,10 @@ jobs:
       # lavapipe (mesa-vulkan-drivers) renders without a GPU; Xvfb is the
       # display. Ultty runs for real and the live smokes drive it. The runner
       # image carries the X11 client libraries winit loads at runtime.
-      - run: scripts/ci-runner-step.sh cargo build -p ultty -p hello-native -p counter-app --bins
+      - run: scripts/ci-runner-step.sh cargo build --locked -p ultty -p hello-native -p counter-app -p agent-transcript --bins
       - run: scripts/ci-runner-step.sh cargo build --locked -p ultty-client --example inline-surface
-      - run: scripts/ci-runner-step.sh cargo build --locked -p agent-transcript
+        env:
+          CI_SCCACHE_STATS: "1"
       # Jobs install nothing on this runner, so the tmux half of
       # agent-transcript.sh runs only if the image (gitea-server repository)
       # has tmux; otherwise it is skipped, loudly, and GitHub runs it.

@@ -18,6 +18,7 @@
 #   --baseline PATH     read (or, with --update, write) this baseline file
 #   --corpus LIST       default: every corpus
 #   --size-mib N        default 1
+#   --jobs N            parallel callgrind workers (default: nproc)
 #   --skip-memory       do not run the heap-bytes gate
 #   --out DIR           default target/bench-results/icount
 #
@@ -30,7 +31,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BASELINE="$ROOT/bench/baselines/icount.json"
 die() { echo "icount-gate: $*" >&2; exit 1; }
 
-UPDATE=0 THRESHOLD=3 BIN="" CORPUS=all SIZE=1 MEMORY=1 OUT="$ROOT/target/bench-results/icount"
+DEFAULT_JOBS=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+UPDATE=0 THRESHOLD=3 BIN="" CORPUS=all SIZE=1 JOBS="$DEFAULT_JOBS" MEMORY=1 OUT="$ROOT/target/bench-results/icount"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --update) UPDATE=1; shift ;;
@@ -39,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --baseline) BASELINE="${2:?}"; shift 2 ;;
     --corpus) CORPUS="${2:?}"; shift 2 ;;
     --size-mib) SIZE="${2:?}"; shift 2 ;;
+    --jobs) JOBS="${2:?}"; shift 2 ;;
     --skip-memory) MEMORY=0; shift ;;
     --out) OUT="${2:?}"; shift 2 ;;
     *) die "unknown option $1" ;;
@@ -78,6 +81,33 @@ measure() {
   awk '/^(summary|totals):/ {print $2; exit}' "$file"
 }
 
+[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "--jobs must be a positive integer (got $JOBS)"
+
+run_measure() {
+  local suite="$1" corpus="$2" ir
+  ir=$(measure "$suite" "$corpus")
+  [[ "$ir" =~ ^[0-9]+$ && "$ir" -gt 0 ]] || die "no instruction count for $suite/$corpus: is the binary built with symbols for run_${suite}_pass?"
+  printf '%s\n' "$ir" >"$OUT/ir.$suite.$corpus"
+  echo "$suite/$corpus $ir" >&2
+}
+
+IFS=',' read -r -a corpora <<<"$CORPUS"
+pids=()
+for corpus in "${corpora[@]}"; do
+  for suite in parse vt; do
+    while (( $(jobs -rp | wc -l) >= JOBS )); do
+      sleep 0.1
+    done
+    run_measure "$suite" "$corpus" &
+    pids+=("$!")
+  done
+done
+failed=0
+for pid in "${pids[@]}"; do
+  wait "$pid" || failed=1
+done
+[[ "$failed" == 0 ]] || die "one or more callgrind runs failed"
+
 CURRENT="$OUT/current.json"
 {
   echo "{"
@@ -87,15 +117,12 @@ CURRENT="$OUT/current.json"
   echo "  \"geometry\": \"120x40\","
   echo "  \"instructions\": {"
   first=1
-  IFS=',' read -r -a corpora <<<"$CORPUS"
   for corpus in "${corpora[@]}"; do
     for suite in parse vt; do
-      ir=$(measure "$suite" "$corpus")
-      [[ "$ir" =~ ^[0-9]+$ && "$ir" -gt 0 ]] || die "no instruction count for $suite/$corpus: is the binary built with symbols for run_${suite}_pass?"
+      ir=$(<"$OUT/ir.$suite.$corpus")
       [[ $first == 1 ]] || echo ","
       first=0
       printf '    "%s/%s": %s' "$suite" "$corpus" "$ir"
-      echo "$suite/$corpus $ir" >&2
     done
   done
   echo
@@ -110,13 +137,13 @@ if [[ "$UPDATE" == 1 ]]; then
 else
   [[ -f "$BASELINE" ]] || die "no baseline at $BASELINE; run with --update first"
   python3 -I - "$BASELINE" "$CURRENT" "$THRESHOLD" <<'PY'
-import json, sys
+import json, os, sys
 base, cur, threshold = json.load(open(sys.argv[1])), json.load(open(sys.argv[2])), float(sys.argv[3])
 for key in ("rustc", "valgrind", "size_mib", "geometry"):
     if base[key] != cur[key]:
         sys.exit(f"icount-gate: baseline {key} is {base[key]!r}, this run has {cur[key]!r}; "
                  "regenerate the baseline with --update on the new toolchain (in its own commit)")
-worst, failed = 0.0, []
+worst, failed, rows = 0.0, [], []
 print(f"{'case':<28} {'baseline':>14} {'current':>14} {'change':>8}")
 for case, b in sorted(base["instructions"].items()):
     c = cur["instructions"].get(case)
@@ -127,8 +154,19 @@ for case, b in sorted(base["instructions"].items()):
     worst = max(worst, change)
     flag = "  REGRESSED" if change > threshold else ""
     print(f"{case:<28} {b:>14} {c:>14} {change:>+7.2f}%{flag}")
+    rows.append((case, b, c, change, bool(flag)))
     if change > threshold:
         failed.append(f"{case}: {change:+.2f}% instructions (threshold +{threshold}%)")
+summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+if summary_path:
+    status = "FAILED" if failed else "passed"
+    with open(summary_path, "a", encoding="utf-8") as sf:
+        sf.write(f"### VT icount ({status}, worst {worst:+.2f}%, threshold +{threshold}%)\n\n")
+        sf.write("| Case | Baseline | Current | Change |\n|---|---:|---:|---:|\n")
+        for case, b, c, change, regressed in rows:
+            mark = " **REGRESSED**" if regressed else ""
+            sf.write(f"| `{case}` | {b:,} | {c:,} | {change:+.2f}%{mark} |\n")
+        sf.write("\n")
 if failed:
     print("\nicount-gate FAILED:\n  " + "\n  ".join(failed))
     sys.exit(1)

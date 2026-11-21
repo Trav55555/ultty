@@ -30,18 +30,35 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Test before publishing
+  fmt:
+    name: Format before publishing
     runs-on: ultty
     steps:
       - uses: actions/checkout@v4
       - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy before publishing
+    runs-on: ultty
+    steps:
+      - uses: actions/checkout@v4
       - run: scripts/ci-runner-step.sh cargo clippy --locked --workspace --all-targets -- -D warnings
+        env:
+          CI_SCCACHE_STATS: "1"
+
+  test:
+    name: Test before publishing
+    runs-on: ultty
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
       - run: scripts/ci-runner-step.sh cargo test --locked --workspace
+        env:
+          CI_SCCACHE_STATS: "1"
 
   release:
     name: Build and publish Linux x86_64
-    needs: test
+    needs: [fmt, clippy, test]
     runs-on: ultty
     timeout-minutes: 60
     permissions:
@@ -51,6 +68,8 @@ jobs:
 
       - name: Build
         run: scripts/ci-runner-step.sh cargo build --locked --release -p ultty --target "$TARGET"
+        env:
+          CI_SCCACHE_STATS: "1"
 
       - name: Package
         run: |

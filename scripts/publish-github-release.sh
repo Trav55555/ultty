@@ -29,11 +29,11 @@ done
 : "${GH_TOKEN:?GH_TOKEN is required (the GH_RELEASE_TOKEN secret)}"
 
 mirrored=""
-for _ in $(seq 1 20); do
+for _ in $(seq 1 120); do
   mirrored="$(gh api "repos/$REPO/commits/$TAG" --jq .sha 2>/dev/null || true)"
   [ -n "$mirrored" ] && break
   echo "waiting for $TAG to reach $REPO"
-  sleep 30
+  sleep 5
 done
 [ -n "$mirrored" ] || die "$TAG never reached $REPO; check the push mirror"
 [ "$mirrored" = "$COMMIT" ] || die "$TAG on $REPO is $mirrored, but $COMMIT was built"

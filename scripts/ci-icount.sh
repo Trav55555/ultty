@@ -22,12 +22,26 @@ given="${1:?usage: ci-icount.sh <base-commit>}"
 base=$(git merge-base HEAD "$given") || die "no merge-base of HEAD and $given (shallow checkout?)"
 echo "ci-icount: comparing HEAD $(git rev-parse --short HEAD) with base $(git rev-parse --short "$base")" >&2
 
+if [[ "${CI_ICOUNT_FORCE:-0}" != 1 ]] &&
+  git diff --quiet "$base" HEAD -- crates/ultty-vt tools/ultty-bench Cargo.toml Cargo.lock rust-toolchain.toml; then
+  msg="ci-icount: no changes in crates/ultty-vt, tools/ultty-bench, Cargo.toml, Cargo.lock, or rust-toolchain.toml; skipping"
+  echo "$msg" >&2
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    printf '### VT icount\n\nSkipped: no changes in VT core, benchmark harness, or workspace toolchain/lockfile.\n' >>"$GITHUB_STEP_SUMMARY"
+  fi
+  exit 0
+fi
+
 if ! command -v valgrind >/dev/null; then
   apt=(apt-get)
   [[ "$(id -u)" == 0 ]] || apt=(sudo apt-get)
   "${apt[@]}" update -qq
   "${apt[@]}" install -y -qq --no-install-recommends valgrind
 fi
+
+# Thin LTO builds much faster than fat LTO while keeping identical codegen
+# flags across base and HEAD so instruction-count deltas stay apples-to-apples.
+export CARGO_PROFILE_RELEASE_LTO=thin
 
 work=$(mktemp -d)
 trap 'git worktree remove --force "$work/base" 2>/dev/null || true; rm -rf "$work"' EXIT

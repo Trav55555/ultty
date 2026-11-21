@@ -26,6 +26,7 @@ case "$1" in
       echo "sccache: error: Timed out waiting for server startup. Maybe the remote service is unreachable?" >&2
       exit 2
     fi
+    echo "Compile requests 1 (cache hits 1)"
     exit 0 ;;
 esac
 # Invoked as the rustc wrapper: fails while the server is down, and its first
@@ -118,6 +119,10 @@ expect "server dies mid-step" "exit status 0" test "$status" -eq 0
 run_step "mid-step failure, then real failure" 0 3 1
 expect "mid-step failure, then real failure" "exit status 3" test "$status" -eq 3
 expect "mid-step failure, then real failure" "rerun once only" test "$runs" -eq 2
+
+CI_SCCACHE_STATS=1 run_step "stats printed when enabled" 0 0
+expect "stats printed when enabled" "prints sccache stats" contains "Compile requests 1 (cache hits 1)"
+expect "stats printed when enabled" "exit status 0" test "$status" -eq 0
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures check(s) failed" >&2

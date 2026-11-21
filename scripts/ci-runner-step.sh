@@ -54,8 +54,10 @@ start_sccache() {
 
 if [ "${RUSTC_WRAPPER:-}" = sccache ]; then
   eval "$(aws configure export-credentials --format env)"
-  account="$(aws sts get-caller-identity --query Account --output text)"
-  export SCCACHE_BUCKET="gitea-ci-cache-$account-${SCCACHE_REGION:?}"
+  if [ -z "${SCCACHE_BUCKET:-}" ]; then
+    account="$(aws sts get-caller-identity --query Account --output text)"
+    export SCCACHE_BUCKET="gitea-ci-cache-$account-${SCCACHE_REGION:?}"
+  fi
   if ! start_sccache; then
     echo "::warning::sccache server did not start; compiling without the cache"
     unset RUSTC_WRAPPER
@@ -81,5 +83,7 @@ if [ "$exec_status" -ne 0 ] &&
   unset RUSTC_WRAPPER
   exec_status=0
   "$@" || exec_status=$?
+elif [ "${CI_SCCACHE_STATS:-0}" = 1 ]; then
+  sccache --show-stats || true
 fi
 exit "$exec_status"
