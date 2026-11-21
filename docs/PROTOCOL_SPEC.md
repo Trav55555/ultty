@@ -183,6 +183,9 @@ App                                          Terminal
 
 ## 3. Message Format
 
+The [v1 conformance vectors](../crates/ultty-protocol/tests/conformance/) give
+complete example frames for testing independent codecs.
+
 Integers are little-endian. Floats are IEEE-754 little-endian `f32`; NaN and infinity are rejected on decode. Strings are `u32` byte length plus UTF-8 bytes. `Option<T>` is a `u8` tag (`0`/`1`) plus `T` when present. Booleans are `u8`; enums are a `u8` discriminant plus variant data.
 
 | Decode limit | Value |
