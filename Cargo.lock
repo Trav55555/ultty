@@ -137,11 +137,16 @@ name = "agent-console"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "crossterm",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",
+ "ulttui",
+ "ultty-client",
+ "ultty-vt",
+ "unicode-width",
 ]
 
 [[package]]

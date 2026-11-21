@@ -117,6 +117,29 @@ Each slice is one PR with its own tests. Slices 1 to 3 need no new protocol
 and no control-plane change. If one of the measurements needs a new
 `ulttyctl` query, that becomes a gated change and stops for sign-off.
 
+## Slice 2 as built (2026-11-21)
+
+Three things differ from the table in section 1:
+
+- **Prose is printed, not streamed into a region.** Inline cards have a fixed
+  height (ADR 0020), so there is no native region that can grow with a turn.
+  In both modes, finished prose lines go into the normal transcript as styled
+  Markdown source, unwrapped, so the terminal wraps and reflows them and a
+  copy returns the source. Only the line being typed is live.
+- **The status line is the bottom row of a 2-row live card.** It is not a
+  region pinned below the transcript, because a region under `ROOT` makes the
+  session full-scene and hides the grid; pinning would need a protocol change.
+  The live card holds the typing line and the status. It is closed and its
+  rows are erased before anything is printed, then reopened under the new
+  text.
+- **Tool cards are a fixed 8 rows.** Short output leaves blank rows in the
+  frozen card. Long lines are clipped in the native card and printed whole in
+  ANSI mode.
+
+Inside an Ultty tab, `ULTTY_IN_BAND=0` alone does not force ANSI mode,
+because the tab's socket is tried first. The ANSI measurements also unset
+`ULTTY_SOCKET`, as `scripts/e2e/agent-console.sh` does.
+
 ## Consequences
 
 - Ultty gets a flagship that anyone can run and measure.

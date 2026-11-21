@@ -106,4 +106,6 @@ columns, CJK, emoji and indented code.
 
 Replay one with `cargo run -p agent-console -- replay fixtures/short.jsonl`
 (`--fast` to skip the waits, `--speed 10` for ten times real time, `-` for
-stdin).
+stdin, `--auto-approve <choice>` to answer approvals without a key). It
+renders the console: inline cards inside Ultty, ANSI text anywhere else.
+`events` instead of `replay` prints one summary line per event.
