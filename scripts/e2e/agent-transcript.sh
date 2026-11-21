@@ -31,8 +31,11 @@ if [ -z "${ULTTY:-}" ] || [ -z "${ULTTYCTL:-}" ]; then
     ULTTY=${ULTTY:-target/debug/ultty}
     ULTTYCTL=${ULTTYCTL:-target/debug/ulttyctl}
 fi
-cargo build -q --locked -p agent-transcript
-example="$PWD/target/debug/agent-transcript"
+if [ -z "${AGENT_TRANSCRIPT:-}" ]; then
+    cargo build -q --locked -p agent-transcript
+    AGENT_TRANSCRIPT="$PWD/target/debug/agent-transcript"
+fi
+example=$(realpath "$AGENT_TRANSCRIPT")
 ULTTY=$(realpath "$ULTTY")
 ULTTYCTL=$(realpath "$ULTTYCTL")
 tmux_bin=$(command -v tmux || true)

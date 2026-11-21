@@ -173,7 +173,7 @@ jobs:
           libwayland-dev libxkbcommon-dev libxkbcommon-x11-0 libvulkan1
           libx11-xcb1 libxcursor1 libxrandr2 libxi6
           xvfb xdotool tmux mesa-vulkan-drivers fonts-dejavu-core
-      - run: cargo build --locked -p ultty -p hello-native -p counter-app -p agent-transcript --bins
+      - run: cargo build --locked -p ultty -p hello-native -p counter-app -p agent-transcript -p agent-console -p ulttui-lua --bins
       - run: cargo build --locked -p ultty-client --example inline-surface
       - run: scripts/ci-gui-smoke.sh "$RUNNER_TEMP/gui-smoke"
       - name: Upload smoke artifacts
