@@ -234,3 +234,21 @@ fn scorecard_kitty_graphics() {
     assert_eq!((placed.width, placed.height), (1, 1));
     assert!(placed.kitty.is_some());
 }
+
+#[test]
+fn scorecard_kitty_text_sizing() {
+    let mut term = run(b"\x1b]66;w=2;A\x1b\\x\x1b]66;w=3;B\x1b\\y");
+    assert_eq!(term.grid().cell(0, 0).unwrap().char(), 'A');
+    assert!(term.grid().cell(0, 0).unwrap().is_wide());
+    assert!(term.grid().cell(1, 0).unwrap().is_wide_spacer());
+    assert_eq!(term.grid().cell(2, 0).unwrap().char(), 'x');
+    assert_eq!(term.grid().cell(3, 0).unwrap().char(), 'B');
+    assert!(term.grid().cell(3, 0).unwrap().is_wide());
+    assert!(term.grid().cell(4, 0).unwrap().is_wide_spacer());
+    assert!(term.grid().cell(5, 0).unwrap().is_wide_spacer());
+    assert_eq!(term.grid().cell(6, 0).unwrap().char(), 'y');
+    assert_eq!(term.grid().cursor().position.col, 7);
+    feed(&mut term, b"\x1b]66;s=2;Z\x1b\\");
+    assert_eq!(term.grid().cell(7, 0).unwrap().char(), 'Z');
+    assert_eq!(term.check_integrity(), Ok(()));
+}

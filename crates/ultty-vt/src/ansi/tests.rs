@@ -305,27 +305,89 @@ fn kitty_keyboard_protocol() {
 fn osc_66_character_width() {
     // OSC 66 - Kitty character width protocol
     // Format: OSC 66 ; w=N ; CHAR ST
-    // Should print the character(s) after the width specification
+    // Should parse width and scale metadata alongside the text payload
 
     assert_eq!(
         parse(b"\x1b]66;w=1;\xE2\x96\x80\x1b\\"),
-        vec![Action::Print('\u{2580}')]
+        vec![Action::SizedText {
+            width: Some(1),
+            scale: 1,
+            text: "\u{2580}".to_string(),
+        }]
     );
 
     assert_eq!(
         parse(b"\x1b]66;w=1;\xE2\x96\x88\x07"),
-        vec![Action::Print('\u{2588}')]
+        vec![Action::SizedText {
+            width: Some(1),
+            scale: 1,
+            text: "\u{2588}".to_string(),
+        }]
     );
 
     assert_eq!(
         parse(b"\x1b]66;w=1;\xE2\x96\x80\xE2\x96\x84\x1b\\"),
-        vec![Action::Print('\u{2580}'), Action::Print('\u{2584}')]
+        vec![Action::SizedText {
+            width: Some(1),
+            scale: 1,
+            text: "\u{2580}\u{2584}".to_string(),
+        }]
     );
 
     assert_eq!(
         parse(b"\x1b]66;s=2;\xE2\x96\x84\x1b\\"),
-        vec![Action::Print('\u{2584}')]
+        vec![Action::SizedText {
+            width: None,
+            scale: 2,
+            text: "\u{2584}".to_string(),
+        }]
     );
+
+    assert_eq!(
+        parse(b"\x1b]66;s=3:w=2;X\x1b\\"),
+        vec![Action::SizedText {
+            width: Some(2),
+            scale: 3,
+            text: "X".to_string(),
+        }]
+    );
+
+    assert_eq!(
+        parse(b"\x1b]66;w=7;W\x1b\\"),
+        vec![Action::SizedText {
+            width: Some(7),
+            scale: 1,
+            text: "W".to_string(),
+        }]
+    );
+
+    assert_eq!(
+        parse(b"\x1b]66;w=0;A\x1b\\"),
+        vec![Action::SizedText {
+            width: None,
+            scale: 1,
+            text: "A".to_string(),
+        }]
+    );
+
+    for seq in [
+        &b"\x1b]66;w=8;A\x1b\\"[..],
+        &b"\x1b]66;w=99;A\x1b\\"[..],
+        &b"\x1b]66;w=abc;A\x1b\\"[..],
+        &b"\x1b]66;w=-1;A\x1b\\"[..],
+    ] {
+        assert_eq!(
+            parse(seq),
+            vec![Action::SizedText {
+                width: None,
+                scale: 1,
+                text: "A".to_string(),
+            }]
+        );
+    }
+
+    assert_eq!(parse(b"\x1b]66;w=2;\x1b\\"), vec![]);
+    assert_eq!(parse(b"\x1b]66;w=2\x1b\\"), vec![]);
 }
 
 #[test]

@@ -248,15 +248,8 @@ impl AnsiParser {
                 // colours cannot be changed, so they are always at their
                 // defaults and there is nothing to do.
                 "110" | "111" | "112" => {}
-                // OSC 66 width and scale hints are not honoured yet: #177.
                 "66" => {
-                    // data format: w=N;CHAR or s=N;CHAR
-                    if let Some(semi_pos) = data.find(';') {
-                        let chars = &data[semi_pos + 1..];
-                        for c in chars.chars() {
-                            callback(Action::Print(c));
-                        }
-                    }
+                    self.dispatch_text_sizing(data, callback);
                 }
                 _ => {
                     tracing::debug!("Unknown OSC sequence: {}", content);
@@ -272,6 +265,45 @@ impl AnsiParser {
                 _ => {}
             }
         }
+    }
+
+    /// Parse Kitty text sizing protocol sequences (OSC 66;metadata;text).
+    fn dispatch_text_sizing<F>(&self, data: &str, callback: &mut F)
+    where
+        F: FnMut(Action),
+    {
+        let Some((meta, text)) = data.split_once(';') else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let mut width: Option<u8> = None;
+        let mut scale: u8 = 1;
+        for part in meta.split(':').filter(|s| !s.is_empty()) {
+            let Some((key, val)) = part.split_once('=') else {
+                continue;
+            };
+            match key {
+                "w" => {
+                    width = match val.parse::<u8>() {
+                        Ok(n @ 1..=7) => Some(n),
+                        _ => None,
+                    };
+                }
+                "s" => {
+                    if let Ok(n @ 1..=7) = val.parse::<u8>() {
+                        scale = n;
+                    }
+                }
+                _ => {}
+            }
+        }
+        callback(Action::SizedText {
+            width,
+            scale,
+            text: text.to_string(),
+        });
     }
 
     /// Parse shell integration OSC 133 sequences.

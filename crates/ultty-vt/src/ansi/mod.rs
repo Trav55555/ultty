@@ -197,6 +197,17 @@ pub enum Action {
     /// Set working directory (OSC 7)
     SetWorkingDirectory(String),
 
+    /// Sized text (OSC 66 — Kitty text sizing protocol).
+    ///
+    /// `width` is the explicit `w=` cell-width hint (`1..=7`), or `None` when
+    /// omitted or `0` (natural width). `scale` is the `s=` scale factor
+    /// (`1..=7`, default `1`).
+    SizedText {
+        width: Option<u8>,
+        scale: u8,
+        text: String,
+    },
+
     /// Shell integration: prompt start (OSC 133;A)
     PromptStart,
 
