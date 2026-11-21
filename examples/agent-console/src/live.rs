@@ -1,5 +1,6 @@
 //! Translates versioned CLI streams into the console's event schema.
 
+mod claude;
 mod codex;
 
 use std::io::{BufRead, Lines};
@@ -10,27 +11,58 @@ use anyhow::{bail, Context};
 
 use agent_console::event::{Event, EventKind};
 
-use self::codex::Codex;
+use self::{claude::Claude, codex::Codex};
 
 const CODEX_VERSION: &str = "0.171.0";
 
 pub(super) struct Args {
-    adapter: Codex,
+    adapter: Adapter,
     prompt: Option<String>,
+}
+
+enum Adapter {
+    Codex(Codex),
+    Claude(Claude),
+}
+
+impl Adapter {
+    fn translate(&mut self, line: &str, t: u64) -> anyhow::Result<Vec<EventKind>> {
+        match self {
+            Self::Codex(adapter) => adapter.translate(line, t),
+            Self::Claude(adapter) => adapter.translate(line, t),
+        }
+    }
+
+    fn finish(self) -> anyhow::Result<()> {
+        match self {
+            Self::Codex(adapter) => adapter.finish(),
+            Self::Claude(adapter) => adapter.finish(),
+        }
+    }
 }
 
 pub(super) fn parse_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<Args> {
     let provider = args.next().context(super::USAGE)?;
-    if provider != "codex" {
-        bail!("unknown live adapter {provider:?}");
-    }
     if args.next().as_deref() != Some("--cli-version") {
         bail!(super::USAGE);
     }
     let version = args.next().context(super::USAGE)?;
-    if version != CODEX_VERSION && version != format!("codex-cli {CODEX_VERSION}") {
-        bail!("Codex CLI {version:?} is unsupported; expected {CODEX_VERSION}");
-    }
+    let adapter = match provider.as_str() {
+        "codex" => {
+            if version != CODEX_VERSION && version != format!("codex-cli {CODEX_VERSION}") {
+                bail!("Codex CLI {version:?} is unsupported; expected {CODEX_VERSION}");
+            }
+            Adapter::Codex(Codex::default())
+        }
+        "claude" => {
+            let expected = claude::VERSION;
+            if version != expected && version != format!("{expected} (Claude Code)") {
+                bail!("Claude Code CLI {version:?} is unsupported; expected {expected}");
+            }
+            Adapter::Claude(Claude::default())
+        }
+        _ => bail!("unknown live adapter {provider:?}"),
+    };
     let prompt = match args.next().as_deref() {
         Some("--prompt") => Some(args.next().context(super::USAGE)?),
         None => None,
@@ -39,16 +71,13 @@ pub(super) fn parse_args(mut args: impl Iterator<Item = String>) -> anyhow::Resu
     if args.next().is_some() {
         bail!(super::USAGE);
     }
-    Ok(Args {
-        adapter: Codex::default(),
-        prompt,
-    })
+    Ok(Args { adapter, prompt })
 }
 
 pub(super) struct Reader<R> {
     lines: std::iter::Enumerate<Lines<R>>,
     pending: vec::IntoIter<EventKind>,
-    adapter: Codex,
+    adapter: Adapter,
     start: Instant,
     t: u64,
 }

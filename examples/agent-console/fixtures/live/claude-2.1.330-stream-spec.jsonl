@@ -1,0 +1,20 @@
+{"type":"system","subtype":"init","model":"claude-opus-5-5","claude_code_version":"2.1.330"}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_first"}},"parent_tool_use_id":null}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I’ll inspect"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the probe."}}}
+{"type":"assistant","message":{"id":"msg_first","content":[{"type":"text","text":"I’ll inspect the probe."}]}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0}}
+{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool_probe","name":"Read","input":{}}}}
+{"type":"assistant","message":{"id":"msg_first","content":[{"type":"tool_use","id":"tool_probe","name":"Read","input":{"file_path":"probe.txt"}}]}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":1}}
+{"type":"stream_event","event":{"type":"message_stop"}}
+{"type":"assistant","parent_tool_use_id":"tool_probe","message":{"id":"msg_child","content":[{"type":"text","text":"Child output is omitted."}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_probe","content":[{"type":"text","text":"ULTTY_CLAUDE_TOOL_OK"}],"is_error":false}]}}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_second"}}}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ULTY_CLAUDE"}}}
+{"type":"assistant","message":{"id":"msg_second","content":[{"type":"text","text":"ULTY_CLAUDE_ADAPTER_OK"}]}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0}}
+{"type":"stream_event","event":{"type":"message_stop"}}
+{"type":"result","subtype":"success","is_error":false,"result":"ULTY_CLAUDE_ADAPTER_OK","usage":{"input_tokens":27,"output_tokens":18}}
