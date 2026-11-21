@@ -190,3 +190,11 @@ To reproduce, run `scripts/bench/b1-agent-console.sh`. It writes
 screenshots, each launch's wrapper and logs). It took 23 minutes here, 12.5
 of them for memory. `/usr/bin/python3 -I scripts/bench/test_b1_agent_console.py`
 tests the comparison helpers without a display.
+
+## Filed
+
+- #196: output snaps a scrolled-back view to the bottom (scroll held, both modes).
+- #197: native resize corrupts frozen inline cards and the blank lines around them.
+- #198: the left-edge resize band swallows clicks in column 0.
+- #199: cells are much smaller than other terminals' at the same font size.
+- #200: ANSI-mode resize leaves the screen one row off.
