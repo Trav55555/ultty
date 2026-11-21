@@ -1,5 +1,6 @@
 //! `agent-console replay <file>|- [--fast | --speed <f>] [--auto-approve <choice>]`
 //! `agent-console events <file>|- [--fast | --speed <f>]`
+//! `agent-console live codex --cli-version <version> [--prompt <text>]`
 //!
 //! `replay` renders an agent event stream as the console: natively with
 //! inline cards inside Ultty, as ANSI text anywhere else (and with
@@ -9,6 +10,9 @@
 //! else with its first choice.
 //!
 //! `events` prints one summary line per event instead, and a total.
+//! `live` renders events from a supported agent CLI as they arrive on stdin.
+
+mod live;
 
 use std::cell::Cell;
 use std::fs::File;
@@ -27,7 +31,7 @@ use agent_console::reader::EventReader;
 use agent_console::replay::{Pace, Replay};
 use agent_console::screen::Screen;
 
-const USAGE: &str = "usage: agent-console replay <file>|- [--fast | --speed <f>] [--auto-approve <choice>]\n       agent-console events <file>|- [--fast | --speed <f>]";
+const USAGE: &str = "usage: agent-console replay <file>|- [--fast | --speed <f>] [--auto-approve <choice>]\n       agent-console events <file>|- [--fast | --speed <f>]\n       agent-console live codex --cli-version <version> [--prompt <text>]";
 
 /// How long an approval answered by `--auto-approve` stays on screen at
 /// recorded pace (divided by the speed; none with `--fast`).
@@ -53,7 +57,15 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter("agent_console=info")
         .with_writer(io::stderr)
         .init();
-    let args = parse_args(std::env::args().skip(1))?;
+    let mut args = std::env::args().skip(1).peekable();
+    if args.peek().is_some_and(|arg| arg == "live") {
+        args.next();
+        let args = live::parse_args(args)?;
+        let mut reader = live::Reader::new(io::stdin().lock(), args);
+        render(&mut reader, None)?;
+        return reader.finish();
+    }
+    let args = parse_args(args)?;
     let input: Box<dyn BufRead> = if args.source == "-" {
         Box::new(io::stdin().lock())
     } else {
@@ -65,7 +77,7 @@ fn main() -> anyhow::Result<()> {
     let mut reader = EventReader::new(input);
     match args.command {
         Command::Events => events(&mut reader, args.pace)?,
-        Command::Replay => replay(&mut reader, &args)?,
+        Command::Replay => render(reader.by_ref().map(|event| Ok(event?)), Some(&args))?,
     }
     if let Some(first) = reader.malformed().first() {
         anyhow::bail!(
@@ -93,27 +105,32 @@ fn events(reader: &mut EventReader<Box<dyn BufRead>>, pace: Pace) -> anyhow::Res
     Ok(())
 }
 
-fn replay(reader: &mut EventReader<Box<dyn BufRead>>, args: &Args) -> anyhow::Result<()> {
+fn render(
+    events: impl Iterator<Item = anyhow::Result<Event>>,
+    replay_args: Option<&Args>,
+) -> anyhow::Result<()> {
     let console = Console::connect();
     eprintln!("agent-console: {:?} mode", console.mode());
     let native = console.mode() == Mode::Native;
     let in_band = native && ultty_client::detect::socket_path().is_none();
-    let can_ask = args.source != "-" && io::stdin().is_terminal();
-    let approver = match &args.auto_approve {
+    let pace = replay_args.map_or(Pace::Fast, |args| args.pace);
+    let follow = replay_args.is_none();
+    let can_ask = replay_args.is_some_and(|args| args.source != "-") && io::stdin().is_terminal();
+    let approver = match replay_args.and_then(|args| args.auto_approve.as_ref()) {
         Some(choice) => Approver::Auto {
             choice: choice.clone(),
-            delay: match args.pace {
+            delay: match pace {
                 Pace::Fast => Duration::ZERO,
                 Pace::Recorded { speed } => AUTO_APPROVE_DELAY.div_f64(speed),
             },
         },
-        None if in_band => Approver::Ask(Box::new(InBandKeys::default())),
+        None if !follow && in_band => Approver::Ask(Box::new(InBandKeys::default())),
         None if can_ask => Approver::Ask(Box::new(TerminalKeys::default())),
         None => Approver::First,
     };
     if native {
         let app = App::new(NativeScreen::new(console), approver, std::thread::sleep);
-        return play(app, reader, args.pace);
+        return play(app, events, pace, follow);
     }
     drop(console);
     let stdout = io::stdout();
@@ -124,8 +141,9 @@ fn replay(reader: &mut EventReader<Box<dyn BufRead>>, args: &Args) -> anyhow::Re
     };
     play(
         App::new(screen, approver, std::thread::sleep),
-        reader,
-        args.pace,
+        events,
+        pace,
+        follow,
     )
 }
 
@@ -133,16 +151,26 @@ fn replay(reader: &mut EventReader<Box<dyn BufRead>>, args: &Args) -> anyhow::Re
 /// whenever the replay waits.
 fn play<S: Screen>(
     mut app: App<S>,
-    reader: &mut EventReader<Box<dyn BufRead>>,
+    events: impl Iterator<Item = anyhow::Result<Event>>,
     pace: Pace,
+    follow: bool,
 ) -> anyhow::Result<()> {
     let wait = Cell::new(None);
-    for event in Replay::new(reader.by_ref(), pace, |gap| wait.set(Some(gap))) {
-        let event = event?;
+    for event in Replay::new(events, pace, |gap| wait.set(Some(gap))) {
+        let event = match event {
+            Ok(event) => event,
+            Err(error) => {
+                app.finish()?;
+                return Err(error);
+            }
+        };
         if let Some(gap) = wait.take() {
             app.idle(gap)?;
         }
         app.handle(&event)?;
+        if follow {
+            app.refresh()?;
+        }
     }
     app.finish()?;
     Ok(())
