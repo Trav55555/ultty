@@ -92,6 +92,7 @@ impl App {
             tracing::debug!(target: "ultty::startup", "drawing the first CPU frame");
         }
         let top = self.renderer.tab_bar_height();
+        let tab_bar = self.tab_bar.visible.then_some(&self.tab_bar);
         if let Err(error) = cpu.surface.resize(width, height) {
             tracing::warn!("CPU frame: resize failed: {error}");
             return true;
@@ -109,6 +110,7 @@ impl App {
                 width.get(),
                 top,
                 &terminal.event_loop.terminal(),
+                tab_bar,
             ),
             None => false,
         };

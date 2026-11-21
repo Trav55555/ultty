@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use super::{Renderer, Rgba, Vertex};
+use super::{ColorScheme, Renderer, Rgba, Vertex};
 use crate::tabs::{
     MenuItem, TabBarState, TabState, TitleButton, STATUS_MARKER_SIZE, TAB_CLOSE_BUTTON_SIZE,
     TAB_PADDING,
@@ -13,8 +13,8 @@ use crate::tabs::{
 use ultty_protocol::control::{PaneState, PaneStatus};
 
 // Drawing sizes in logical pixels; scaled by `TabBarState::scaled`.
-const CHROME_BUTTON_RADIUS: f32 = 6.0;
-const CHROME_BUTTON_BORDER: f32 = 1.0;
+pub(super) const CHROME_BUTTON_RADIUS: f32 = 6.0;
+pub(super) const CHROME_BUTTON_BORDER: f32 = 1.0;
 
 /// Columns the `->>> ultty_` title takes: `-`, three `>`, a space, `ultty`,
 /// and the cursor.
@@ -22,7 +22,7 @@ const TITLE_LOGO_COLUMNS: f32 = 11.0;
 
 /// Left edge of the title logo: right of the menu button, as far from it as
 /// buttons are from each other.
-fn title_logo_x(tab_bar: &TabBarState) -> f32 {
+pub(super) fn title_logo_x(tab_bar: &TabBarState) -> f32 {
     tab_bar.chrome_edge_inset()
         + tab_bar.window_button_width()
         + (tab_bar.window_button_width() - tab_bar.chrome_button_size()) / 2.0
@@ -73,19 +73,19 @@ fn status_label(status: &PaneStatus) -> String {
 
 /// Where the title band's location and the focused pane's status go.
 #[derive(Debug, PartialEq)]
-struct TitleBand {
-    path: String,
-    suffix: String,
-    path_x: f32,
+pub(super) struct TitleBand {
+    pub(super) path: String,
+    pub(super) suffix: String,
+    pub(super) path_x: f32,
     /// The x of the status marker's cell, and the label after it (empty
     /// when there is no room for it).
-    status: Option<(f32, String)>,
+    pub(super) status: Option<(f32, String)>,
 }
 
 /// Lay out the title band: the location centered between the logo and the
 /// buttons, followed by the status. The status gives up its label, then its
 /// marker, before the path drops below [`MIN_PATH_COLUMNS_WITH_STATUS`].
-fn title_band_layout(tab_bar: &TabBarState, cw: f32) -> TitleBand {
+pub(super) fn title_band_layout(tab_bar: &TabBarState, cw: f32) -> TitleBand {
     let x0 = title_logo_x(tab_bar);
     let region_start = x0 + (TITLE_LOGO_COLUMNS + 2.0) * cw;
     let region_end = tab_bar.title_buttons_start() - 2.0 * cw;
@@ -133,7 +133,7 @@ fn title_band_layout(tab_bar: &TabBarState, cw: f32) -> TitleBand {
     }
 }
 
-fn lighten(color: Rgba, amount: f32) -> Rgba {
+pub(super) fn lighten(color: Rgba, amount: f32) -> Rgba {
     Rgba::new(
         (color.r + amount).min(1.0),
         (color.g + amount).min(1.0),
@@ -142,7 +142,7 @@ fn lighten(color: Rgba, amount: f32) -> Rgba {
     )
 }
 
-fn dim(color: Rgba, amount: f32) -> Rgba {
+pub(super) fn dim(color: Rgba, amount: f32) -> Rgba {
     Rgba::new(
         (color.r * amount).min(1.0),
         (color.g * amount).min(1.0),
@@ -161,7 +161,7 @@ pub(super) fn mix(a: Rgba, b: Rgba, amount: f32) -> Rgba {
     )
 }
 
-fn chrome_symbol_color(foreground: Rgba, accent: Rgba, is_hovered: bool) -> Rgba {
+pub(super) fn chrome_symbol_color(foreground: Rgba, accent: Rgba, is_hovered: bool) -> Rgba {
     if is_hovered {
         mix(foreground, accent, 0.22)
     } else {
@@ -169,7 +169,7 @@ fn chrome_symbol_color(foreground: Rgba, accent: Rgba, is_hovered: bool) -> Rgba
     }
 }
 
-fn close_symbol_color(foreground: Rgba, is_hovered: bool) -> Rgba {
+pub(super) fn close_symbol_color(foreground: Rgba, is_hovered: bool) -> Rgba {
     if is_hovered {
         Rgba::new(1.0, 0.88, 0.86, 1.0)
     } else {
@@ -178,7 +178,7 @@ fn close_symbol_color(foreground: Rgba, is_hovered: bool) -> Rgba {
 }
 
 /// The visible square of the title-band button whose slot starts at `slot_x`.
-fn chrome_button_rect(tab_bar: &TabBarState, slot_x: f32) -> (f32, f32, f32, f32) {
+pub(super) fn chrome_button_rect(tab_bar: &TabBarState, slot_x: f32) -> (f32, f32, f32, f32) {
     let slot_width = tab_bar.window_button_width();
     let band = tab_bar.title_bar_height();
     let size = tab_bar
@@ -193,7 +193,7 @@ fn chrome_button_rect(tab_bar: &TabBarState, slot_x: f32) -> (f32, f32, f32, f32
     )
 }
 
-fn chrome_button_inner_rect(
+pub(super) fn chrome_button_inner_rect(
     (x, y, width, height): (f32, f32, f32, f32),
     border: f32,
 ) -> (f32, f32, f32, f32) {
@@ -238,7 +238,7 @@ fn center_vertices_in_rect(vertices: &mut [Vertex], x: f32, y: f32, width: f32, 
     }
 }
 
-fn truncate_tab_title(title: &str, max_width: f32, cell_width: f32) -> Cow<'_, str> {
+pub(super) fn truncate_tab_title(title: &str, max_width: f32, cell_width: f32) -> Cow<'_, str> {
     if title.is_empty() || max_width <= 0.0 || cell_width <= 0.0 {
         return Cow::Borrowed("");
     }
@@ -263,7 +263,7 @@ fn truncate_tab_title(title: &str, max_width: f32, cell_width: f32) -> Cow<'_, s
     Cow::Owned(truncated)
 }
 
-fn centered_tab_title_x(tab: &TabState, title: &str, cell_width: f32) -> f32 {
+pub(super) fn centered_tab_title_x(tab: &TabState, title: &str, cell_width: f32) -> f32 {
     let label_x = tab.label_x();
     let label_width = tab.max_text_width().max(0.0);
     if title.is_empty() || label_width <= 0.0 || cell_width <= 0.0 {
@@ -274,20 +274,24 @@ fn centered_tab_title_x(tab: &TabState, title: &str, cell_width: f32) -> f32 {
     label_x + ((label_width - title_width).max(0.0) / 2.0)
 }
 
+/// The color of a status marker, one palette color per state: blue for
+/// work, yellow when the user is wanted, green when done, red on error,
+/// and a dim foreground when idle. (The cursor accent is not used: many
+/// themes make it green, which would read as done.)
+pub(super) fn status_color(colors: &ColorScheme, status: &PaneStatus) -> Rgba {
+    let named = &colors.named;
+    match (status.state, status.attention) {
+        (PaneState::Error, _) => named[1],
+        (PaneState::Waiting, _) | (_, true) => named[3],
+        (PaneState::Working, _) => named[4],
+        (PaneState::Done, _) => named[2],
+        (PaneState::Idle, _) => dim(colors.foreground, 0.45),
+    }
+}
+
 impl Renderer {
-    /// The color of a status marker, one palette color per state: blue for
-    /// work, yellow when the user is wanted, green when done, red on error,
-    /// and a dim foreground when idle. (The cursor accent is not used: many
-    /// themes make it green, which would read as done.)
     fn status_color(&self, status: &PaneStatus) -> Rgba {
-        let named = &self.color_scheme.named;
-        match (status.state, status.attention) {
-            (PaneState::Error, _) => named[1],
-            (PaneState::Waiting, _) | (_, true) => named[3],
-            (PaneState::Working, _) => named[4],
-            (PaneState::Done, _) => named[2],
-            (PaneState::Idle, _) => dim(self.color_scheme.foreground, 0.45),
-        }
+        status_color(&self.color_scheme, status)
     }
 
     /// A square status marker in the text cell box at `x`, `y`: centered
