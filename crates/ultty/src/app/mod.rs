@@ -161,8 +161,9 @@ pub struct App {
     accessibility: Option<ultty::a11y::Adapter>,
     /// The GPU renderer and its surface, once the GPU is up; see `gpu`.
     renderer: gpu::RendererState,
-    /// Frames drawn on the CPU until the renderer arrives, when
-    /// `ULTTY_CPU_FIRST_FRAMES=1`; see `cpu_frames`.
+    /// Frames drawn on the CPU until the renderer arrives, when enabled by
+    /// `behavior.cpu_first_frames` or `ULTTY_CPU_FIRST_FRAMES`; see
+    /// `cpu_frames`.
     cpu_frames: Option<cpu_frames::CpuFrames>,
     /// Whether a frame has shown the shell's output yet (startup log).
     output_shown: bool,
@@ -340,7 +341,7 @@ impl App {
                 .is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)))
         };
         // Before the GPU's surface: see `cpu_frames`.
-        let mut cpu_frames = cpu_frames::enabled()
+        let mut cpu_frames = cpu_frames::enabled(config.behavior.cpu_first_frames)
             .then(|| {
                 cpu_frames::CpuFrames::new(event_loop.owned_display_handle(), Arc::clone(&window))
                     .inspect_err(|error| tracing::warn!("No CPU first frames: {error:#}"))

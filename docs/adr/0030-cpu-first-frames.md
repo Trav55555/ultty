@@ -2,10 +2,10 @@
 
 ## Status
 
-**Proposed** 2026-11-20. Code references are to the `cpu-first-frames`
-branch, which sits on the `startup-shell-before-gpu` branch (`0443e0f`,
-PR #179); that branch is not on `main` yet.
-The prototype is behind `ULTTY_CPU_FIRST_FRAMES=1` and off by default.
+**In progress** 2026-11-20. Slice 1 (`startup-shell-before-gpu`, PR #179) and
+the CPU-grid prototype (PR #180) are on `main`. Slice 2's `[behavior]
+cpu_first_frames` config setting (default `false`, with
+`ULTTY_CPU_FIRST_FRAMES=1`/`0` overrides) is implemented.
 
 ## Context
 
@@ -260,7 +260,8 @@ confirmed prompt pixels before handover (`@120 ms`: 323 bright prompt pixels,
 
 - Run the steady-state `scripts/bench/compare.sh` suite on the T4 (keypress to
   pixel, throughput, RSS) to verify no regression.
-- Replace `ULTTY_CPU_FIRST_FRAMES=1` with a `[behavior]` config setting.
+- `[behavior] cpu_first_frames` config setting (done; `ULTTY_CPU_FIRST_FRAMES=1`/`0`
+  overrides remain available for one-off launches).
 
 ## Consequences
 
