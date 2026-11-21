@@ -13,6 +13,27 @@ number. Unknown fields are ignored.
 
 The source of truth is `src/event.rs`.
 
+## Live Codex
+
+`agent-console live codex` reads the JSONL stream emitted by Codex CLI
+**0.171.0**. Pass the producer's version and, optionally, the prompt to display.
+
+```bash
+set -o pipefail
+version=$(codex --version)
+prompt='Describe this project in one sentence.'
+codex exec --json --color never --sandbox read-only "$prompt" </dev/null |
+    agent-console live codex --cli-version "$version" --prompt "$prompt"
+```
+
+With an Ultty control socket the console uses native cards. Elsewhere it
+renders ANSI. Codex owns the session and permissions. The adapter displays
+completed assistant messages, shell calls and their aggregated output, and
+turn status and token counts as they arrive. Other record types are ignored.
+A failed turn, missing terminal turn event, or malformed input makes the
+adapter exit with an error. The tests replay a recorded stream with its
+thread identifier replaced.
+
 ## `prompt`
 
 The user's prompt; it opens the next turn.
