@@ -17,6 +17,7 @@ members = [
     "examples/async-fetch",
     "examples/sysmon",
     "examples/agent-transcript",
+    "examples/agent-console",
     "tools/ultty-bench",
 ]
 
