@@ -120,17 +120,21 @@ wait_for_state "placed at line"
 line=$(surface_line | sed -n 's/.* at line \([0-9]*\))$/\1/p')
 [ -n "$line" ] || fail "no anchor line in: $(surface_line)"
 # The card's rows hold its text instead of the fallback text, once the
-# first frame is written into them.
+# first frame is written into them. `text` joins soft-wrapped rows (the
+# long command line above wraps), so its lines do not count rows: the card
+# is found by its text, as the one `INLINE CARD` line, and `card` is set to
+# its line number.
 # Line `n` (1-based) of `text --scrollback`, trailing blanks dropped.
 text_line() {
     sed -n "${2}p" "$1" | sed 's/ *$//'
 }
 card_text() {
     "$ULTTYCTL" text --scrollback >"$out/text-$1.txt"
-    [ "$(text_line "$out/text-$1.txt" "$line")" = "5" ] &&
-        [ "$(text_line "$out/text-$1.txt" "$((line + 1))")" = "INLINE CARD" ] &&
-        [ -z "$(text_line "$out/text-$1.txt" "$((line + 2))")" ] &&
-        [ -z "$(text_line "$out/text-$1.txt" "$((line + 3))")" ] &&
+    [ "$(grep -c '^INLINE CARD$' "$out/text-$1.txt")" = 1 ] || return 1
+    card=$(grep -n '^INLINE CARD$' "$out/text-$1.txt" | cut -d: -f1)
+    [ "$(text_line "$out/text-$1.txt" "$((card - 1))")" = "5" ] &&
+        [ -z "$(text_line "$out/text-$1.txt" "$((card + 1))")" ] &&
+        [ -z "$(text_line "$out/text-$1.txt" "$((card + 2))")" ] &&
         ! grep -q FALLBACK "$out/text-$1.txt"
 }
 for _ in $(seq 50); do card_text placed && break; sleep 0.1; done
@@ -171,7 +175,7 @@ done
 grep -q "surface 9000 Closed" "$out/client.log" || fail "the app never heard Closed"
 [ -z "$(surface_line)" ] || fail "the surface is still listed: $(surface_line)"
 card_text closed || fail "the closed card's rows do not read its text (see $out/text-closed.txt)"
-[ "$(text_line "$out/text-closed.txt" "$((line + 4))")" = "1" ] ||
+[ "$(text_line "$out/text-closed.txt" "$((card + 3))")" = "1" ] ||
     fail "the output after the card is not where it was"
 
 grep -q "surface 9000 Placed" "$out/client.log" || fail "the app never heard Placed"

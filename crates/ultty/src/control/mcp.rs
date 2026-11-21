@@ -548,7 +548,7 @@ fn tools() -> Vec<Value> {
             json!({ "name": { "type": "string" } }), &["name"]),
         tool(
             "ultty_read_text",
-            "Read a pane's screen text, optionally with scrollback.",
+            "Read a pane's screen text, optionally with scrollback. Soft-wrapped rows are joined into one line.",
             json!({
                 "pane": pane_property(),
                 "scrollback": { "type": "boolean", "description": "Include all scrollback." },

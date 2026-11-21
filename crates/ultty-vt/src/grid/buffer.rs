@@ -118,6 +118,26 @@ fn note_first_row(anchors: &mut [Option<AnchorEntry>], anchor: AnchorTag, line: 
 /// A cell being re-wrapped, plus the extra codepoints of its grapheme.
 type ReflowCell = (Cell, Option<Vec<char>>);
 
+/// How many blank cells end `row` only because the wide character that
+/// starts `next` did not fit there and wrapped: the wide character's width
+/// less one, at most, counting just the blanks actually present.
+fn wide_wrap_padding(row: &RowView<'_>, next: &RowView<'_>) -> u16 {
+    if !next.cell(0).is_some_and(|cell| cell.is_wide()) {
+        return 0;
+    }
+    let spacers = (1..next.width())
+        .take_while(|&col| next.cell(col).is_some_and(|cell| cell.is_wide_spacer()))
+        .count() as u16;
+    (0..spacers.max(1))
+        .take_while(|&back| {
+            row.width()
+                .checked_sub(back + 1)
+                .and_then(|col| row.cell(col))
+                .is_some_and(|cell| cell.char() == ' ' && !cell.is_wide_spacer())
+        })
+        .count() as u16
+}
+
 fn push_reflow_cells(line: &mut Vec<ReflowCell>, row: &RowView<'_>) {
     for col in 0..row.width() {
         let Some(cell) = row.cell(col) else {
@@ -1205,20 +1225,58 @@ impl Buffer {
     /// next; other rows end in a newline. Trailing blanks and blank lines
     /// at the end are dropped.
     pub fn text_of_rows(&self, start: usize, end: usize, first_col: u16) -> String {
+        let end = end.min(self.total_lines());
+        if start >= end {
+            return String::new();
+        }
+        let mut text = self.copy_text(start..=end - 1, first_col, u16::MAX);
+        text.truncate(text.trim_end().len());
+        text
+    }
+
+    /// The text of absolute rows `rows` as a user expects a copy of them to
+    /// read: from column `first_col` of the first row through column
+    /// `last_col` of the last (both inclusive, clamped to the row).
+    ///
+    /// Each row contributes [`RowView::copy_text`]: whole graphemes, wide
+    /// characters once. A row flagged [`RowView::is_wrapped`] soft-wraps:
+    /// it runs on into the next row with nothing trimmed or inserted, so a
+    /// logical line comes out whole. Any other row ends its logical line:
+    /// the line's trailing blanks are dropped and a newline separates it
+    /// from the next row. No newline follows the last row.
+    pub fn copy_text(
+        &self,
+        rows: std::ops::RangeInclusive<usize>,
+        first_col: u16,
+        last_col: u16,
+    ) -> String {
+        let (first, last) = (*rows.start(), *rows.end());
         let mut text = String::new();
-        for index in start..end.min(self.total_lines()) {
+        let mut line_start = 0;
+        for index in rows {
             let Some(row) = self.row_at(index) else {
                 break;
             };
-            let from = if index == start { first_col } else { 0 };
+            let from = if index == first { first_col } else { 0 };
+            let mut to = if index == last { last_col } else { u16::MAX };
             if row.is_wrapped() {
-                text.push_str(&row.copy_text(from, row.width()));
-            } else {
-                text.push_str(row.copy_text(from, row.width()).trim_end());
+                let padding = self
+                    .row_at(index + 1)
+                    .map_or(0, |next| wide_wrap_padding(&row, &next));
+                to = to.min(row.width().saturating_sub(padding + 1));
+                if padding < row.width() && from <= to {
+                    text.push_str(&row.copy_text(from, to));
+                }
+                continue;
+            }
+            text.push_str(&row.copy_text(from, to));
+            let line_len = text[line_start..].trim_end().len();
+            text.truncate(line_start + line_len);
+            if index != last {
                 text.push('\n');
             }
+            line_start = text.len();
         }
-        text.truncate(text.trim_end().len());
         text
     }
 
