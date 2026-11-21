@@ -30,9 +30,9 @@ fn run(args: &[&str], stdin: &str) -> Output {
 }
 
 #[test]
-fn replay_fast_prints_one_line_per_event_and_a_total() {
+fn events_fast_prints_one_line_per_event_and_a_total() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/short.jsonl");
-    let out = run(&["replay", path, "--fast"], "");
+    let out = run(&["events", path, "--fast"], "");
     assert!(out.status.success(), "{out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<_> = stdout.lines().collect();
@@ -45,14 +45,14 @@ fn replay_fast_prints_one_line_per_event_and_a_total() {
 }
 
 #[test]
-fn replay_from_stdin_skips_bad_lines_and_fails_on_malformed_ones() {
+fn events_from_stdin_skips_bad_lines_and_fails_on_malformed_ones() {
     let input = concat!(
         "{\"t\":0,\"type\":\"prompt\",\"text\":\"hi\"}\n",
         "{\"t\":1,\"type\":\"future_thing\"}\n",
         "not json\n",
         "{\"t\":2,\"type\":\"turn_end\",\"turn\":1}\n",
     );
-    let out = run(&["replay", "-", "--speed", "1000"], input);
+    let out = run(&["events", "-", "--speed", "1000"], input);
     assert!(!out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
@@ -70,4 +70,38 @@ fn replay_rejects_a_bad_speed() {
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("positive"), "{stderr}");
+}
+
+#[test]
+fn replay_in_a_pipe_prints_the_transcript_as_plain_text() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/short.jsonl");
+    let out = run(&["replay", path, "--fast"], "");
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(!stdout.contains('\x1b'), "{stdout}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines[0],
+        "> Tabs after wide characters land one column short in the pager. Can you fix expand_tabs?"
+    );
+    assert!(lines.contains(&"(no terminal to ask on; chose \"Allow once\")"));
+    assert_eq!(
+        *lines.last().unwrap(),
+        "example-model-1 | in 921 | out 424 | idle | 9.6s"
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("agent-console: Fallback mode"), "{stderr}");
+}
+
+#[test]
+fn replay_auto_approve_picks_the_named_choice() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/short.jsonl");
+    let out = run(&["replay", path, "--fast", "--auto-approve", "deny"], "");
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("[approve] cargo test -p pager (Deny)\n  1. Allow once\n  2. Always allow `cargo test`\n> 3. Deny\n"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("no terminal to ask on"), "{stdout}");
 }

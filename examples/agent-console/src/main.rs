@@ -1,23 +1,51 @@
-//! `agent-console replay <file>|- [--fast] [--speed <f>]`
+//! `agent-console replay <file>|- [--fast | --speed <f>] [--auto-approve <choice>]`
+//! `agent-console events <file>|- [--fast | --speed <f>]`
 //!
-//! Replays an agent event stream. In this slice it validates the stream and
-//! prints one summary line per event; rendering comes later.
+//! `replay` renders an agent event stream as the console: natively with
+//! inline cards inside Ultty, as ANSI text anywhere else (and with
+//! `ULTTY_IN_BAND=0` when Ultty is reached in-band). The mode goes to
+//! stderr. An approval is answered by `--auto-approve` (a choice's text or
+//! number, after a short pause), else by keys when stdin is a terminal,
+//! else with its first choice.
+//!
+//! `events` prints one summary line per event instead, and a total.
 
+use std::cell::Cell;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
+use std::time::Duration;
 
 use anyhow::Context;
+use ulttui::inline::{Console, Mode};
 
+use agent_console::ansi::AnsiScreen;
+use agent_console::app::{App, Approver};
 use agent_console::event::{Event, EventKind};
+use agent_console::keys::{InBandKeys, TerminalKeys};
+use agent_console::native::NativeScreen;
 use agent_console::reader::EventReader;
 use agent_console::replay::{Pace, Replay};
+use agent_console::screen::Screen;
 
-const USAGE: &str = "usage: agent-console replay <file>|- [--fast] [--speed <f>]";
+const USAGE: &str = "usage: agent-console replay <file>|- [--fast | --speed <f>] [--auto-approve <choice>]\n       agent-console events <file>|- [--fast | --speed <f>]";
 
-/// What to replay and how fast.
+/// How long an approval answered by `--auto-approve` stays on screen at
+/// recorded pace (divided by the speed; none with `--fast`).
+const AUTO_APPROVE_DELAY: Duration = Duration::from_millis(800);
+
+/// What to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Command {
+    Replay,
+    Events,
+}
+
+/// What to replay and how.
 struct Args {
+    command: Command,
     source: String,
     pace: Pace,
+    auto_approve: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -35,9 +63,23 @@ fn main() -> anyhow::Result<()> {
     };
 
     let mut reader = EventReader::new(input);
+    match args.command {
+        Command::Events => events(&mut reader, args.pace)?,
+        Command::Replay => replay(&mut reader, &args)?,
+    }
+    if let Some(first) = reader.malformed().first() {
+        anyhow::bail!(
+            "{} malformed lines, the first at {first}",
+            reader.malformed().len()
+        );
+    }
+    Ok(())
+}
+
+fn events(reader: &mut EventReader<Box<dyn BufRead>>, pace: Pace) -> anyhow::Result<()> {
     let mut out = io::stdout().lock();
     let mut count = 0usize;
-    for event in Replay::new(reader.by_ref(), args.pace, std::thread::sleep) {
+    for event in Replay::new(reader.by_ref(), pace, std::thread::sleep) {
         writeln!(out, "{}", summary(&event?))?;
         out.flush()?;
         count += 1;
@@ -48,19 +90,73 @@ fn main() -> anyhow::Result<()> {
         reader.malformed().len(),
         reader.unknown().len()
     )?;
-    if let Some(first) = reader.malformed().first() {
-        anyhow::bail!(
-            "{} malformed lines, the first at {first}",
-            reader.malformed().len()
-        );
+    Ok(())
+}
+
+fn replay(reader: &mut EventReader<Box<dyn BufRead>>, args: &Args) -> anyhow::Result<()> {
+    let console = Console::connect();
+    eprintln!("agent-console: {:?} mode", console.mode());
+    let native = console.mode() == Mode::Native;
+    let in_band = native && ultty_client::detect::socket_path().is_none();
+    let can_ask = args.source != "-" && io::stdin().is_terminal();
+    let approver = match &args.auto_approve {
+        Some(choice) => Approver::Auto {
+            choice: choice.clone(),
+            delay: match args.pace {
+                Pace::Fast => Duration::ZERO,
+                Pace::Recorded { speed } => AUTO_APPROVE_DELAY.div_f64(speed),
+            },
+        },
+        None if in_band => Approver::Ask(Box::new(InBandKeys::default())),
+        None if can_ask => Approver::Ask(Box::new(TerminalKeys::default())),
+        None => Approver::First,
+    };
+    if native {
+        let app = App::new(NativeScreen::new(console), approver, std::thread::sleep);
+        return play(app, reader, args.pace);
     }
+    drop(console);
+    let stdout = io::stdout();
+    let screen = if stdout.is_terminal() {
+        AnsiScreen::terminal(stdout.lock())
+    } else {
+        AnsiScreen::pipe(stdout.lock())
+    };
+    play(
+        App::new(screen, approver, std::thread::sleep),
+        reader,
+        args.pace,
+    )
+}
+
+/// Show every event at `pace`; the app is idle (and draws its live parts)
+/// whenever the replay waits.
+fn play<S: Screen>(
+    mut app: App<S>,
+    reader: &mut EventReader<Box<dyn BufRead>>,
+    pace: Pace,
+) -> anyhow::Result<()> {
+    let wait = Cell::new(None);
+    for event in Replay::new(reader.by_ref(), pace, |gap| wait.set(Some(gap))) {
+        let event = event?;
+        if let Some(gap) = wait.take() {
+            app.idle(gap)?;
+        }
+        app.handle(&event)?;
+    }
+    app.finish()?;
     Ok(())
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<Args> {
-    anyhow::ensure!(args.next().as_deref() == Some("replay"), USAGE);
+    let command = match args.next().as_deref() {
+        Some("replay") => Command::Replay,
+        Some("events") => Command::Events,
+        _ => anyhow::bail!(USAGE),
+    };
     let mut source = None;
     let mut pace = Pace::recorded(1.0)?;
+    let mut auto_approve = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--fast" => pace = Pace::Fast,
@@ -71,13 +167,18 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> anyhow::Result<Args> {
                     .with_context(|| format!("--speed {speed}: not a number"))?;
                 pace = Pace::recorded(speed)?;
             }
+            "--auto-approve" if command == Command::Replay => {
+                auto_approve = Some(args.next().context(USAGE)?);
+            }
             _ if source.is_none() && (arg == "-" || !arg.starts_with('-')) => source = Some(arg),
             _ => anyhow::bail!("unexpected argument {arg:?}\n{USAGE}"),
         }
     }
     Ok(Args {
+        command,
         source: source.context(USAGE)?,
         pace,
+        auto_approve,
     })
 }
 
