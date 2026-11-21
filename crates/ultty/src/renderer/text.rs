@@ -278,7 +278,7 @@ fn cursor_glyph_color(cell: &Cell, color_scheme: &ColorScheme) -> Rgba {
 }
 
 /// Attributes for the configured font family (system monospace when unset).
-fn font_attrs(font_family: &str) -> Attrs<'_> {
+pub(super) fn font_attrs(font_family: &str) -> Attrs<'_> {
     if font_family.is_empty() {
         Attrs::new().family(Family::Monospace)
     } else {
@@ -664,6 +664,29 @@ impl Fonts {
     /// The font size in pixels.
     pub fn font_size(&self) -> f32 {
         self.metrics.font_size
+    }
+
+    /// A font system over the same fonts, for the CPU frames. Copies the
+    /// database's face list; no font file is read again.
+    pub(super) fn font_system_copy(&self) -> FontSystem {
+        FontSystem::new_with_locale_and_db(
+            self.font_system.locale().to_owned(),
+            self.font_system.db().clone(),
+        )
+    }
+
+    pub(super) fn metrics(&self) -> Metrics {
+        self.metrics
+    }
+
+    /// The regular family; empty for the system monospace.
+    pub(super) fn family(&self) -> &str {
+        self.selection.family()
+    }
+
+    /// Baseline in px from the cell top.
+    pub(super) fn baseline(&self) -> f32 {
+        self.baseline
     }
 }
 

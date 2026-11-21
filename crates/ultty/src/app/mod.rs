@@ -8,6 +8,7 @@ mod control;
 mod control_events;
 mod control_resize;
 mod control_wait;
+mod cpu_frames;
 mod gpu;
 mod input;
 mod native_panes;
@@ -160,6 +161,11 @@ pub struct App {
     accessibility: Option<ultty::a11y::Adapter>,
     /// The GPU renderer and its surface, once the GPU is up; see `gpu`.
     renderer: gpu::RendererState,
+    /// Frames drawn on the CPU until the renderer arrives, when
+    /// `ULTTY_CPU_FIRST_FRAMES=1`; see `cpu_frames`.
+    cpu_frames: Option<cpu_frames::CpuFrames>,
+    /// Whether a frame has shown the shell's output yet (startup log).
+    output_shown: bool,
     /// Terminal manager (handles multiple tabs/panes)
     runtime: ultty::runtime::SessionRuntime,
     /// Where the session is saved on exit; `None` for an `ultty -e` window,
@@ -333,6 +339,14 @@ impl App {
                 .window_handle()
                 .is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)))
         };
+        // Before the GPU's surface: see `cpu_frames`.
+        let mut cpu_frames = cpu_frames::enabled()
+            .then(|| {
+                cpu_frames::CpuFrames::new(event_loop.owned_display_handle(), Arc::clone(&window))
+                    .inspect_err(|error| tracing::warn!("No CPU first frames: {error:#}"))
+                    .ok()
+            })
+            .flatten();
         let (fonts_sender, fonts_receiver) = std::sync::mpsc::channel();
         gpu::spawn_setup(
             event_loop.owned_display_handle(),
@@ -363,6 +377,10 @@ impl App {
         scaled_font.size *= scale_factor;
         let fonts = ultty::renderer::Fonts::load(&scaled_font);
         tracing::debug!(target: "ultty::startup", "cell metrics ready");
+        if let Some(cpu) = cpu_frames.as_mut() {
+            cpu.set_fonts(&fonts, &config.colors);
+            tracing::debug!(target: "ultty::startup", "CPU frame fonts ready");
+        }
         let mut renderer =
             gpu::RendererState::Starting(gpu::Starting::new(&fonts, size, config.behavior.opacity));
         // This fails only when the GPU setup has already failed, and the
@@ -452,6 +470,8 @@ impl App {
             window,
             accessibility,
             renderer,
+            cpu_frames,
+            output_shown: false,
             runtime,
             session_file: session_file(
                 startup_command,

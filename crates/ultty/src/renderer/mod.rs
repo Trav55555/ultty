@@ -10,6 +10,7 @@ mod atlas;
 pub mod block_chars;
 pub mod color;
 mod command_palette;
+mod cpu_frame;
 mod cursor;
 mod decoration;
 mod emoji;
@@ -27,6 +28,7 @@ mod text_cache;
 
 pub use atlas::{AtlasStats, GlyphAtlas};
 pub use color::{ColorScheme, Rgba};
+pub use cpu_frame::{shows_output, CpuFrame};
 pub use pipeline::RenderPipeline;
 pub use text::{Fonts, TextRenderer};
 

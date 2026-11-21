@@ -13,14 +13,23 @@ use ultty::terminal_manager::{TerminalId, TerminalManager};
 impl App {
     /// Render the terminal.
     pub(super) fn render(&mut self) {
-        // Nothing is drawn until the GPU is up; see `gpu`.
+        // Until the GPU is up, the CPU draws if enabled; see `gpu` and `cpu_frames`.
         let Some(renderer) = self.renderer.ready() else {
+            self.render_cpu_frame();
             return;
         };
         let palette_caret = renderer.command_palette_caret_cell(&self.command_palette);
         self.update_window_corner_radius();
         if self.frames_drawn == 0 {
             tracing::debug!(target: "ultty::startup", "drawing the first frame");
+        }
+        // Only looked for while the startup log is on: it scans the grid.
+        if !self.output_shown && tracing::enabled!(target: "ultty::startup", tracing::Level::DEBUG)
+        {
+            let shows_output = self
+                .terminal()
+                .is_some_and(|terminal| ultty::renderer::shows_output(&terminal));
+            self.note_output_shown(shows_output, "GPU");
         }
         self.frames_drawn = self.frames_drawn.saturating_add(1);
 

@@ -12,7 +12,7 @@ default = ["gui"]
 gui = [
     "dep:wgpu", "dep:winit", "dep:bytemuck", "dep:cosmic-text", "dep:foldhash",
     "dep:pollster", "dep:arboard", "dep:notify", "dep:open", "dep:png",
-    "dep:accesskit", "dep:accesskit_winit", "dep:notify-rust",
+    "dep:accesskit", "dep:accesskit_winit", "dep:notify-rust", "dep:softbuffer",
 ]
 # Count Rust heap and log it every 10 s (ultty::perf, heap_stats); used by
 # scripts/bench/soak.sh. Costs two atomic operations per allocation.
@@ -46,6 +46,11 @@ taffy = { workspace = true }
 wgpu = { workspace = true, optional = true }
 winit = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
+
+# CPU-drawn first frames while the GPU starts (ADR 0030): presents a
+# pixel buffer to the window. No KMS backend; X11 and Wayland libraries are
+# loaded at run time, as winit does.
+softbuffer = { version = "0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"], optional = true }
 
 # Text
 cosmic-text = { workspace = true, optional = true }

@@ -13,9 +13,9 @@ impl App {
     pub(super) fn next_update_deadline(&self, now: Instant) -> Option<Instant> {
         WakeState {
             needs_redraw: self.needs_redraw,
-            // Without a renderer there is no frame to time; the handoff
-            // wakes the loop (see `gpu`).
-            frame_timer: self.frame_pacing.frame_timer_applies() && self.renderer.is_ready(),
+            // Without a renderer, or CPU frames, there is no frame to time;
+            // the handoff wakes the loop (see `gpu`).
+            frame_timer: self.frame_pacing.frame_timer_applies() && self.can_draw(),
             last_render: self.last_render,
             sync_active: self.needs_redraw && self.sync_update_active(),
             cursor_blink: self.cursor_blink.next_toggle(),
@@ -381,7 +381,7 @@ impl App {
             .input_sent_at
             .filter(|_| self.output_since_input)
             .map(|sent| now.saturating_duration_since(sent));
-        let needs_redraw = self.needs_redraw && self.renderer.is_ready();
+        let needs_redraw = self.needs_redraw && self.can_draw();
         should_render(needs_redraw, frame_elapsed, sync_active, echo_after)
             .then_some((frame_elapsed, sync_active))
     }
