@@ -1,24 +1,8 @@
-//! Native mode: inline cards in Ultty (ADR 0020).
+//! Native mode shows live output in an inline card at the end of the transcript.
+//! The card is retired before finished text is printed, so a completed block
+//! keeps its source through terminal reflow and copy.
 //!
-//! Finished lines are printed into the transcript as styled text, so they
-//! scroll, wrap, re-wrap and copy like any terminal output. Each block is
-//! an inline card: drawn natively, updated by diff, frozen into its rows as
-//! text when closed. The live lines (the prose line being typed and the
-//! status) are a card of their own at the bottom.
-//!
-//! A card's height is fixed and anything printed goes below it, so the
-//! live card cannot stay under the transcript as it grows. Before anything
-//! else is printed or opened it is **retired**: closed, and its rows
-//! erased (`EL 2` on the first, `ED 0` below) so the new text takes their
-//! place. Erasing a row drops its anchor tag, so whichever comes first, the
-//! terminal's last write of the card or the erase, the rows end up holding
-//! the new text. The live card is opened again, under the new text, when
-//! the console is next idle. The rows it covers are anchored and never
-//! re-wrap, so moving the cursor up over them is exact at any width.
-//!
-//! [`Cards`] is the seam: [`Console`] in the app, a recorder in tests.
-
-use std::collections::HashMap;
+//! [`Cards`] is the seam between the real [`Console`] and the renderer tests.
 
 use ulttui::inline::Console;
 use ulttui::prelude::{Color, Column, Style};
@@ -47,6 +31,9 @@ pub trait Cards {
 
     /// The terminal's width in columns.
     fn width(&self) -> u16;
+
+    /// The maximum number of rows the live card may occupy.
+    fn live_row_limit(&self) -> u16;
 
     /// Print `text` into the transcript; `\n` ends a line.
     fn print(&mut self, text: &str) -> Result<()>;
@@ -97,6 +84,10 @@ impl Cards for Console {
         Console::width(self)
     }
 
+    fn live_row_limit(&self) -> u16 {
+        self.tail_card_rows()
+    }
+
     fn print(&mut self, text: &str) -> Result<()> {
         Ok(Console::print(self, text)?)
     }
@@ -125,12 +116,23 @@ impl Cards for Console {
     }
 }
 
-/// A [`Screen`] of inline cards.
+struct Block {
+    id: BlockId,
+    rows: usize,
+    lines: Vec<Line>,
+}
+
+struct LiveCard<C> {
+    card: C,
+    kind: CardKind,
+    lines: Vec<Line>,
+}
+
+/// A transcript followed by an inline card for the live output.
 pub struct NativeScreen<C: Cards> {
     cards: C,
-    blocks: HashMap<BlockId, C::Card>,
-    /// The live card and its height, while it is open.
-    live: Option<(C::Card, u16, Vec<Line>)>,
+    blocks: Vec<Block>,
+    live: Option<LiveCard<C::Card>>,
 }
 
 impl<C: Cards> NativeScreen<C> {
@@ -138,7 +140,7 @@ impl<C: Cards> NativeScreen<C> {
     pub fn new(cards: C) -> Self {
         Self {
             cards,
-            blocks: HashMap::new(),
+            blocks: Vec::new(),
             live: None,
         }
     }
@@ -148,38 +150,15 @@ impl<C: Cards> NativeScreen<C> {
         self.cards
     }
 
-    /// Close the live card, if open, and print `text` over its rows.
-    ///
-    /// With no text the cursor goes up one more line and ends the line, so
-    /// it is back at the start of the card's first row with the console
-    /// knowing it is at the start of a line; otherwise the next card would
-    /// open one line lower.
-    fn retire_then_print(&mut self, text: &str) -> Result<()> {
-        let mut out = String::new();
-        if let Some((card, rows, _)) = self.live.take() {
-            self.cards.close(card)?;
-            out.push_str(&format!("\x1b[{rows}A\r\x1b[2K\x1b[J"));
-            if text.is_empty() {
-                out.push_str("\x1b[A\n");
-            }
+    fn retire_live(&mut self) -> Result<()> {
+        if let Some(live) = self.live.take() {
+            self.cards.close(live.card)?;
+            self.cards
+                .print(&format!("\x1b[{}A\r\x1b[2K\x1b[J\r", live.lines.len()))?;
             self.cards.drain_events()?;
         }
-        out.push_str(text);
-        if out.is_empty() {
-            return Ok(());
-        }
-        self.cards.print(&out)
+        Ok(())
     }
-}
-
-/// `lines` as styled text, each ending its line.
-fn printed(lines: &[Line]) -> String {
-    let mut text = String::new();
-    for line in lines {
-        text.push_str(&line.to_ansi());
-        text.push('\n');
-    }
-    text
 }
 
 impl<C: Cards> Screen for NativeScreen<C> {
@@ -188,55 +167,83 @@ impl<C: Cards> Screen for NativeScreen<C> {
     }
 
     fn print(&mut self, lines: &[Line]) -> Result<()> {
-        self.retire_then_print(&printed(lines))
+        self.retire_live()?;
+        let mut text = String::new();
+        for line in lines {
+            text.push_str(&line.to_ansi());
+            text.push('\n');
+        }
+        if !text.is_empty() {
+            self.cards.print(&text)?;
+        }
+        Ok(())
     }
 
     fn open(&mut self, id: BlockId, rows: u16, lines: &[Line]) -> Result<()> {
-        self.retire_then_print("")?;
-        let card = self.cards.open(rows, lines, CardKind::Block)?;
-        self.blocks.insert(id, card);
+        self.blocks.push(Block {
+            id,
+            rows: usize::from(rows),
+            lines: lines.to_vec(),
+        });
         Ok(())
     }
 
     fn update(&mut self, id: BlockId, lines: &[Line]) -> Result<()> {
-        match self.blocks.get(&id) {
-            Some(card) => self.cards.update(card, lines, CardKind::Block),
-            None => Ok(()),
+        if let Some(block) = self.blocks.iter_mut().find(|block| block.id == id) {
+            block.lines = lines.to_vec();
         }
+        Ok(())
     }
 
     fn close(&mut self, id: BlockId, lines: &[Line]) -> Result<()> {
-        let Some(card) = self.blocks.remove(&id) else {
-            return Ok(());
-        };
-        self.cards.update(&card, lines, CardKind::Block)?;
-        self.cards.close(card)
+        if let Some(index) = self.blocks.iter().position(|block| block.id == id) {
+            self.blocks.remove(index);
+            self.print(lines)?;
+        }
+        Ok(())
     }
 
-    fn live(&mut self, lines: &[Line]) -> Result<()> {
-        let rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-        match &self.live {
-            Some((_, open_rows, shown)) if *open_rows == rows => {
-                if shown.as_slice() != lines {
-                    let (card, _, shown) = self.live.as_mut().expect("matched above");
-                    self.cards.update(card, lines, CardKind::Live)?;
-                    *shown = lines.to_vec();
-                }
-                Ok(())
-            }
-            _ => {
-                self.retire_then_print("")?;
-                if rows > 0 {
-                    let card = self.cards.open(rows, lines, CardKind::Live)?;
-                    self.live = Some((card, rows, lines.to_vec()));
-                }
-                Ok(())
+    fn live(&mut self, status: &[Line]) -> Result<()> {
+        let limit = usize::from(self.cards.live_row_limit());
+        let mut lines: Vec<_> = status.iter().rev().take(limit).cloned().collect();
+        for block in self.blocks.iter().rev() {
+            let count = block.rows.min(limit - lines.len());
+            lines.extend(
+                (block.rows - count..block.rows)
+                    .rev()
+                    .map(|row| block.lines.get(row).cloned().unwrap_or_default()),
+            );
+            if lines.len() == limit {
+                break;
             }
         }
+        lines.reverse();
+        let kind = if self.blocks.is_empty() {
+            CardKind::Live
+        } else {
+            CardKind::Block
+        };
+        let rows = lines.len();
+
+        if let Some(live) = &mut self.live {
+            if live.kind == kind && live.lines.len() == rows {
+                if live.lines != lines {
+                    self.cards.update(&live.card, &lines, kind)?;
+                    live.lines = lines;
+                }
+                return Ok(());
+            }
+        }
+        self.retire_live()?;
+        if rows > 0 {
+            let card = self.cards.open(rows as u16, &lines, kind)?;
+            self.live = Some(LiveCard { card, kind, lines });
+        }
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<()> {
-        self.retire_then_print("")
+        self.retire_live()
     }
 
     fn take_input(&mut self) -> Vec<u8> {
