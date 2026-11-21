@@ -84,10 +84,35 @@ fn parse_pid(text: &str) -> Option<libc::pid_t> {
 /// Remove the runtime files in `dir` left behind by Ultty instances that
 /// are gone, and return how many were removed.
 pub fn sweep_stale_runtime_files(dir: &Path) -> usize {
-    let stale = match stale_runtime_files(dir, current_uid(), is_running_ultty) {
+    sweep_stale_matching(dir, |_| true, "runtime")
+}
+
+/// Remove stale control sockets (`ultty-ctl-<pid>.sock`) and auth tokens
+/// (`ultty-auth-<pid>.token`) in `dir` left behind by dead instances, and
+/// return how many were removed.
+pub fn sweep_stale_control_files(dir: &Path) -> usize {
+    sweep_stale_matching(
+        dir,
+        |kind| {
+            matches!(
+                kind,
+                RuntimeFile::ControlSocket { .. } | RuntimeFile::AuthToken { .. }
+            )
+        },
+        "control",
+    )
+}
+
+fn sweep_stale_matching(dir: &Path, include: impl Fn(RuntimeFile) -> bool, label: &str) -> usize {
+    let stale = match stale_runtime_files_matching(dir, current_uid(), is_running_ultty, include) {
         Ok(stale) => stale,
         Err(e) => {
-            tracing::warn!("Could not look for stale runtime files in {:?}: {}", dir, e);
+            tracing::warn!(
+                "Could not look for stale {} files in {:?}: {}",
+                label,
+                dir,
+                e
+            );
             return 0;
         }
     };
@@ -96,15 +121,16 @@ pub fn sweep_stale_runtime_files(dir: &Path) -> usize {
         .filter(|path| match fs::remove_file(path) {
             Ok(()) => true,
             Err(e) => {
-                tracing::debug!("Could not remove stale runtime file {:?}: {}", path, e);
+                tracing::debug!("Could not remove stale {} file {:?}: {}", label, path, e);
                 false
             }
         })
         .count();
     if removed > 0 {
         tracing::info!(
-            "Removed {} runtime files left by Ultty instances that are gone from {:?}",
+            "Removed {} {} files left by Ultty instances that are gone from {:?}",
             removed,
+            label,
             dir
         );
     }
@@ -112,10 +138,20 @@ pub fn sweep_stale_runtime_files(dir: &Path) -> usize {
 }
 
 /// The runtime files in `dir` that belong to `uid` and to no running Ultty.
+#[cfg(test)]
 fn stale_runtime_files(
     dir: &Path,
     uid: libc::uid_t,
     is_running_ultty: impl Fn(libc::pid_t) -> bool,
+) -> io::Result<Vec<PathBuf>> {
+    stale_runtime_files_matching(dir, uid, is_running_ultty, |_| true)
+}
+
+fn stale_runtime_files_matching(
+    dir: &Path,
+    uid: libc::uid_t,
+    is_running_ultty: impl Fn(libc::pid_t) -> bool,
+    include: impl Fn(RuntimeFile) -> bool,
 ) -> io::Result<Vec<PathBuf>> {
     let mut stale = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -123,6 +159,9 @@ fn stale_runtime_files(
         let Some(kind) = entry.file_name().to_str().and_then(RuntimeFile::parse) else {
             continue;
         };
+        if !include(kind) {
+            continue;
+        }
         // Not followed through symlinks: the entry itself must qualify.
         let Ok(meta) = fs::symlink_metadata(entry.path()) else {
             continue;
@@ -171,11 +210,11 @@ fn is_alive(pid: libc::pid_t) -> bool {
     }
 }
 
-/// Whether the live process `pid` runs the Ultty binary.
+/// Whether the live process `pid` runs an Ultty binary that owns control files.
 #[cfg(target_os = "linux")]
 fn is_ultty(pid: libc::pid_t) -> bool {
     fs::read_to_string(format!("/proc/{pid}/comm"))
-        .is_ok_and(|comm| comm.trim_end_matches('\n') == "ultty")
+        .is_ok_and(|comm| matches!(comm.trim_end_matches('\n'), "ultty" | "ultty-session"))
 }
 
 /// Whether the live process `pid` runs the Ultty binary. Without a cheap
@@ -397,6 +436,42 @@ mod tests {
     #[test]
     fn a_reaped_child_is_not_running() {
         assert!(!is_running_ultty(reaped_child_pid()));
+    }
+
+    #[test]
+    fn orphan_token_without_socket_and_orphan_socket_without_token_are_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let dead_token_only = reaped_child_pid();
+        let dead_socket_only = reaped_child_pid();
+        fs::write(
+            dir.path()
+                .join(format!("ultty-auth-{dead_token_only}.token")),
+            b"orphan-token",
+        )
+        .unwrap();
+        dead_socket(
+            &dir.path()
+                .join(format!("ultty-ctl-{dead_socket_only}.sock")),
+        );
+
+        assert_eq!(sweep_stale_control_files(dir.path()), 2);
+        assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn sweep_stale_control_files_leaves_tab_sockets_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let dead = reaped_child_pid();
+        dead_socket(&dir.path().join(format!("ultty-{dead}-tab0.sock")));
+        dead_socket(&dir.path().join(format!("ultty-ctl-{dead}.sock")));
+        fs::write(dir.path().join(format!("ultty-auth-{dead}.token")), b"abc").unwrap();
+
+        assert_eq!(sweep_stale_control_files(dir.path()), 2);
+        let left: Vec<PathBuf> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(names(left), [format!("ultty-{dead}-tab0.sock")]);
     }
 
     #[test]

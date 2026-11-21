@@ -95,7 +95,6 @@ impl View for Image {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // Show a placeholder pattern in the inner area
         if inner.height > 0 && inner.width > 0 {
             let text = format!(
                 "{}x{} RGBA ({} bytes)",
@@ -116,7 +115,7 @@ mod tests {
 
     #[test]
     fn image_content() {
-        let data = vec![255u8; 16]; // 2x2 RGBA
+        let data = vec![255u8; 16];
         let img = Image::new(data.clone(), 2, 2);
         match <Image as View>::content(&img) {
             Content::Widget(WidgetContent::Image(iw)) => {

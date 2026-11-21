@@ -622,7 +622,9 @@ impl<'a> ScreenRow<'a> {
             if cell.is_wide() && !cells.get(col + 1).is_some_and(|next| next.is_spacer()) {
                 return Err(format!("wide cell at col {col} has no spacer after it"));
             }
-            if cell.is_spacer() && !(col > 0 && cells[col - 1].is_wide()) {
+            if cell.is_spacer()
+                && !(col > 0 && (cells[col - 1].is_wide() || cells[col - 1].is_spacer()))
+            {
                 return Err(format!("spacer at col {col} does not follow a wide cell"));
             }
             if cell.has_grapheme() {
@@ -730,7 +732,7 @@ impl ScreenRowMut<'_> {
 
     /// Write printable ASCII `bytes` from `col` in style `key`. The caller
     /// has resolved any wide character straddling the span's edges (see
-    /// [`ScreenRowMut::clear_ascii_edges`]); the span must fit on the row.
+    /// [`ScreenRowMut::clear_wide_overlap`]); the span must fit on the row.
     #[inline]
     pub(super) fn write_ascii(&mut self, col: u16, bytes: &[u8], key: StyleKey) {
         let start = usize::from(col);
@@ -753,18 +755,40 @@ impl ScreenRowMut<'_> {
         self.head.used = self.head.used.max(end as u16);
     }
 
-    /// Blank the halves of wide characters an ASCII span over `start..end`
-    /// would cut: the character before a spacer at `start`, and a spacer
-    /// at `end`. Every cell in between is overwritten, so a wide character
-    /// can only be split at the two edges.
-    #[inline]
-    pub(super) fn clear_ascii_edges(&mut self, start: u16, end: u16) {
+    /// Blank any wide character parts outside `start..end` that would be
+    /// orphaned by overwriting `start..end`.
+    #[inline(always)]
+    pub(super) fn clear_wide_overlap(&mut self, start: u16, end: u16) {
         if start > 0 && self.get(start).is_some_and(PackedCell::is_spacer) {
-            self.set(start - 1, PackedCell::BLANK);
+            self.clear_wide_prefix(start);
         }
         if self.get(end).is_some_and(PackedCell::is_spacer) {
-            self.set(end, PackedCell::BLANK);
+            self.clear_wide_suffix(end);
         }
+    }
+
+    #[cold]
+    fn clear_wide_prefix(&mut self, end: u16) {
+        let mut start = end - 1;
+        while start > 0 && self.cells[usize::from(start)].is_spacer() {
+            start -= 1;
+        }
+        self.clear_wide_fragment(start, end);
+    }
+
+    #[cold]
+    fn clear_wide_suffix(&mut self, start: u16) {
+        let mut end = start + 1;
+        while self.get(end).is_some_and(PackedCell::is_spacer) {
+            end += 1;
+        }
+        self.clear_wide_fragment(start, end);
+    }
+
+    fn clear_wide_fragment(&mut self, start: u16, end: u16) {
+        self.cells[usize::from(start)..usize::from(end)].fill(PackedCell::BLANK);
+        self.drop_grapheme_entries(start, end);
+        self.head.flags &= !RowHead::UNIFORM;
     }
 
     /// Write `c`, taking `width` (1 or 2) columns from `col`, in style
@@ -940,16 +964,24 @@ impl ScreenRowMut<'_> {
         // stays put and the spacer would be shifted away from it, so both
         // halves are cleared.
         if at > 0 && self.cells[at].is_spacer() {
-            self.cells[at - 1] = PackedCell::BLANK;
-            self.cells[at] = PackedCell::BLANK;
+            self.clear_wide_overlap(at as u16, at as u16);
         }
 
         // The last cell that stays on the row lands in the final column. If
-        // it is a wide char, its spacer is the first cell pushed off, so it
-        // would be left without one.
+        // it is part of a wide char whose spacer is pushed off, clear the
+        // whole character so it is not left truncated.
         let first_pushed = len.saturating_sub(count);
-        if first_pushed > at && self.cells[first_pushed - 1].is_wide() {
-            self.cells[first_pushed - 1] = PackedCell::BLANK;
+        if first_pushed > at && first_pushed < len && self.cells[first_pushed].is_spacer() {
+            let mut left = first_pushed;
+            while left > at {
+                left -= 1;
+                let cell = self.cells[left];
+                self.cells[left] = PackedCell::BLANK;
+                self.drop_grapheme_entries(left as u16, (left + 1) as u16);
+                if cell.is_wide() || !cell.is_spacer() {
+                    break;
+                }
+            }
         }
 
         let src_end = len.saturating_sub(count);
@@ -974,15 +1006,9 @@ impl ScreenRowMut<'_> {
             return;
         }
 
-        // Deleting from a wide char's spacer orphans its primary.
-        if at > 0 && self.cells[at].is_spacer() {
-            self.cells[at - 1] = PackedCell::BLANK;
-        }
-        // Ending in the middle of a wide char orphans its spacer.
+        // Deleting across either edge of a wide char orphans the remaining cells.
         let end = (at + count).min(len);
-        if end < len && self.cells[end].is_spacer() {
-            self.cells[end] = PackedCell::BLANK;
-        }
+        self.clear_wide_overlap(at as u16, end as u16);
 
         let src_start = (at + count).min(len);
         if src_start < len {

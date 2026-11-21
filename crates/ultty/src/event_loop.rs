@@ -223,7 +223,7 @@ impl ShellCommands {
                     });
                 }
             }
-            Action::Print(_) => self.prompt_ready = false,
+            Action::Print(_) | Action::SizedText { .. } => self.prompt_ready = false,
             _ => {}
         }
     }
@@ -1352,7 +1352,7 @@ fn parse_into(state: &mut State, parser: &mut AnsiParser, data: &[u8]) {
             );
             if trace {
                 actions += 1;
-                if matches!(action, Action::Print(_)) {
+                if matches!(action, Action::Print(_) | Action::SizedText { .. }) {
                     print_actions += 1;
                 }
             }

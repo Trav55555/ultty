@@ -87,7 +87,7 @@ mod tests {
         h.push("second");
         h.navigate_up("current");
         let val = h.navigate_down().unwrap();
-        assert_eq!(val, "current"); // restores temp buffer
+        assert_eq!(val, "current");
     }
 
     #[test]

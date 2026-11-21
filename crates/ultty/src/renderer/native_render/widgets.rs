@@ -18,7 +18,7 @@ impl Renderer {
         text_indices: &mut Vec<u32>,
         deferred_images: &mut Vec<DeferredImageRender>,
     ) {
-        use ultty_protocol::WidgetContent;
+        use ultty_protocol::{CodeWidget, MarkdownWidget, WidgetContent};
 
         match widget {
             WidgetContent::Progress(progress) => {
@@ -334,12 +334,20 @@ impl Renderer {
                     ]);
                 }
             }
-            // Deprecated; removal tracked in #175.
-            WidgetContent::Markdown(md) => {
-                self.render_plain_source(&md.source, x, y, text_vertices, text_indices);
-            }
-            WidgetContent::Code(code) => {
-                self.render_plain_source(&code.source, x, y, text_vertices, text_indices);
+            WidgetContent::Markdown(MarkdownWidget { source })
+            | WidgetContent::Code(CodeWidget { source, .. }) => {
+                for (row, line) in source.lines().enumerate() {
+                    self.text_renderer.append_styled_text_vertices(
+                        line,
+                        x,
+                        y + row as f32 * self.cell_height,
+                        self.color_scheme.foreground,
+                        false,
+                        false,
+                        text_vertices,
+                        text_indices,
+                    );
+                }
             }
             WidgetContent::Image(img) => {
                 // Upload image to GPU and defer rendering to image pipeline pass
@@ -432,30 +440,6 @@ impl Renderer {
                 text_vertices.extend(verts);
                 text_indices.extend(idxs.iter().map(|i| i + base_idx));
             }
-        }
-    }
-
-    /// Draw `source` one line per cell row in the foreground color.
-    fn render_plain_source(
-        &mut self,
-        source: &str,
-        x: f32,
-        y: f32,
-        text_vertices: &mut Vec<Vertex>,
-        text_indices: &mut Vec<u32>,
-    ) {
-        let color = self.color_scheme.foreground;
-        for (row, line) in source.lines().enumerate() {
-            self.text_renderer.append_styled_text_vertices(
-                line,
-                x,
-                y + row as f32 * self.cell_height,
-                color,
-                false,
-                false,
-                text_vertices,
-                text_indices,
-            );
         }
     }
 }

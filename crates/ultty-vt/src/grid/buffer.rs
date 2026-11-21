@@ -268,10 +268,15 @@ impl Rewrap {
 
         let mut new_row = row.clone();
         let cols = self.cols;
-        if cols > 0 && cols < new_row.width() {
-            let last = new_row[cols - 1];
-            if last.is_wide() {
-                new_row.erase_range(cols - 1, cols, last.bg());
+        if cols > 0 && cols < new_row.width() && new_row[cols].is_wide_spacer() {
+            let mut left = cols;
+            while left > 0 {
+                left -= 1;
+                let cell = new_row[left];
+                if cell.is_wide() || !cell.is_wide_spacer() {
+                    new_row.erase_range(left, cols, cell.bg());
+                    break;
+                }
             }
         }
         new_row.resize(cols);
@@ -339,13 +344,23 @@ impl Rewrap {
                     continue;
                 }
 
-                // Wide char needs 2 columns; if only 1 remains, wrap to next row
-                if cell.is_wide() && col + 1 >= new_cols {
+                let span: u16 = if cell.is_wide() {
+                    let mut s = 1usize;
+                    while pos + s < line.len() && line[pos + s].0.is_wide_spacer() {
+                        s += 1;
+                    }
+                    (s as u16).max(2)
+                } else {
+                    1
+                };
+
+                // Wide char needs `span` columns; if fewer remain, wrap to next row
+                if span > new_cols - col {
                     if col > 0 {
                         break;
                     }
                     // The row is empty and the wide char can never fit
-                    // (single-column terminal): emit a blank placeholder
+                    // (terminal narrower than the glyph): emit a blank placeholder
                     // so `pos` always advances and the loop terminates.
                     if let Some(dest) = new_row.get_mut(col) {
                         *dest = *cell;
@@ -354,7 +369,7 @@ impl Rewrap {
                         dest.unset_flag(CellFlags::HAS_COMBINING);
                     }
                     col += 1;
-                    pos += 1;
+                    pos += usize::from(span).min(line.len() - pos);
                     continue;
                 }
 
@@ -365,14 +380,27 @@ impl Rewrap {
                     new_row.set_grapheme_extra(col, extra);
                 }
                 col += 1;
+                let base_pos = pos;
                 pos += 1;
 
-                // After placing a wide char, insert its spacer cell
-                if cell.is_wide() {
-                    if let Some(spacer) = new_row.get_mut(col) {
-                        spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
+                // After placing a wide char, insert its spacer cells
+                if span > 1 {
+                    for offset in 1..usize::from(span) {
+                        if let Some(spacer) = new_row.get_mut(col) {
+                            if let Some((orig, _)) = line.get(base_pos + offset) {
+                                if orig.is_wide_spacer() {
+                                    *spacer = *orig;
+                                    spacer.unset_flag(CellFlags::HAS_COMBINING);
+                                    pos += 1;
+                                } else {
+                                    spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
+                                }
+                            } else {
+                                spacer.set_flag(CellFlags::WIDE_CHAR_SPACER);
+                            }
+                        }
+                        col += 1;
                     }
-                    col += 1;
                 }
             }
 
@@ -1464,6 +1492,38 @@ impl Buffer {
         }
         if !self.images.is_empty() {
             self.overwrite_images_under_print(None);
+        }
+    }
+
+    /// Write one OSC 66 payload within its explicit cell width.
+    pub(super) fn write_text_with_width(&mut self, text: &str, width: u16) {
+        let mut chars = text.chars();
+        let Some(base) = chars.next() else {
+            return;
+        };
+        if base.is_control() {
+            return;
+        }
+        let cols = self.grid.dimensions().cols;
+        if width > cols {
+            return;
+        }
+        self.scroll_offset = 0;
+
+        let cursor = self.grid.cursor();
+        let wraps = cursor.wrap_pending || width > cols.saturating_sub(cursor.position.col);
+        if self.grid.auto_wrap()
+            && wraps
+            && cursor.position.row == self.grid.effective_scroll_region().bottom
+        {
+            self.save_scrolled_rows(1);
+        }
+
+        if let Some(position) = self.grid.write_text_with_width(base, chars, width) {
+            if !self.images.is_empty() {
+                let col = position.col;
+                self.overwrite_images(position.row..=position.row, col..col + width);
+            }
         }
     }
 

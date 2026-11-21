@@ -99,9 +99,12 @@ before 1.0.
 
 1. **Transport.** In-band is adopted. The socket stays and `ulttui` prefers
    it when it runs on the tab that owns it.
-2. **Widgets.** `Markdown` and `Code` are deprecated and no longer rendered
-   by the terminal ([ADR 0002](0002-native-protocol-semantic-ui.md) is
-   amended). The other widgets move to `ulttui` one slice at a time.
+2. **Widgets.** `Markdown` and `Code` are deprecated. Protocol v1 still
+   accepts both tags and displays their source through the same plain-text
+   path. New clients send `RichText`. Remove the legacy tags and their
+   display path in the release that ends v1 negotiation, after supported
+   clients have migrated. The other widgets move to `ulttui` one slice at
+   a time.
 
 ## As built
 

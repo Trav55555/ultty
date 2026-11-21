@@ -1200,7 +1200,6 @@ mod tests {
 
         let (outgoing, _) = run(&tree1, &unkeyed(&["X", "A", "B"]));
 
-        // Slots 1 and 2 are rewritten to X and A, slot 3 is created for B.
         assert_eq!(
             count(&outgoing, |m| matches!(m, AppMessage::SetContent { .. })),
             3
@@ -1729,7 +1728,6 @@ mod tests {
             id,
             text: literal.clone()
         }));
-        // snake_case is a word, not an opener.
         assert_eq!(super::held_back("a snake_case"), "a snake_case");
         // A bracket that can no longer become a link does not hold the line.
         assert_eq!(
@@ -1739,7 +1737,6 @@ mod tests {
         assert_eq!(super::held_back("see [1] and [the"), "see [1] and ");
         assert_eq!(super::held_back("see [the docs]"), "see ");
         assert_eq!(super::held_back("see [the docs](http"), "see ");
-        // A lone backtick far back is literal; a recent one still holds.
         let tick = format!("Type ` then {}", "and so on ".repeat(10));
         assert_eq!(super::held_back(&tick), tick);
         assert_eq!(super::held_back("run `cargo"), "run ");
@@ -1837,7 +1834,6 @@ mod tests {
     #[test]
     fn only_arriving_markdown_prose_is_held_back() {
         let id = RegionId::new(1);
-        // A plain live log says brackets and stars as they come.
         let line = "[INFO] a * b `x";
         let (outgoing, _) = optimize_frame_messages(
             &RetainedTree::new(),
@@ -1854,11 +1850,9 @@ mod tests {
     #[test]
     fn resuming_never_skips_text() {
         use super::resume_at;
-        // Growth.
         assert_eq!(resume_at("Hello", "Hello world"), 5);
         // Case only (a heading set in capitals): nothing new.
         assert_eq!(resume_at("Title", "TITLE"), 5);
-        // An earlier line rewritten: resume on the same line.
         let after = "Changed\nsecond and more";
         assert_eq!(&after[resume_at("First\nsecond", after)..], " and more");
         // Announced text that shrank (a literal opener that resolved):
@@ -1870,7 +1864,6 @@ mod tests {
             &after[resume_at("See [the docs](https://example.com/a", after)..],
             "the docs for"
         );
-        // Never past the end.
         assert_eq!(resume_at("abcdef", "abc"), 3);
     }
 

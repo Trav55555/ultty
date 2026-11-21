@@ -199,7 +199,6 @@ impl View for Section {
                     None,
                 )?));
             }
-            // Title occupies index 0; children start at index 1
             let child_index = index - 1;
             if let Some(child) = self.children.get(child_index) {
                 Ok(Some(render_view_to_native(

@@ -732,16 +732,14 @@ impl Grid {
             && r.get(col).is_some_and(|cell| {
                 let extra = r.grapheme_extra(col).unwrap_or_default();
                 let cluster = std::iter::once(cell.char()).chain(extra.iter().copied());
-                !cell.is_wide() && unicode_width::char_iter_width(cluster) >= 2
+                !cell.is_wide_part() && unicode_width::char_iter_width(cluster) >= 2
             });
 
         if widens {
             let next = col + 1;
             // The spacer overwrites whatever was at `next`; a wide char there
             // would leave its own spacer orphaned.
-            if r.get(next).is_some_and(PackedCell::is_wide) {
-                r.set(next + 1, PackedCell::BLANK);
-            }
+            r.clear_wide_overlap(next, next + 1);
             r.clear_graphemes(next, next + 1);
             if let Some(base) = r.get(col) {
                 r.set(col, base.widened());
@@ -895,7 +893,6 @@ impl Grid {
         let col = self.cursor.position.col;
         let row = self.cursor.position.row;
 
-        let cols = self.dims.cols;
         let insert_mode = self.insert_mode;
         // The template key may collect, so it comes first; the insert's
         // blanks are interned without collecting (see `template_key`).
@@ -911,34 +908,19 @@ impl Grid {
             return;
         };
 
-        // Clear any combining characters from previous content
-        r.clear_graphemes(col, col.saturating_add(1));
-
         // Insert mode (IRM): shift existing cells right before writing
         if insert_mode {
             r.insert_cells(col, width, blank);
         }
 
-        // Clean up orphaned wide-char parts before overwriting
-        let is_wide = r.get(col).is_some_and(PackedCell::is_wide);
-        let is_spacer = r.get(col).is_some_and(PackedCell::is_spacer);
-        if is_wide && col + 1 < cols {
-            r.set(col + 1, PackedCell::BLANK);
-        }
-        if is_spacer && col > 0 {
-            r.set(col - 1, PackedCell::BLANK);
-        }
-        // A wide char's spacer overwrites the next cell; if that cell starts
-        // another wide char, that char's own spacer would be orphaned.
-        if width > 1 && col + 2 < cols && r.get(col + 1).is_some_and(PackedCell::is_wide) {
-            r.set(col + 2, PackedCell::BLANK);
-        }
+        let end = col + width;
+        r.clear_graphemes(col, end);
+        r.clear_wide_overlap(col, end);
 
-        // Write the character, and a spacer after a wide one.
         if width > 1 {
             r.set(col, PackedCell::wide(c, key));
-            if col + 1 < cols {
-                r.set(col + 1, PackedCell::spacer(key));
+            for spacer in col + 1..end {
+                r.set(spacer, PackedCell::spacer(key));
             }
         } else {
             r.set(col, PackedCell::new(c, key));
@@ -949,6 +931,62 @@ impl Grid {
 
         self.advance_cursor(width);
         self.record_print(row, col, cluster::Tail::start(c));
+    }
+
+    /// Place the OSC 66 payload and return its starting position.
+    pub(super) fn write_text_with_width(
+        &mut self,
+        base: char,
+        extra: impl Iterator<Item = char>,
+        width: u16,
+    ) -> Option<CursorPosition> {
+        if self.cursor.wrap_pending {
+            self.wrap_pending_cursor();
+        }
+        if width > self.dims.cols.saturating_sub(self.cursor.position.col) {
+            if self.auto_wrap {
+                self.wrap_pending_cursor();
+            } else {
+                self.cursor.position.col = self.dims.cols - width;
+            }
+        }
+
+        let position = self.cursor.position;
+        let CursorPosition { col, row } = position;
+        let insert_mode = self.insert_mode;
+        let key = self.template_key();
+        let blank = if insert_mode {
+            self.styles.key(&Style::erased(self.attrs.bg()))
+        } else {
+            StyleKey::DEFAULT
+        };
+
+        self.mark_dirty(row);
+        let mut r = self.page.row_mut(row)?;
+
+        if insert_mode {
+            r.insert_cells(col, width, blank);
+        }
+        r.clear_graphemes(col, col.saturating_add(width));
+        r.clear_wide_overlap(col, col.saturating_add(width));
+
+        if width > 1 {
+            r.set(col, PackedCell::wide(base, key));
+            for offset in 1..width {
+                r.set(col + offset, PackedCell::spacer(key));
+            }
+        } else {
+            r.set(col, PackedCell::new(base, key));
+        }
+
+        for ch in extra {
+            r.push_grapheme_char(col, ch, MAX_COMBINING_PER_CELL);
+        }
+
+        self.last_char = base;
+        self.advance_cursor(width);
+        self.last_print = None;
+        Some(position)
     }
 
     /// Advance the cursor after printing `width` columns, parking it on the
@@ -996,7 +1034,7 @@ impl Grid {
             let end_col = col + write_len as u16;
             let key = self.template_key();
             if let Some(mut r) = self.page.row_mut(row) {
-                r.clear_ascii_edges(col, end_col);
+                r.clear_wide_overlap(col, end_col);
                 r.write_ascii(col, &remaining[..write_len], key);
             }
             self.mark_dirty(row);
@@ -1365,10 +1403,10 @@ impl Grid {
         };
         let mut start = start;
         let mut end = end;
-        if start > 0 && r.get(start).is_some_and(PackedCell::is_spacer) {
+        while start > 0 && r.get(start).is_some_and(PackedCell::is_spacer) {
             start -= 1;
         }
-        if end < cols && r.get(end - 1).is_some_and(PackedCell::is_wide) {
+        while end < cols && r.get(end).is_some_and(PackedCell::is_spacer) {
             end += 1;
         }
         r.erase_range(start, end, blank);

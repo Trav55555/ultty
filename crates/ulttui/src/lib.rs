@@ -78,12 +78,10 @@ pub mod prelude {
         TreeNode, View,
     };
 
-    // Re-export protocol types
     pub use ultty_protocol::{
         BorderEdges, BorderStyle, BorderType, Color, Constraints, Dimension, Style,
     };
 
-    // Vim types
     pub use crate::vim::{VimAction, VimCommand, VimMode, VimMotion, VimOperator};
 }
 

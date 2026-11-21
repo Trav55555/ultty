@@ -296,7 +296,9 @@ impl Row {
             if cell.is_wide() && !cells.get(col + 1).is_some_and(Cell::is_wide_spacer) {
                 return Err(format!("wide cell at col {col} has no spacer after it"));
             }
-            if cell.is_wide_spacer() && !(col > 0 && cells[col - 1].is_wide()) {
+            if cell.is_wide_spacer()
+                && !(col > 0 && (cells[col - 1].is_wide() || cells[col - 1].is_wide_spacer()))
+            {
                 return Err(format!("spacer at col {col} does not follow a wide cell"));
             }
             if let Some(extra) = self.grapheme_extra(col as u16) {
@@ -694,16 +696,38 @@ impl Row {
         // stays put and the spacer would be shifted away from it, so both
         // halves are cleared.
         if at > 0 && self.cells[at].is_wide_spacer() {
-            self.cells[at - 1].clear();
-            self.cells[at].clear();
+            let mut left = at;
+            while left > 0 {
+                left -= 1;
+                let cell = self.cells[left];
+                self.cells[left].clear();
+                self.graphemes.remove(left as u16);
+                if cell.is_wide() || !cell.is_wide_spacer() {
+                    break;
+                }
+            }
+            let mut right = at;
+            while right < len && self.cells[right].is_wide_spacer() {
+                self.cells[right].clear();
+                right += 1;
+            }
         }
 
         // The last cell that stays on the row lands in the final column. If
-        // it is a wide char, its spacer is the first cell pushed off, so it
-        // would be left without one.
+        // it is a wide char whose spacer is pushed off, clear it so it is not
+        // left without one.
         let first_pushed = len.saturating_sub(count);
-        if first_pushed > at && self.cells[first_pushed - 1].is_wide() {
-            self.cells[first_pushed - 1].clear();
+        if first_pushed > at && first_pushed < len && self.cells[first_pushed].is_wide_spacer() {
+            let mut left = first_pushed;
+            while left > at {
+                left -= 1;
+                let cell = self.cells[left];
+                self.cells[left].clear();
+                self.graphemes.remove(left as u16);
+                if cell.is_wide() || !cell.is_wide_spacer() {
+                    break;
+                }
+            }
         }
 
         // Shift cells right using bulk copy
@@ -735,13 +759,24 @@ impl Row {
 
         // If deleting starts at a wide char spacer, clear the orphaned primary cell
         if at > 0 && self.cells[at].is_wide_spacer() {
-            self.cells[at - 1].clear();
+            let mut left = at;
+            while left > 0 {
+                left -= 1;
+                let cell = self.cells[left];
+                self.cells[left].clear();
+                self.graphemes.remove(left as u16);
+                if cell.is_wide() || !cell.is_wide_spacer() {
+                    break;
+                }
+            }
         }
 
-        // If the deletion range ends in the middle of a wide char, clear the spacer
+        // If the deletion range ends in the middle of a wide char, clear remaining spacers
         let end = (at + count).min(len);
-        if end < len && self.cells[end].is_wide_spacer() {
-            self.cells[end].clear();
+        let mut right = end;
+        while right < len && self.cells[right].is_wide_spacer() {
+            self.cells[right].clear();
+            right += 1;
         }
 
         // Shift cells left using bulk copy

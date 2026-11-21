@@ -995,7 +995,6 @@ mod tests {
         assert!(overrides
             .remap(&key(Key::Char('n'), true, false, false), true)
             .is_some());
-        // A key held with meta (super) matches no chord.
         let mut super_j = key(Key::Char('j'), false, false, false);
         super_j.modifiers.meta = true;
         assert!(overrides.remap(&super_j, false).is_none());
@@ -1216,14 +1215,12 @@ mod tests {
             "pushed keys are asked first"
         );
 
-        // The file reloads underneath the push.
         std::fs::write(&path, "[widget.c]\nhidden = true\n").unwrap();
         assert!(file.refresh());
         let now = file.overrides();
         assert!(now.widget("a").is_none() && now.widget("c").unwrap().hidden);
         assert_eq!(now.widget("b").unwrap().bold, Some(true));
 
-        // A second push replaces the first.
         file.push(Some(&pushed(
             OverrideFormat::Toml,
             "[widget.d]\nhidden = true\n",
@@ -1233,7 +1230,6 @@ mod tests {
         assert!(now.widget("b").is_none() && now.widget("d").unwrap().hidden);
         assert!(now.remap(&down, false).is_none());
 
-        // A push that does not parse changes nothing and is the error.
         let err = file
             .push(Some(&pushed(
                 OverrideFormat::Toml,
@@ -1283,7 +1279,6 @@ mod tests {
         let err = file.push(None).unwrap_err();
         assert!(err.contains("overrides are off"), "{err}");
 
-        // The environment switch is what disables them.
         let resolved = resolve_path("app", |key| {
             (key == DISABLE_ENV).then(|| OsString::from("1"))
         });

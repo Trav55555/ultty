@@ -249,10 +249,10 @@ mod tests {
         assert_eq!(tabs.active_index(), 2);
 
         tabs.select_next();
-        assert_eq!(tabs.active_index(), 0); // wraps
+        assert_eq!(tabs.active_index(), 0);
 
         tabs.select_prev();
-        assert_eq!(tabs.active_index(), 2); // wraps back
+        assert_eq!(tabs.active_index(), 2);
     }
 
     #[test]
@@ -262,20 +262,18 @@ mod tests {
         assert_eq!(tabs.active_index(), 2);
         assert_eq!(tabs.active_label(), Some("C"));
 
-        tabs.select(99); // out of bounds, no change
+        tabs.select(99);
         assert_eq!(tabs.active_index(), 2);
     }
 
     #[test]
     fn tabs_empty() {
         let mut tabs = Tabs::new();
-        tabs.select_next(); // should not panic
+        tabs.select_next();
         tabs.select_prev();
         assert_eq!(tabs.active_index(), 0);
         assert_eq!(tabs.active_label(), None);
     }
-
-    // --- New tests below ---
 
     #[test]
     fn tabs_default_values() {
@@ -334,7 +332,7 @@ mod tests {
         let mut tabs = Tabs::new().labels(vec!["A", "B"]);
         tabs.select(1);
         assert_eq!(tabs.active_index(), 1);
-        tabs.select(2); // out of bounds, no change
+        tabs.select(2);
         assert_eq!(tabs.active_index(), 1);
     }
 
@@ -439,7 +437,7 @@ mod tests {
         let mut tabs = Tabs::new().labels(vec!["A", "B", "C"]);
         let result = tabs.on_key(&key(Key::Char('2')));
         assert!(matches!(result, Some(FocusAction::Consumed)));
-        assert_eq!(tabs.active_index(), 1); // digit '2' -> index 1
+        assert_eq!(tabs.active_index(), 1);
     }
 
     #[test]
@@ -455,7 +453,6 @@ mod tests {
         let mut tabs = Tabs::new().labels(vec!["A", "B"]).active(1);
         let result = tabs.on_key(&key(Key::Char('0')));
         assert!(matches!(result, Some(FocusAction::Consumed)));
-        // '0' maps to index -1 which fails the > 0 check, so no change
         assert_eq!(tabs.active_index(), 1);
     }
 
@@ -464,7 +461,6 @@ mod tests {
         let mut tabs = Tabs::new().labels(vec!["A", "B"]);
         let result = tabs.on_key(&key(Key::Char('5')));
         assert!(matches!(result, Some(FocusAction::Consumed)));
-        // digit 5 -> index 4 but only 2 labels, so no change
         assert_eq!(tabs.active_index(), 0);
     }
 

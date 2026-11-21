@@ -1764,7 +1764,6 @@ mod tests {
             !text.contains(['\u{2013}', '\u{2014}', '\u{201c}', '\u{2019}', '\u{2026}']),
             "{text}"
         );
-        // Other extensions stay on: the table renders as cells, not pipes.
         assert!(!text.contains("|---|"), "{text}");
     }
 
@@ -2200,7 +2199,6 @@ mod tests {
             spoken(&["", "Start **", phrase, "** and after."]),
             format!("Start |{phrase} and after.")
         );
-        // A link that never resolves on screen is said at the end.
         assert_eq!(
             spoken(&["", "Go [here", "](http://x"]),
             "Go |[here](http://x"
@@ -2209,7 +2207,6 @@ mod tests {
 
     #[test]
     fn a_link_or_setext_heading_streamed_in_small_chunks_is_spoken_as_shown() {
-        // Neither the address nor the brackets.
         assert_eq!(
             spoken(&["", "See [te", "xt](ht", "tp://x) now"]),
             "See |text now"
@@ -2218,7 +2215,6 @@ mod tests {
             spoken(&["", "See [te", "xt](ht", "tp://x \"ti", "tle\") now"]),
             "See |text now"
         );
-        // The underline is not said, nor the line again in capitals.
         assert_eq!(spoken(&["", "Title", "\n", "====="]), "Title");
         assert_eq!(spoken(&["", "Title", "\n", "-", "--"]), "Title");
     }
@@ -2943,7 +2939,6 @@ mod tests {
         assert!(ansi.contains("[x] done"), "{ansi}");
         assert!(!ansi.contains('•'), "{ansi}");
 
-        // Loose, the item's paragraph is its text all the same.
         let loose = MarkdownView::new("- [ ] a\n\n- [x] b");
         assert!(matches!(
             &loose.blocks[..],

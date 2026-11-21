@@ -969,7 +969,6 @@ mod tests {
         output.take();
         console.update(&card, &Text::new("two\nthree")).unwrap();
         assert_eq!(output.take(), "\x1b[2A\r\x1b[2Ktwo\r\n\r\x1b[2Kthree\r\n");
-        // Still last, so it can be redrawn again.
         console.update(&card, &Text::new("four")).unwrap();
         assert_eq!(output.take(), "\x1b[2A\r\x1b[2Kfour\r\n\r\x1b[2K\r\n");
     }
@@ -1008,7 +1007,6 @@ mod tests {
         fallback.size = SizeSource::Fixed(20, 24);
         console.update(&card, &Text::new("back")).unwrap();
         assert_eq!(output.take(), "", "rows may have re-wrapped meanwhile");
-        // New cards take the new width.
         console.open(1, &Text::new("x".repeat(40))).unwrap();
         assert_eq!(output.take(), format!("{}\r\n", "x".repeat(20)));
     }

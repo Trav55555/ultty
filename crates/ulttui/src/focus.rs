@@ -153,7 +153,6 @@ impl FocusManager {
         }
         if let Some(ref id) = self.focused_id {
             if !self.focusable_ids.contains(id) {
-                // Use the previous position hint to find the nearest neighbor.
                 let fallback_idx = self
                     .last_focused_index
                     .unwrap_or(0)
@@ -351,31 +350,27 @@ mod tests {
         focus.focus("missing");
         focus.end_frame();
 
-        // No previous position hint, so falls back to index 0 ("a").
         assert_eq!(focus.focused_id(), Some("a"));
     }
 
     #[test]
     fn end_frame_picks_nearest_neighbor_on_removal() {
         let mut focus = FocusManager::new();
-        // Simulate frame 1: a, b, c, d — user focuses "c" (index 2).
         focus.register("a".to_string());
         focus.register("b".to_string());
         focus.register("c".to_string());
         focus.register("d".to_string());
-        focus.focus_next(); // a
-        focus.focus_next(); // b
-        focus.focus_next(); // c
+        focus.focus_next();
+        focus.focus_next();
+        focus.focus_next();
         assert_eq!(focus.focused_id(), Some("c"));
 
-        // Simulate frame 2: "c" removed, only a, b, d remain.
         focus.begin_frame();
         focus.register("a".to_string());
         focus.register("b".to_string());
         focus.register("d".to_string());
         focus.end_frame();
 
-        // Should pick index 2 clamped to len-1 = 2, which is "d" (nearest neighbor).
         assert_eq!(focus.focused_id(), Some("d"));
     }
 
@@ -387,17 +382,14 @@ mod tests {
         focus.register("c".to_string());
         focus.register("d".to_string());
         focus.register("e".to_string());
-        // Focus "e" at index 4
-        focus.focus_prev(); // wraps to "e"
+        focus.focus_prev();
         assert_eq!(focus.focused_id(), Some("e"));
 
-        // Next frame: only 2 items
         focus.begin_frame();
         focus.register("a".to_string());
         focus.register("b".to_string());
         focus.end_frame();
 
-        // Index 4 clamped to 1 → "b"
         assert_eq!(focus.focused_id(), Some("b"));
     }
 
@@ -427,7 +419,6 @@ mod tests {
         });
         let focused = FocusManager::with_current(|fm| fm.is_focused("a"));
         assert!(focused);
-        // Clean up thread-local state
         FocusManager::set_current(FocusManager::new());
     }
 
@@ -441,7 +432,6 @@ mod tests {
         let is_x_focused = FocusManager::with_current(|fm| fm.is_focused("x"));
         assert!(is_x_focused);
 
-        // Restore
         FocusManager::set_current(old);
     }
 }

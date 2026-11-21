@@ -465,12 +465,10 @@ mod tests {
         let mut table = Table::new()
             .headers(vec!["X"])
             .rows(Vec::<Vec<String>>::new());
-        table.move_selection(1); // should not panic
+        table.move_selection(1);
         assert_eq!(table.selected_index(), 0);
         assert_eq!(table.selected_row(), None);
     }
-
-    // --- New tests below ---
 
     #[test]
     fn table_default_values() {
@@ -622,7 +620,6 @@ mod tests {
             to_ratatui_color(theme.primary),
             "header uses theme.primary"
         );
-        // No blank separator row: the data row is directly below the header.
         assert_eq!(buffer[(1, 2)].symbol(), "x");
         assert_eq!(buffer[(6, 2)].symbol(), "y");
         assert_eq!(buffer[(10, 2)].symbol(), "z");
@@ -656,7 +653,7 @@ mod tests {
         let mut table = Table::new()
             .headers(vec!["X"])
             .rows(Vec::<Vec<String>>::new());
-        table.select_last(); // should not panic
+        table.select_last();
         assert_eq!(table.selected_index(), 0);
     }
 
@@ -692,7 +689,6 @@ mod tests {
         let table = Table::new()
             .headers(vec!["A"])
             .rows(vec![vec!["1"], vec!["2"], vec!["3"]]);
-        // 1 header + 3 data rows = 4
         assert_eq!(<Table as View>::children_count(&table), 4);
     }
 
@@ -701,7 +697,6 @@ mod tests {
         let table = Table::new()
             .headers(vec!["A"])
             .rows(Vec::<Vec<String>>::new());
-        // 1 header + 0 data rows = 1
         assert_eq!(<Table as View>::children_count(&table), 1);
     }
 
@@ -841,7 +836,7 @@ mod tests {
         });
         let handled = table.on_event(&event);
         assert!(handled);
-        assert_eq!(table.selected_index(), 1); // moved up by 3
+        assert_eq!(table.selected_index(), 1);
     }
 
     #[test]
@@ -862,7 +857,7 @@ mod tests {
         });
         let handled = table.on_event(&event);
         assert!(handled);
-        assert_eq!(table.selected_index(), 3); // moved down by 3
+        assert_eq!(table.selected_index(), 3);
     }
 
     #[test]

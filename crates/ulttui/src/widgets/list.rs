@@ -203,7 +203,6 @@ impl<T: std::fmt::Display> View for List<T> {
     }
 
     fn content(&self) -> ultty_protocol::Content {
-        // Content::None - children provide content
         ultty_protocol::Content::None
     }
 
@@ -264,8 +263,6 @@ impl<T: std::fmt::Display> View for List<T> {
         })?;
 
         let content = ultty_protocol::Content::Text(TextContent::new(text));
-        // Each row is an item with its place among the visible ones; the
-        // selected row says so.
         let row = ultty_protocol::Semantics {
             role: ultty_protocol::Role::ListItem,
             position: Some(ultty_protocol::SetPosition {

@@ -42,7 +42,6 @@ impl VimMode {
 /// Vim motion - describes cursor movement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VimMotion {
-    // Character motions
     /// Move left (h).
     Left,
     /// Move right (l).
@@ -52,7 +51,6 @@ pub enum VimMotion {
     /// Move down (j).
     Down,
 
-    // Word motions
     /// Move to start of next word (w).
     Word,
     /// Move to start of next WORD (W).
@@ -66,7 +64,6 @@ pub enum VimMotion {
     /// Move to start of previous WORD (B).
     WordBackBig,
 
-    // Line motions
     /// Move to first non-blank character (^).
     LineFirstNonBlank,
     /// Move to start of line (0).
@@ -74,7 +71,6 @@ pub enum VimMotion {
     /// Move to end of line ($).
     LineEnd,
 
-    // Document motions
     /// Move to first line (gg).
     DocumentStart,
     /// Move to last line (G).
@@ -82,7 +78,6 @@ pub enum VimMotion {
     /// Move to specific line number (42G or :42).
     Line(usize),
 
-    // Screen motions
     /// Move half page down (Ctrl-d).
     HalfPageDown,
     /// Move half page up (Ctrl-u).
@@ -98,7 +93,6 @@ pub enum VimMotion {
     /// Move to bottom of screen (L).
     ScreenBottom,
 
-    // Search motions
     /// Find character forward (f{char}).
     FindChar(char),
     /// Find character backward (F{char}).
@@ -112,7 +106,6 @@ pub enum VimMotion {
     /// Repeat last find in reverse (,).
     RepeatFindReverse,
 
-    // Text object motions (used with operators)
     /// Inner word (iw).
     InnerWord,
     /// A word including surrounding space (aw).
@@ -134,13 +127,31 @@ pub enum VimMotion {
     /// A block including delimiters (a{, a(, a[, a<, a", a', a`).
     ABlock(char),
 
-    // Misc
     /// Match bracket (%).
     MatchBracket,
     /// Next search result (n).
     SearchNext,
     /// Previous search result (N).
     SearchPrev,
+}
+
+impl VimMotion {
+    /// Returns true if this motion represents a text object (`iw`, `a"`, `i(`, etc.).
+    pub fn is_text_object(&self) -> bool {
+        matches!(
+            self,
+            VimMotion::InnerWord
+                | VimMotion::AWord
+                | VimMotion::InnerWordBig
+                | VimMotion::AWordBig
+                | VimMotion::InnerSentence
+                | VimMotion::ASentence
+                | VimMotion::InnerParagraph
+                | VimMotion::AParagraph
+                | VimMotion::InnerBlock(_)
+                | VimMotion::ABlock(_)
+        )
+    }
 }
 
 /// Vim operator - action to perform on a motion.

@@ -6,9 +6,11 @@
 //! - `VimConfig` for customizing vim behavior
 
 mod parser;
+mod text_object;
 mod types;
 
 pub use parser::KeyParser;
+pub use text_object::resolve_text_object;
 pub use types::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimRegister, VimState};
 
 use ultty_protocol::{Key, Modifiers};
@@ -66,7 +68,6 @@ pub trait VimHandler {
         match parsed {
             Some(ParseResult::Action(action)) => {
                 let result = self.handle_vim_action(&action);
-                // Update mode if action changes it
                 if let VimAction::ExitToNormal = action {
                     self.vim_state_mut().reset_to_normal();
                 }
@@ -235,7 +236,6 @@ pub fn to_vim_modifiers(modifiers: crate::event::Modifiers) -> Modifiers {
 /// - `impl_vim_ext!(MyWidget);` — vim() is a no-op (already enabled by default)
 #[macro_export]
 macro_rules! impl_vim_ext {
-    // With custom default config and insert-mode initialization
     ($ty:ty, $default_config:expr) => {
         impl $crate::vim::VimExt for $ty {
             fn vim(self) -> Self {
@@ -251,7 +251,6 @@ macro_rules! impl_vim_ext {
             }
         }
     };
-    // Simple: vim() is identity, vim_with_config just sets config
     ($ty:ty) => {
         impl $crate::vim::VimExt for $ty {
             fn vim(self) -> Self {
@@ -264,7 +263,6 @@ macro_rules! impl_vim_ext {
             }
         }
     };
-    // Generic type: impl_vim_ext!(List<T>, generics: T)
     ($ty:ident < $($gen:ident),+ >, generics: $($g:ident),+) => {
         impl<$($g),+> $crate::vim::VimExt for $ty<$($gen),+> {
             fn vim(self) -> Self {
@@ -284,8 +282,6 @@ mod tests {
     use super::*;
     use super::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimState};
     use ultty_protocol::{Key, Modifiers};
-
-    // --- VimResult ---
 
     #[test]
     fn vim_result_handled() {
@@ -329,8 +325,6 @@ mod tests {
         let r2 = r.clone();
         assert_eq!(r, r2);
     }
-
-    // --- VimConfig ---
 
     #[test]
     fn vim_config_default() {
@@ -382,8 +376,6 @@ mod tests {
         assert!(s.contains("enabled"));
     }
 
-    // --- ParseResult ---
-
     #[test]
     fn parse_result_action() {
         let r = ParseResult::Action(VimAction::InsertAtCursor);
@@ -414,8 +406,6 @@ mod tests {
         let s = format!("{:?}", ParseResult::Pending);
         assert!(s.contains("Pending"));
     }
-
-    // --- KeyParser integration with modes ---
 
     #[test]
     fn parser_normal_mode_basic_motions() {
@@ -503,7 +493,7 @@ mod tests {
         state.mode = VimMode::Insert;
 
         let result = parser.parse_key(&mut state, &Key::Char('a'), Modifiers::NONE);
-        assert!(result.is_none()); // chars pass through in insert mode
+        assert!(result.is_none());
     }
 
     #[test]
@@ -528,7 +518,6 @@ mod tests {
 
         let result = parser.parse_key(&mut state, &Key::Char('d'), Modifiers::NONE);
         assert!(matches!(result, Some(ParseResult::Command(_))));
-        // After d in visual, mode resets to normal
         assert_eq!(state.mode, VimMode::Normal);
     }
 
@@ -630,9 +619,7 @@ mod tests {
         state.mode = VimMode::Command;
         state.command_buffer = "x".to_string();
 
-        // First backspace removes the char
         let _ = parser.parse_key(&mut state, &Key::Backspace, Modifiers::NONE);
-        // Buffer is now empty, so it exits command mode
         assert_eq!(state.mode, VimMode::Normal);
     }
 
@@ -1081,7 +1068,6 @@ mod tests {
         let mut state = VimState::new();
         state.mode = VimMode::Visual;
 
-        // Motions in visual mode should work the same as normal mode
         let result = parser.parse_key(&mut state, &Key::Char('w'), Modifiers::NONE);
         assert!(matches!(
             result,
