@@ -103,13 +103,13 @@ pub struct SelectionTheme {
 impl Theme {
     pub fn dark() -> Self {
         Theme {
-            primary: Color::Rgb(97, 175, 239),     // Soft blue
-            background: Color::Rgb(30, 30, 46),    // Dark bg
-            foreground: Color::Rgb(205, 214, 244), // Light text
-            muted: Color::Rgb(108, 112, 134),      // Gray
-            error: Color::Rgb(243, 139, 168),      // Pink-red
-            success: Color::Rgb(166, 227, 161),    // Green
-            warning: Color::Rgb(249, 226, 175),    // Yellow
+            primary: Color::Rgb(97, 175, 239),
+            background: Color::Rgb(30, 30, 46),
+            foreground: Color::Rgb(205, 214, 244),
+            muted: Color::Rgb(108, 112, 134),
+            error: Color::Rgb(243, 139, 168),
+            success: Color::Rgb(166, 227, 161),
+            warning: Color::Rgb(249, 226, 175),
             button: ButtonTheme {
                 fg: Color::Rgb(205, 214, 244),
                 bg: Color::Rgb(69, 71, 90),
@@ -153,13 +153,13 @@ impl Theme {
 
     pub fn light() -> Self {
         Theme {
-            primary: Color::Rgb(30, 102, 245),     // Blue
-            background: Color::Rgb(239, 241, 245), // Light bg
-            foreground: Color::Rgb(76, 79, 105),   // Dark text
-            muted: Color::Rgb(140, 143, 161),      // Gray
-            error: Color::Rgb(210, 15, 57),        // Red
-            success: Color::Rgb(64, 160, 43),      // Green
-            warning: Color::Rgb(223, 142, 29),     // Orange
+            primary: Color::Rgb(30, 102, 245),
+            background: Color::Rgb(239, 241, 245),
+            foreground: Color::Rgb(76, 79, 105),
+            muted: Color::Rgb(140, 143, 161),
+            error: Color::Rgb(210, 15, 57),
+            success: Color::Rgb(64, 160, 43),
+            warning: Color::Rgb(223, 142, 29),
             button: ButtonTheme {
                 fg: Color::Rgb(76, 79, 105),
                 bg: Color::Rgb(204, 208, 218),

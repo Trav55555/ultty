@@ -225,7 +225,6 @@ fn a_burst_bigger_than_one_read_is_all_delivered_and_the_loop_then_sleeps() {
         switches1 - switches0
     );
 
-    // A 3000-byte burst, then a paste with lines and multi-byte text.
     let mut expected = "a".repeat(3000);
     expected.push_str("pasted line\rsecond line é€ and more\r");
     let mut input = expected.clone().into_bytes();
@@ -243,7 +242,6 @@ fn a_burst_bigger_than_one_read_is_all_delivered_and_the_loop_then_sleeps() {
     assert_eq!(received.len(), expected.len());
     assert_eq!(received, expected);
 
-    // All handled: the loop sleeps again instead of spinning on the fd.
     std::thread::sleep(Duration::from_millis(300));
     let (cpu0, switches0) = usage(pid);
     std::thread::sleep(Duration::from_secs(1));
@@ -259,7 +257,6 @@ fn a_burst_bigger_than_one_read_is_all_delivered_and_the_loop_then_sleeps() {
         switches1 - switches0
     );
 
-    // Ctrl+C quits.
     writer.write_all(b"\x03").unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

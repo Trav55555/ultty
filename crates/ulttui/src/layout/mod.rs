@@ -1,6 +1,5 @@
 //! Layout helpers.
 
-// Re-export container widgets as layout primitives
 pub use crate::widgets::{Column, Row, Stack};
 
 #[cfg(test)]
@@ -8,8 +7,6 @@ mod tests {
     use super::*;
     use crate::widgets::{Text, View};
     use ultty_protocol::{Dimension, Display, FlexDirection};
-
-    // --- Column layout ---
 
     #[test]
     fn column_new_is_flex_column() {
@@ -70,8 +67,6 @@ mod tests {
         assert!(s.contains("Column"));
     }
 
-    // --- Row layout ---
-
     #[test]
     fn row_new_is_flex_row() {
         let row = Row::new();
@@ -121,8 +116,6 @@ mod tests {
         assert!(s.contains("Row"));
     }
 
-    // --- Stack layout ---
-
     #[test]
     fn stack_new_fills_parent_constraints() {
         let stack = Stack::new();
@@ -164,8 +157,6 @@ mod tests {
         assert!(s.contains("Stack"));
     }
 
-    // --- Nested layouts ---
-
     #[test]
     fn nested_column_in_row() {
         let layout = Row::new()
@@ -189,8 +180,6 @@ mod tests {
             .child(Row::new().child(Text::new("fg")));
         assert_eq!(<Stack as View>::children_count(&layout), 2);
     }
-
-    // --- Layout components are not focusable ---
 
     #[test]
     fn column_not_focusable() {

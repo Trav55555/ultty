@@ -482,7 +482,6 @@ impl<A: Application> App<A> {
     ///
     /// Returns false when the runner should stop.
     fn run_tick(&mut self, rt: &Runtime) -> crate::Result<bool> {
-        // 1. Poll backend for events
         if let Some(event) = self
             .backend
             .poll_event()?
@@ -581,27 +580,22 @@ impl<A: Application> App<A> {
                 .report_action_result(request.request_id, error)?;
         }
 
-        // 3. Drain message queue (update → Cmd scheduling)
         if self.drain_messages(rt) {
             self.needs_render = true;
         }
 
-        // 4. Process subscriptions → enqueue messages
         if self.process_subscriptions(rt) {
             self.needs_render = true;
         }
 
-        // 5. Poll spawned tasks → enqueue messages
         if self.poll_spawned_tasks(rt) {
             self.needs_render = true;
         }
 
-        // 5b. Poll subscription streams → enqueue messages
         if self.poll_subscriptions() {
             self.needs_render = true;
         }
 
-        // 6. Drain message queue again (from subs/spawns)
         if self.drain_messages(rt) {
             self.needs_render = true;
             // Those messages may have changed the subscriptions; register
@@ -617,7 +611,6 @@ impl<A: Application> App<A> {
             self.needs_render = true;
         }
 
-        // 7. Render view
         if self.needs_render {
             self.render()?;
             self.needs_render = false;
@@ -1727,7 +1720,6 @@ mod async_tests {
 
         runner.drain_messages(&rt);
 
-        // The five oldest (0..5) were dropped; processing starts at 5.
         assert_eq!(updates.lock().unwrap()[0], 5);
         assert_eq!(runner.msg_queue.len(), 10_000 - 100);
     }
@@ -1805,7 +1797,6 @@ mod async_tests {
         let far_past = now - Duration::from_secs(10);
         let (fired, next) = advance_timer(far_past, interval, now);
         assert!(fired);
-        // 100 periods were missed: skip to the latest one, fire exactly once.
         assert_eq!(next, far_past + interval * 100);
         assert!(next <= now);
         assert!(now - next < interval);
@@ -1848,7 +1839,6 @@ mod async_tests {
         assert!(runner.timers.contains_key(refresh_key));
         assert!(runner.timers.contains_key("every:100000000ns#0"));
 
-        // Pretend the refresh timer has been running for 59 s.
         let almost_due = Instant::now() - Duration::from_secs(59);
         runner.timers.get_mut(refresh_key).unwrap().last_tick = almost_due;
 
@@ -1932,18 +1922,15 @@ mod async_tests {
             std::thread::sleep(Duration::from_millis(5));
         }
 
-        // First tick after the failure schedules the retry instead of respawning.
         runner.process_subscriptions(&rt);
         assert_eq!(runner.stream_backoff["ws-sub"].failures, 1);
         assert!(runner.stream_backoff["ws-sub"].retry_at.is_some());
         assert!(runner.stream_subscription_handles["ws-sub"].is_finished());
 
-        // Ticks before retry_at leave everything untouched.
         runner.process_subscriptions(&rt);
         assert_eq!(runner.stream_backoff["ws-sub"].failures, 1);
         assert!(runner.stream_subscription_handles["ws-sub"].is_finished());
 
-        // Once the retry time has passed, a fresh task is spawned.
         runner.stream_backoff.get_mut("ws-sub").unwrap().retry_at =
             Some(Instant::now() - Duration::from_millis(1));
         runner.process_subscriptions(&rt);
@@ -2262,13 +2249,11 @@ mod async_tests {
         );
         runner.needs_render = false;
 
-        // Not yet expired: nothing to re-render.
         runner.active_toasts[0].1 = Instant::now() + Duration::from_secs(60);
         assert!(runner.run_tick(&rt).unwrap());
         assert_eq!(runner.active_toasts.len(), 1);
         assert_eq!(mock_render_count(&runner), 0);
 
-        // Expired: the tick drops it and re-renders without the overlay.
         runner.active_toasts[0].1 = Instant::now() - Duration::from_secs(1);
         assert!(runner.run_tick(&rt).unwrap());
         assert!(runner.active_toasts.is_empty());
@@ -2456,7 +2441,6 @@ mod async_tests {
             *keys.lock().unwrap(),
             vec![
                 (Key::Down, Some("a".to_string())),
-                // "/" moved focus to "b" and was used up.
                 (Key::Down, Some("b".to_string())),
                 // A focus target that is not focusable passes the key on.
                 (Key::Char('g'), Some("b".to_string())),
@@ -2499,9 +2483,7 @@ mod async_tests {
                 _ => None,
             })
             .collect();
-        // "/" jumped to the input; then j, o, i, n and "/" were typed into it.
         assert_eq!(typed, "join/");
-        // A chord with ctrl is still remapped inside the input.
         assert_eq!(keys.last(), Some(&(Key::Down, Some("search".to_string()))));
         let _ = std::fs::remove_file(path);
     }
@@ -2567,8 +2549,6 @@ mod async_tests {
             "{shown}"
         );
 
-        // ANSI: the root is drawn and restyled; the toast over it keeps its
-        // own colours.
         let app_cell = &buffer[(0, 1)];
         assert_eq!(app_cell.symbol(), "a");
         assert_eq!((app_cell.fg, app_cell.bg), (RColor::Red, RColor::Blue));

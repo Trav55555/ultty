@@ -272,7 +272,6 @@ mod tests {
 
     #[test]
     fn restore_terminal_is_idempotent_without_an_active_session() {
-        // Nothing was enabled, so both calls must be no-ops that succeed.
         restore_terminal().unwrap();
         restore_terminal().unwrap();
     }
@@ -293,8 +292,6 @@ mod tests {
 
         let result = std::panic::catch_unwind(|| panic!("boom"));
         assert!(result.is_err());
-        // Our hook restored the terminal and then called the previous hook
-        // exactly once (the second install was a no-op).
         assert_eq!(previous_calls.load(Ordering::SeqCst), 1);
         let _ = std::panic::take_hook();
     }

@@ -180,7 +180,6 @@ impl MockBackend {
 
     pub fn poll_event(&mut self) -> crate::Result<Option<Event>> {
         self.polls.fetch_add(1, Ordering::SeqCst);
-        // Check for injected error
         if let Some(err) = self.pending_error.take() {
             return Err(crate::Error::Mock(err));
         }

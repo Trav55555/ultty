@@ -474,11 +474,9 @@ mod tests {
         assert_eq!(native.spans[3].text, "      z");
     }
 
-    // A minimal test widget with all defaults
     struct EmptyView;
     impl View for EmptyView {}
 
-    // A widget that overrides some defaults
     struct CustomView;
     impl View for CustomView {
         fn constraints(&self) -> ultty_protocol::Constraints {
@@ -496,8 +494,6 @@ mod tests {
             3
         }
     }
-
-    // --- View trait defaults ---
 
     #[test]
     fn default_constraints() {
@@ -559,8 +555,6 @@ mod tests {
         assert!(result.unwrap().is_none());
     }
 
-    // --- View impl for &T ---
-
     #[test]
     fn ref_view_delegates_constraints() {
         let v = CustomView;
@@ -608,8 +602,6 @@ mod tests {
         assert!(!<&EmptyView as View>::is_focusable(&r));
     }
 
-    // --- FocusAction ---
-
     #[test]
     fn focus_action_consumed() {
         let a = FocusAction::Consumed;
@@ -627,8 +619,6 @@ mod tests {
         let a = FocusAction::Previous;
         assert!(matches!(a, FocusAction::Previous));
     }
-
-    // --- Text widget through View ---
 
     #[test]
     fn text_content_via_view() {
@@ -681,8 +671,6 @@ mod tests {
         assert_eq!(t.content(), "owned");
     }
 
-    // --- RichText through View ---
-
     #[test]
     fn rich_text_empty() {
         let rt = RichText::new();
@@ -713,8 +701,6 @@ mod tests {
         assert!(!rt.is_focusable());
     }
 
-    // --- TextInput through View ---
-
     #[test]
     fn text_input_default() {
         let input = TextInput::new();
@@ -727,13 +713,12 @@ mod tests {
     fn text_input_with_value() {
         let input = TextInput::new().value("hello");
         assert_eq!(input.current_value(), "hello");
-        assert_eq!(input.cursor_position(), 5); // cursor at end
+        assert_eq!(input.cursor_position(), 5);
     }
 
     #[test]
     fn text_input_with_placeholder() {
         let input = TextInput::new().placeholder("Enter text...");
-        // Placeholder does not affect value
         assert_eq!(input.current_value(), "");
     }
 

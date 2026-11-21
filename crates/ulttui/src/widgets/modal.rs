@@ -195,9 +195,7 @@ impl View for Modal {
 
         match index {
             0 => {
-                // Body text or body_view
                 if let Some(ref body_view) = self.body_view {
-                    // Create container with body_view's constraints/style
                     send_message(&AppMessage::CreateRegion {
                         id: region_id,
                         parent,
@@ -205,12 +203,10 @@ impl View for Modal {
                         constraints: body_view.constraints(),
                         style: body_view.style(),
                     })?;
-                    // Render body_view's children into the container
                     for i in 0..body_view.children_count() {
                         body_view.render_child_native(i, send_message, region_id, next_id)?;
                     }
                 } else {
-                    // Existing text body behavior
                     send_message(&AppMessage::CreateRegion {
                         id: region_id,
                         parent,
@@ -228,7 +224,6 @@ impl View for Modal {
                 }
             }
             1 => {
-                // Button row
                 send_message(&AppMessage::CreateRegion {
                     id: region_id,
                     parent,
@@ -290,14 +285,12 @@ impl View for Modal {
             return;
         }
 
-        // Center the modal in the available area
         let modal_width = (self.width as u16).min(area.width.saturating_sub(4));
         let modal_height = 10u16.min(area.height.saturating_sub(4));
         let x = area.x + (area.width.saturating_sub(modal_width)) / 2;
         let y = area.y + (area.height.saturating_sub(modal_height)) / 2;
         let modal_area = Rect::new(x, y, modal_width, modal_height);
 
-        // Clear the background
         frame.render_widget(Clear, modal_area);
 
         let theme = Theme::current();
@@ -309,7 +302,6 @@ impl View for Modal {
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
 
-        // Body text or body_view
         if inner.height > 2 {
             let body_area = Rect::new(
                 inner.x,
@@ -325,7 +317,6 @@ impl View for Modal {
             }
         }
 
-        // Buttons at bottom
         if inner.height >= 1 {
             let btn_y = inner.y + inner.height.saturating_sub(1);
             let mut btn_x = inner.x;
@@ -412,10 +403,10 @@ mod tests {
         modal.select_next_button();
         assert_eq!(modal.selected_button_index(), 2);
         modal.select_next_button();
-        assert_eq!(modal.selected_button_index(), 0); // wraps
+        assert_eq!(modal.selected_button_index(), 0);
 
         modal.select_prev_button();
-        assert_eq!(modal.selected_button_index(), 2); // wraps back
+        assert_eq!(modal.selected_button_index(), 2);
     }
 
     #[test]
@@ -433,8 +424,6 @@ mod tests {
         let modal = Modal::new().buttons(vec!["Yes", "No"]);
         assert_eq!(modal.selected_button_label(), Some("Yes"));
     }
-
-    // --- New tests below ---
 
     #[test]
     fn modal_default_values() {
@@ -468,7 +457,6 @@ mod tests {
     #[test]
     fn modal_empty_buttons_navigation() {
         let mut modal = Modal::new().buttons(Vec::<String>::new());
-        // Should not panic on empty buttons
         modal.select_next_button();
         assert_eq!(modal.selected_button_index(), 0);
         modal.select_prev_button();
@@ -571,7 +559,7 @@ mod tests {
     #[test]
     fn modal_on_key_left_selects_prev() {
         let mut modal = Modal::new().buttons(vec!["A", "B", "C"]);
-        modal.select_next_button(); // go to 1
+        modal.select_next_button();
         let result = modal.on_key(&key(Key::Left));
         assert!(matches!(result, Some(FocusAction::Consumed)));
         assert_eq!(modal.selected_button_index(), 0);
@@ -580,7 +568,7 @@ mod tests {
     #[test]
     fn modal_on_key_up_selects_prev() {
         let mut modal = Modal::new().buttons(vec!["A", "B", "C"]);
-        modal.select_next_button(); // go to 1
+        modal.select_next_button();
         let result = modal.on_key(&key(Key::Up));
         assert!(matches!(result, Some(FocusAction::Consumed)));
         assert_eq!(modal.selected_button_index(), 0);
@@ -589,7 +577,7 @@ mod tests {
     #[test]
     fn modal_on_key_h_selects_prev() {
         let mut modal = Modal::new().buttons(vec!["A", "B"]);
-        modal.select_next_button(); // go to 1
+        modal.select_next_button();
         let result = modal.on_key(&key(Key::Char('h')));
         assert!(matches!(result, Some(FocusAction::Consumed)));
         assert_eq!(modal.selected_button_index(), 0);

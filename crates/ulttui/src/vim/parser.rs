@@ -21,10 +21,10 @@ pub struct KeyParser {
 
 #[derive(Debug, Clone, Copy)]
 enum FindType {
-    Find,     // f
-    FindBack, // F
-    Till,     // t
-    TillBack, // T
+    Find,
+    FindBack,
+    Till,
+    TillBack,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +47,6 @@ impl KeyParser {
         key: &Key,
         modifiers: Modifiers,
     ) -> Option<ParseResult> {
-        // Handle pending find character
         if let Some(find_type) = self.pending_find.take() {
             if matches!(key, Key::Escape) {
                 state.reset_to_normal();
@@ -76,13 +75,11 @@ impl KeyParser {
             return self.parse_text_object(state, scope, key, modifiers);
         }
 
-        // Handle pending 'g' commands
         if self.pending_g {
             self.pending_g = false;
             return self.parse_g_command(state, key, modifiers);
         }
 
-        // Handle pending 'z' commands
         if self.pending_z {
             self.pending_z = false;
             return self.parse_z_command(state, key);
@@ -104,7 +101,6 @@ impl KeyParser {
         key: &Key,
         modifiers: Modifiers,
     ) -> Option<ParseResult> {
-        // Handle counts (digits, but not 0 at start)
         if let Key::Char(c @ '1'..='9') = key {
             state.add_count_digit(*c as u8 - b'0');
             return Some(ParseResult::Pending);
@@ -114,11 +110,9 @@ impl KeyParser {
                 state.add_count_digit(0);
                 return Some(ParseResult::Pending);
             }
-            // 0 without count = line start
             return Some(self.complete_motion(state, VimMotion::LineStart));
         }
 
-        // Handle operators
         if !state.has_pending_operator() {
             match key {
                 Key::Char('d') if !modifiers.ctrl() => {
@@ -145,7 +139,6 @@ impl KeyParser {
             }
         }
 
-        // Handle doubled operators (dd, yy, cc, >>, <<)
         if state.has_pending_operator() {
             let op = state.pending_operator.unwrap();
             let doubled = matches!(
@@ -168,9 +161,7 @@ impl KeyParser {
             }
         }
 
-        // Motions
         match key {
-            // Basic motions
             Key::Char('h') | Key::Left => {
                 return Some(self.complete_motion(state, VimMotion::Left))
             }
@@ -198,7 +189,6 @@ impl KeyParser {
             Key::PageDown => return Some(self.complete_motion(state, VimMotion::PageDown)),
             Key::PageUp => return Some(self.complete_motion(state, VimMotion::PageUp)),
 
-            // Word motions
             Key::Char('w') => return Some(self.complete_motion(state, VimMotion::Word)),
             Key::Char('W') => return Some(self.complete_motion(state, VimMotion::WordBig)),
             Key::Char('e') => return Some(self.complete_motion(state, VimMotion::WordEnd)),
@@ -206,7 +196,6 @@ impl KeyParser {
             Key::Char('b') => return Some(self.complete_motion(state, VimMotion::WordBack)),
             Key::Char('B') => return Some(self.complete_motion(state, VimMotion::WordBackBig)),
 
-            // Line motions
             Key::Char('^') => {
                 return Some(self.complete_motion(state, VimMotion::LineFirstNonBlank))
             }
@@ -215,7 +204,6 @@ impl KeyParser {
             }
             Key::Home => return Some(self.complete_motion(state, VimMotion::LineStart)),
 
-            // Document motions
             Key::Char('G') => {
                 let motion = if let Some(n) = state.take_count() {
                     VimMotion::Line(n)
@@ -225,7 +213,6 @@ impl KeyParser {
                 return Some(self.complete_motion(state, motion));
             }
 
-            // Screen motions
             Key::Char('H') => return Some(self.complete_motion(state, VimMotion::ScreenTop)),
             Key::Char('M') => return Some(self.complete_motion(state, VimMotion::ScreenMiddle)),
             Key::Char('L') => return Some(self.complete_motion(state, VimMotion::ScreenBottom)),
@@ -252,20 +239,16 @@ impl KeyParser {
                 return Some(self.complete_motion(state, VimMotion::RepeatFindReverse))
             }
 
-            // Search
             Key::Char('n') => return Some(self.complete_motion(state, VimMotion::SearchNext)),
             Key::Char('N') => return Some(self.complete_motion(state, VimMotion::SearchPrev)),
 
-            // Bracket matching
             Key::Char('%') => return Some(self.complete_motion(state, VimMotion::MatchBracket)),
 
-            // 'g' prefix commands
             Key::Char('g') => {
                 self.pending_g = true;
                 return Some(ParseResult::Pending);
             }
 
-            // 'z' prefix commands
             Key::Char('z') => {
                 self.pending_z = true;
                 return Some(ParseResult::Pending);
@@ -287,7 +270,6 @@ impl KeyParser {
                 return Some(ParseResult::Pending);
             }
 
-            // Insert mode entries
             Key::Char('i') => return Some(ParseResult::Action(VimAction::InsertAtCursor)),
             Key::Char('a') => return Some(ParseResult::Action(VimAction::InsertAfterCursor)),
             Key::Char('I') => return Some(ParseResult::Action(VimAction::InsertAtLineStart)),
@@ -295,7 +277,6 @@ impl KeyParser {
             Key::Char('o') => return Some(ParseResult::Action(VimAction::OpenLineBelow)),
             Key::Char('O') => return Some(ParseResult::Action(VimAction::OpenLineAbove)),
 
-            // Single character actions
             Key::Char('x') => return Some(ParseResult::Action(VimAction::DeleteChar)),
             Key::Char('X') => return Some(ParseResult::Action(VimAction::DeleteCharBefore)),
             Key::Char('J') => return Some(ParseResult::Action(VimAction::JoinLines)),
@@ -309,7 +290,6 @@ impl KeyParser {
             Key::Char('P') => return Some(ParseResult::Action(VimAction::PasteBefore)),
             Key::Char('.') => return Some(ParseResult::Action(VimAction::RepeatLastChange)),
 
-            // Visual mode
             Key::Char('v') if !modifiers.ctrl() => {
                 return Some(ParseResult::Action(VimAction::EnterVisual))
             }
@@ -318,7 +298,6 @@ impl KeyParser {
                 return Some(ParseResult::Action(VimAction::EnterVisualBlock))
             }
 
-            // Search/command
             Key::Char('/') => return Some(ParseResult::Action(VimAction::SearchForward)),
             Key::Char('?') => return Some(ParseResult::Action(VimAction::SearchBackward)),
             Key::Char(':') => return Some(ParseResult::Action(VimAction::CommandMode)),
@@ -420,7 +399,6 @@ impl KeyParser {
                 state.reset_to_normal();
                 Some(ParseResult::Action(VimAction::ExitToNormal))
             }
-            // Let all other keys pass through for text input
             _ => None,
         }
     }
@@ -431,13 +409,11 @@ impl KeyParser {
         key: &Key,
         modifiers: Modifiers,
     ) -> Option<ParseResult> {
-        // Most motions work the same in visual mode
         match key {
             Key::Escape => {
                 state.reset_to_normal();
                 Some(ParseResult::Action(VimAction::ExitToNormal))
             }
-            // Operators in visual mode apply to selection
             Key::Char('d') | Key::Char('x') => {
                 let cmd = VimCommand::operator(VimOperator::Delete, VimMotion::Right);
                 state.reset_to_normal();
@@ -453,7 +429,6 @@ impl KeyParser {
                 state.reset_to_normal();
                 Some(ParseResult::Command(cmd))
             }
-            // Switch visual modes
             Key::Char('v') if !modifiers.ctrl() => {
                 if state.mode == VimMode::Visual {
                     state.reset_to_normal();
@@ -472,7 +447,6 @@ impl KeyParser {
                     Some(ParseResult::ModeChange(VimMode::VisualLine))
                 }
             }
-            // Motions extend selection
             _ => self.parse_normal_mode(state, key, modifiers),
         }
     }
@@ -489,7 +463,6 @@ impl KeyParser {
                 Some(ParseResult::Action(VimAction::ExitToNormal))
             }
             Key::Enter => {
-                // Execute command
                 state.reset_to_normal();
                 Some(ParseResult::Action(VimAction::ExitToNormal))
             }

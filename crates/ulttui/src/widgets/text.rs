@@ -1633,7 +1633,6 @@ mod tests {
             BorderType::Thick
         );
 
-        // An input with no vim mode says none and is always inserting.
         let plain = TextInput::new().id("name").without_vim_mode();
         assert_eq!(<TextInput as View>::semantics(&plain).description, None);
         assert_eq!(
@@ -1642,7 +1641,6 @@ mod tests {
         );
         FocusManager::set_current(old);
 
-        // Not focused: the bar is there, in the background colour.
         let blurred = TextInput::new().id("other");
         let style = <TextInput as View>::style(&blurred);
         assert_eq!(style.border_color, style.bg);
@@ -1738,7 +1736,6 @@ mod tests {
         assert_eq!(end.cursor, Some(2));
         let accent = widget_of(&TextInput::new().id("name").value("ae\u{301}b").cursor(2));
         assert_eq!(accent.cursor, Some(2));
-        // Empty: the placeholder shows, the caret at its start.
         let empty = widget_of(&TextInput::new().id("name").placeholder("Name"));
         assert_eq!(
             (
@@ -1748,7 +1745,6 @@ mod tests {
             ),
             ("", "Name", Some(0))
         );
-        // Not focused: no caret.
         let blurred = widget_of(&TextInput::new().id("other").value("hi"));
         assert_eq!((blurred.value.as_str(), blurred.cursor), ("hi", None));
         let secret = widget_of(&TextInput::new().id("name").password().value("pw"));

@@ -115,7 +115,6 @@ pub fn apply(value: &str, cursor: usize, op: &EditOp) -> (String, usize) {
         }
         at
     };
-    // Remove graphemes `from..to` and leave the cursor at `from`.
     let cut = |from: usize, to: usize| {
         let text: String = graphemes[..from]
             .iter()

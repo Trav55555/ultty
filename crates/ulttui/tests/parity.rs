@@ -95,11 +95,9 @@ fn twenty_line_scrollview() -> ScrollView {
 fn scrollview_offset_scrolls_ansi_and_emits_native_scroll() {
     let rendered = render_both(&twenty_line_scrollview(), 20, 7, None);
 
-    // ANSI: rows inside the border show the window starting at line 10.
     assert!(row_text(&rendered.ansi, 1).starts_with("│Line 10"));
     assert!(row_text(&rendered.ansi, 5).starts_with("│Line 14"));
 
-    // Native: the scroll view region (id 1) carries the same offset.
     assert_eq!(
         scroll_messages(&rendered.native),
         vec![(RegionId::new(1), 0.0, 10.0)]
@@ -120,7 +118,6 @@ fn section_wrapping_scrollview_still_emits_native_scroll() {
         AppMessage::CreateRegion { id, parent, .. } if *id == scroll_region && *parent == RegionId::new(1)
     )));
 
-    // ANSI: title row, then the scrolled window.
     assert!(row_text(&rendered.ansi, 0).contains("Log"));
     assert!(row_text(&rendered.ansi, 2).starts_with("│Line 10"));
 }
@@ -189,7 +186,6 @@ fn focus_registration_and_focused_button_style_match_in_both_modes() {
     assert_eq!(button_style.fg, Some(theme.button.focused_fg));
     assert_eq!(button_style.bg, Some(theme.button.focused_bg));
 
-    // ANSI: the button's cells carry the same focused colors.
     let cell = &rendered.ansi[(0, 1)];
     assert_eq!(cell.symbol(), "[");
     assert_eq!(cell.fg, to_ratatui_color(theme.button.focused_fg));
@@ -212,7 +208,6 @@ fn loading_state_pinned_frame_matches_in_both_modes() {
         }] if spinner.label.as_deref() == Some("Loading") && style.fg == Some(theme.primary)
     ));
 
-    // ANSI: frame 3 of the braille cycle plus the label, in theme.primary.
     assert_eq!(row_text(&rendered.ansi, 0), "⠸ Loading");
     assert_eq!(rendered.ansi[(0, 0)].fg, to_ratatui_color(theme.primary));
     assert_ne!(rendered.ansi[(0, 0)].fg, RColor::Reset);

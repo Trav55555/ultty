@@ -591,18 +591,15 @@ mod tests {
             overrides.remap(&key_event(Key::Char('f'), true, None), false),
             Some(Remapped::Focus(id)) if id == "search"
         ));
-        // nil falls through to [keys].
         let Some(Remapped::Key(up)) =
             overrides.remap(&key_event(Key::Char('k'), false, None), false)
         else {
             panic!("k falls through to TOML");
         };
         assert_eq!(up.key, Key::Up);
-        // A bad answer is logged and falls through too.
         assert!(overrides
             .remap(&key_event(Key::Char('x'), false, None), false)
             .is_none());
-        // Characters typed into an input reach neither.
         assert!(overrides
             .remap(&key_event(Key::Char('j'), false, Some("search")), true)
             .is_none());
@@ -765,7 +762,6 @@ mod tests {
 
     #[test]
     fn metamethods_in_returned_values_cannot_run_without_a_time_limit() {
-        // A key with a looping __tostring, in a widget hook's answer...
         let overrides = luau(&format!(
             "return {{ widget = function() return {{ [{LOOPING_TOSTRING}] = 'red' }} end }}"
         ));
@@ -776,7 +772,6 @@ mod tests {
         assert_eq!(shown[0].0, "A", "the bad answer is ignored");
         assert!(started.elapsed() < Duration::from_millis(500));
 
-        // ...in the hooks table itself...
         let started = Instant::now();
         let error = Overrides::parse_luau(
             &format!("return {{ [{LOOPING_TOSTRING}] = function() end }}"),
@@ -786,7 +781,6 @@ mod tests {
         assert!(error.contains("field names must be strings"), "{error}");
         assert!(started.elapsed() < Duration::from_millis(500));
 
-        // ...and as the value a hook raises as its error.
         let overrides = luau(&format!(
             "return {{ widget = function() error({LOOPING_TOSTRING}) end, key = function() error({LOOPING_TOSTRING}) end }}"
         ));

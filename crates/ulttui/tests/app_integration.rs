@@ -11,8 +11,6 @@ use ulttui::cmd::{Cmd, Sub};
 use ulttui::event::{Event, Key, KeyEvent, Modifiers};
 use ulttui::widgets::{Button, Column, Text, View};
 
-// --- Simple counter app for testing ---
-
 struct TestCounter {
     count: i32,
     shared: Arc<Mutex<i32>>,
@@ -83,7 +81,6 @@ impl Application for SpawnApp {
             SpawnMsg::Start => {
                 let shared = Arc::clone(&self.shared);
                 Cmd::spawn(async move {
-                    // Yield to ensure the task is scheduled
                     tokio::task::yield_now().await;
                     let _signal = DropSignal { shared };
                     SpawnMsg::Done(42)
@@ -133,8 +130,6 @@ fn make_tab(shift: bool) -> Option<Event> {
         focused_id: None,
     }))
 }
-
-// --- Tests ---
 
 #[test]
 fn event_loop_processes_key_events() {
@@ -197,8 +192,6 @@ fn tab_navigation_cycles_focus_across_registered_widgets() {
     let runner = App::new_with_backend(app, Backend::Mock(mock));
     runner.run().unwrap();
 
-    // The first render focuses "first"; each Tab (left unhandled by the app)
-    // moves focus and the next key event reports the new focused widget.
     let seen = focused_ids.lock().unwrap();
     assert_eq!(
         *seen,
@@ -225,8 +218,6 @@ fn cmd_spawn_executes() {
     let value = shared.lock().expect("spawn lock");
     assert_eq!(*value, Some(42));
 }
-
-// --- Waking the event loop ---
 
 /// Counts ticks of an optional timer and quits on `Quit` or after
 /// `quit_after_ticks` ticks.

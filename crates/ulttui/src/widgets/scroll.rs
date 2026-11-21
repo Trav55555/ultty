@@ -590,8 +590,6 @@ mod tests {
         assert!(scroll.scroll_y > 0.0);
     }
 
-    // --- New tests below ---
-
     #[test]
     fn scroll_default_values() {
         let scroll = ScrollView::default();
@@ -715,7 +713,7 @@ mod tests {
         scroll.set_viewport_height(100.0);
 
         scroll.scroll_to(1000.0);
-        assert_eq!(scroll.scroll_y, 400.0); // max is content - viewport = 400
+        assert_eq!(scroll.scroll_y, 400.0);
     }
 
     #[test]
@@ -735,7 +733,7 @@ mod tests {
         scroll.set_viewport_height(100.0);
 
         scroll.scroll_to(100.0);
-        assert_eq!(scroll.scroll_y, 0.0); // max is 0 since content < viewport
+        assert_eq!(scroll.scroll_y, 0.0);
     }
 
     #[test]
@@ -824,7 +822,7 @@ mod tests {
         scroll.set_viewport_height(100.0);
 
         scroll.scroll_lines(2);
-        assert_eq!(scroll.scroll_y, 2.0); // 2 * 1.0
+        assert_eq!(scroll.scroll_y, 2.0);
     }
 
     #[test]
@@ -835,7 +833,7 @@ mod tests {
 
         scroll.scroll_to(100.0);
         scroll.scroll_lines(-3);
-        assert_eq!(scroll.scroll_y, 97.0); // 100 - 3*1.0 = 97
+        assert_eq!(scroll.scroll_y, 97.0);
     }
 
     #[test]
@@ -845,7 +843,7 @@ mod tests {
         scroll.set_viewport_height(100.0);
 
         scroll.scroll_to_line(5);
-        assert_eq!(scroll.scroll_y, 5.0); // 5 * 1.0
+        assert_eq!(scroll.scroll_y, 5.0);
     }
 
     #[test]
@@ -855,7 +853,6 @@ mod tests {
         scroll.set_viewport_height(100.0);
 
         scroll.center_on_line(10);
-        // 10 * 1.0 - 100.0/2 = 10 - 50 = -40, clamped to 0
         assert_eq!(scroll.scroll_y, 0.0);
     }
 
@@ -866,7 +863,6 @@ mod tests {
         scroll.set_viewport_height(100.0);
 
         scroll.center_on_line(0);
-        // 0 - 50 = -50, clamped to 0
         assert_eq!(scroll.scroll_y, 0.0);
     }
 
@@ -899,7 +895,7 @@ mod tests {
         assert_eq!(scroll.search.current, 1);
 
         scroll.goto_next_match();
-        assert_eq!(scroll.search.current, 0); // wraps
+        assert_eq!(scroll.search.current, 0);
     }
 
     #[test]
@@ -914,7 +910,7 @@ mod tests {
 
         assert_eq!(scroll.search.current, 0);
         scroll.goto_prev_match();
-        assert_eq!(scroll.search.current, 1); // wraps back
+        assert_eq!(scroll.search.current, 1);
 
         scroll.goto_prev_match();
         assert_eq!(scroll.search.current, 0);
@@ -924,7 +920,7 @@ mod tests {
     fn scroll_search_next_empty_noop() {
         let mut scroll = ScrollView::new();
         scroll.search("nothing");
-        scroll.goto_next_match(); // should not panic
+        scroll.goto_next_match();
         assert_eq!(scroll.search.current, 0);
     }
 
@@ -932,7 +928,7 @@ mod tests {
     fn scroll_search_prev_empty_noop() {
         let mut scroll = ScrollView::new();
         scroll.search("nothing");
-        scroll.goto_prev_match(); // should not panic
+        scroll.goto_prev_match();
         assert_eq!(scroll.search.current, 0);
     }
 
@@ -946,7 +942,6 @@ mod tests {
         scroll.add_search_match(50);
 
         scroll.goto_next_match();
-        // centers on line 50: 50*1.0 - 50 = 0, clamped to 0
         assert_eq!(scroll.scroll_y, 0.0);
     }
 
@@ -980,7 +975,7 @@ mod tests {
         let scroll = ScrollView::new();
         let content = <ScrollView as View>::content(&scroll);
         match content {
-            ultty_protocol::Content::Text(_) => {} // expected
+            ultty_protocol::Content::Text(_) => {}
             _ => panic!("Expected Text content when no child"),
         }
     }
@@ -1083,7 +1078,7 @@ mod tests {
 
         let result = scroll.on_key(&key_with_ctrl(Key::Char('d')));
         assert!(matches!(result, Some(FocusAction::Consumed)));
-        assert_eq!(scroll.scroll_y, 50.0); // half of viewport
+        assert_eq!(scroll.scroll_y, 50.0);
     }
 
     #[test]
@@ -1176,7 +1171,7 @@ mod tests {
         });
         let handled = scroll.on_event(&event);
         assert!(handled);
-        assert!(scroll.scroll_y < 200.0); // scrolled up by 3 lines
+        assert!(scroll.scroll_y < 200.0);
     }
 
     #[test]
@@ -1246,7 +1241,6 @@ mod tests {
         scroll.scroll_to(200.0);
 
         scroll.handle_vim_command(&VimCommand::motion_with_count(3, VimMotion::Up));
-        // 3 lines up: 200 - 3*1.0 = 197
         assert_eq!(scroll.scroll_y, 197.0);
     }
 
@@ -1257,7 +1251,6 @@ mod tests {
         scroll.set_viewport_height(100.0);
 
         scroll.handle_vim_command(&VimCommand::motion(VimMotion::Line(10)));
-        // scroll_to_line(10): 10 * 1.0 = 10, clamped to max 900
         assert_eq!(scroll.scroll_y, 10.0);
     }
 
@@ -1272,9 +1265,7 @@ mod tests {
         scroll.add_search_match(10);
         scroll.add_search_match(50);
 
-        // SearchPrev with forward=true calls goto_prev_match
         scroll.handle_vim_command(&VimCommand::motion(VimMotion::SearchPrev));
-        // goes to last match (wraps): line 50
         assert_eq!(scroll.search.current, 1);
     }
 
