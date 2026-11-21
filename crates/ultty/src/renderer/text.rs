@@ -1208,7 +1208,7 @@ impl TextRenderer {
                     }
 
                     let gx = (glyph_x + glyph_info.left).round();
-                    let gy = (y + (self.cell_height - glyph_info.top)).round();
+                    let gy = (y + run.line_y + physical.y as f32 - glyph_info.top).round();
 
                     Self::emit_glyph_quad(&mut vertices, &mut indices, gx, gy, &glyph_info, fg);
                 }
@@ -1348,7 +1348,7 @@ impl TextRenderer {
                     }
 
                     let gx = (glyph_x + glyph_info.left).round();
-                    let gy = (y + (self.cell_height - glyph_info.top)).round();
+                    let gy = (y + run.line_y + physical.y as f32 - glyph_info.top).round();
 
                     Self::emit_glyph_quad(vertices, indices, gx, gy, &glyph_info, fg);
                 }
@@ -1935,8 +1935,7 @@ impl TextRenderer {
                 {
                     if glyph_info.width > 0.0 && glyph_info.height > 0.0 {
                         let gx = (x + glyph_info.left + physical.x as f32).round();
-                        let gy =
-                            (y + (self.cell_height - glyph_info.top) + physical.y as f32).round();
+                        let gy = (y + run.line_y + physical.y as f32 - glyph_info.top).round();
 
                         Self::emit_glyph_quad(
                             &mut vertices,
@@ -1985,8 +1984,8 @@ impl TextRenderer {
                     .get_glyph(&mut self.font_system, physical.cache_key)
                 {
                     if glyph_info.width > 0.0 && glyph_info.height > 0.0 {
-                        let gx = x + glyph_info.left + physical.x as f32;
-                        let gy = y + (self.cell_height - glyph_info.top) + physical.y as f32;
+                        let gx = (x + glyph_info.left + physical.x as f32).round();
+                        let gy = (y + run.line_y + physical.y as f32 - glyph_info.top).round();
 
                         Self::emit_glyph_quad(vertices, indices, gx, gy, &glyph_info, color);
                     }
@@ -2260,6 +2259,60 @@ mod tests {
         assert_matching_glyphs(text);
         text.set_font_size(14.0);
         assert_matching_glyphs(text);
+    }
+
+    #[test]
+    fn test_native_text_matches_grid_baseline_for_underscores() {
+        let Ok(mut renderer) = pollster::block_on(super::super::Renderer::new_headless(400, 200))
+        else {
+            eprintln!("no GPU adapter; skipped");
+            return;
+        };
+        let text = &mut renderer.text_renderer;
+        let color = Rgba::new(1.0, 1.0, 1.0, 1.0);
+        let y = 24.0;
+
+        for size in [11.0, 14.0] {
+            text.set_font_size(size);
+
+            let mut grid_verts = Vec::new();
+            let mut grid_idxs = Vec::new();
+            text.append_cell_text(
+                "ascii_tabs",
+                0.0,
+                y,
+                20,
+                |_| color,
+                &mut grid_verts,
+                &mut grid_idxs,
+            );
+            let grid_ys: Vec<f32> = grid_verts.iter().map(|v| v.position[1]).collect();
+            assert_eq!(
+                grid_verts.len(),
+                10 * 4,
+                "every glyph in ascii_tabs must emit at {size}px"
+            );
+
+            let (styled, _, _) =
+                text.build_styled_text_vertices("ascii_tabs", 0.0, y, color, false, false);
+            let (cells, _, _) =
+                text.build_cell_text_vertices("ascii_tabs", 0.0, y, color, false, false);
+            let (simple, _) = text.build_simple_text_vertices("ascii_tabs", 0.0, y, color);
+            let (label, _) = text.build_label_vertices("ascii_tabs", 0.0, y, 400.0, color);
+
+            for (name, verts) in [
+                ("styled", &styled),
+                ("cell", &cells),
+                ("simple", &simple),
+                ("label", &label),
+            ] {
+                let ys: Vec<f32> = verts.iter().map(|v| v.position[1]).collect();
+                assert_eq!(
+                    ys, grid_ys,
+                    "{name} text baseline must match grid text at {size}px"
+                );
+            }
+        }
     }
 
     #[test]

@@ -145,6 +145,8 @@ fn push_primitive(order: &mut Vec<NativePrimitive>, primitive: NativePrimitive) 
 fn append_clipped_glyphs(
     verts: &[Vertex],
     idxs: &[u32],
+    row_y: f32,
+    cell_h: f32,
     clip_min_x: f32,
     clip_min_y: f32,
     clip_max_x: f32,
@@ -152,20 +154,18 @@ fn append_clipped_glyphs(
     out_verts: &mut Vec<Vertex>,
     out_idxs: &mut Vec<u32>,
 ) {
+    if row_y + cell_h <= clip_min_y || row_y >= clip_max_y {
+        return;
+    }
+
     for quad in idxs.as_chunks::<6>().0 {
         let first = quad[0] as usize;
         let v0 = &verts[first];
         let v2 = &verts[first + 2];
         let glyph_left = v0.position[0];
-        let glyph_top = v0.position[1];
         let glyph_right = v2.position[0];
-        let glyph_bottom = v2.position[1];
 
-        if glyph_right <= clip_min_x
-            || glyph_left >= clip_max_x
-            || glyph_bottom <= clip_min_y
-            || glyph_top >= clip_max_y
-        {
+        if glyph_right <= clip_min_x || glyph_left >= clip_max_x {
             continue;
         }
 
@@ -656,6 +656,8 @@ impl Renderer {
                             append_clipped_glyphs(
                                 &verts,
                                 &idxs,
+                                line_y,
+                                cell_h,
                                 clip_min_x,
                                 clip_min_y,
                                 clip_max_x,
@@ -694,6 +696,8 @@ impl Renderer {
                             append_clipped_glyphs(
                                 &verts,
                                 &idxs,
+                                cursor_y,
+                                cell_h,
                                 clip_min_x,
                                 clip_min_y,
                                 clip_max_x,
@@ -754,6 +758,8 @@ impl Renderer {
                             append_clipped_glyphs(
                                 &verts,
                                 &idxs,
+                                span_y,
+                                cell_h,
                                 clip_min_x,
                                 clip_min_y,
                                 clip_max_x,
@@ -807,6 +813,8 @@ impl Renderer {
                                 append_clipped_glyphs(
                                     &verts,
                                     &idxs,
+                                    span_y,
+                                    cell_h,
                                     clip_min_x,
                                     clip_min_y,
                                     clip_max_x,
@@ -1050,7 +1058,57 @@ mod tests {
 
 #[cfg(test)]
 mod scissor_tests {
-    use super::{scissor_for, selectable_chunk_end, selectable_spans};
+    use super::{append_clipped_glyphs, scissor_for, selectable_chunk_end, selectable_spans};
+    use crate::renderer::Vertex;
+
+    fn glyph_quad(left: f32, top: f32, right: f32, bottom: f32) -> (Vec<Vertex>, Vec<u32>) {
+        let v = |x, y| Vertex {
+            position: [x, y],
+            tex_coord: [0.0, 0.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+            is_color: 0,
+        };
+        (
+            vec![
+                v(left, top),
+                v(right, top),
+                v(right, bottom),
+                v(left, bottom),
+            ],
+            vec![0, 1, 2, 0, 2, 3],
+        )
+    }
+
+    #[test]
+    fn append_clipped_glyphs_keeps_underscores_on_visible_row_and_drops_offscreen_rows() {
+        let (verts, idxs) = glyph_quad(10.0, 35.0, 17.0, 36.0);
+        let mut out_v = Vec::new();
+        let mut out_i = Vec::new();
+        append_clipped_glyphs(
+            &verts, &idxs, 24.0, 11.0, 0.0, 24.0, 100.0, 35.0, &mut out_v, &mut out_i,
+        );
+        assert_eq!(out_v.len(), 4);
+        assert_eq!(out_i.len(), 6);
+
+        out_v.clear();
+        out_i.clear();
+        append_clipped_glyphs(
+            &verts, &idxs, 35.0, 11.0, 0.0, 24.0, 100.0, 35.0, &mut out_v, &mut out_i,
+        );
+        assert!(out_v.is_empty());
+
+        let (desc_v, desc_i) = glyph_quad(10.0, 24.0, 17.0, 25.0);
+        append_clipped_glyphs(
+            &desc_v, &desc_i, 13.0, 11.0, 0.0, 24.0, 100.0, 35.0, &mut out_v, &mut out_i,
+        );
+        assert!(out_v.is_empty());
+
+        let (oob_x_v, oob_x_i) = glyph_quad(100.0, 26.0, 107.0, 34.0);
+        append_clipped_glyphs(
+            &oob_x_v, &oob_x_i, 24.0, 11.0, 0.0, 24.0, 100.0, 35.0, &mut out_v, &mut out_i,
+        );
+        assert!(out_v.is_empty());
+    }
 
     #[test]
     fn selectable_chunks_use_grapheme_cell_widths() {
