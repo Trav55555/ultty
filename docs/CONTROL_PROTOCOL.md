@@ -108,6 +108,16 @@ ulttyctl invoke-action 4 12 37 8 inc activate
 MCP exposes `ultty_invoke_action` with the same required identities. It never
 substitutes the focused pane for an omitted action target.
 
+## Reading text
+
+`get_text {include_scrollback, scrollback_lines?, target?}` (`ulttyctl text`,
+MCP `ultty_read_text`) returns a pane's text as it was written, not as a grid:
+rows the terminal soft-wrapped are joined into one line, a wide character
+appears once, and each line ends in a newline with its trailing blanks
+dropped. A line can therefore span several screen rows, so the output does
+not index by screen row. `get_selection` (`ulttyctl selection`) returns the
+selected text by the same rules; a block selection keeps one line per row.
+
 ## Inline images
 
 `images {target?}` lists the image placements on a pane's active screen,

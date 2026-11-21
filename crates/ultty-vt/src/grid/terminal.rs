@@ -713,12 +713,17 @@ impl Terminal {
         self.selection = None;
     }
 
-    /// Get selected text.
+    /// The selected text as it should reach the clipboard.
+    ///
+    /// Normal and Line selections follow [`Buffer::copy_text`]: soft-wrapped
+    /// rows join into one logical line and hard line ends lose their
+    /// trailing blanks. A Block selection is rectangular: one line per row,
+    /// each trimmed, with no wrap joining. A last row with nothing selected
+    /// on it adds no final newline.
     pub fn selected_text(&self) -> Option<String> {
         let sel = self.selection()?;
         let (start, end) = sel.ordered();
 
-        let mut text = String::new();
         let buffer = self.buffer();
         let dims = buffer.dimensions();
         let max_col = dims.cols as i32 - 1;
@@ -726,64 +731,60 @@ impl Terminal {
 
         let first_row = start.row.max(0);
         let last_row = end.row.min(max_row);
+        if first_row > last_row {
+            return Some(String::new());
+        }
+        let top = buffer.top_row();
+        let rows = top + first_row as usize..=top + last_row as usize;
 
-        match sel.mode {
+        let mut text = match sel.mode {
             SelectionMode::Normal => {
-                for row_idx in first_row..=last_row {
-                    if let Some(row) = buffer.visible_row(row_idx as u16) {
-                        let start_col = if row_idx == start.row {
-                            start.col.max(0)
-                        } else {
-                            0
-                        };
-                        let end_col = if row_idx == end.row {
-                            end.col.min(max_col)
-                        } else {
-                            max_col
-                        };
-
-                        if start_col <= end_col {
-                            text.push_str(&row.copy_text(start_col as u16, end_col as u16));
-                        }
-
-                        if row_idx < last_row {
-                            text.push('\n');
-                        }
-                    }
+                let first_col = if start.row == first_row {
+                    start.col.max(0)
+                } else {
+                    0
+                };
+                let last_col = if end.row == last_row {
+                    end.col.min(max_col)
+                } else {
+                    max_col
+                };
+                match u16::try_from(last_col) {
+                    Ok(last_col) => buffer.copy_text(rows, first_col as u16, last_col),
+                    Err(_) if first_row < last_row => buffer.copy_text(
+                        *rows.start()..=*rows.end() - 1,
+                        first_col as u16,
+                        u16::MAX,
+                    ),
+                    Err(_) => String::new(),
                 }
             }
-            SelectionMode::Line => {
-                for row_idx in first_row..=last_row {
-                    if let Some(row) = buffer.visible_row(row_idx as u16) {
-                        text.push_str(row.copy_text(0, row.width()).trim_end());
-                        if row_idx < last_row {
-                            text.push('\n');
-                        }
-                    }
-                }
-            }
+            SelectionMode::Line => buffer.copy_text(rows, 0, u16::MAX),
             SelectionMode::Block => {
                 let (left, right) = if start.col <= end.col {
                     (start.col.max(0), end.col.min(max_col))
                 } else {
                     (end.col.max(0), start.col.min(max_col))
                 };
-
-                for row_idx in first_row..=last_row {
-                    if let Some(row) = buffer.visible_row(row_idx as u16) {
+                let lines: Vec<String> = rows
+                    .filter_map(|index| buffer.row_at(index))
+                    .map(|row| {
                         if left <= right {
-                            text.push_str(&row.copy_text(left as u16, right as u16));
+                            row.copy_text(left as u16, right as u16)
+                                .trim_end()
+                                .to_string()
+                        } else {
+                            String::new()
                         }
-                        if row_idx < last_row {
-                            text.push('\n');
-                        }
-                    }
-                }
+                    })
+                    .collect();
+                lines.join("\n")
             }
+        };
+        if text.ends_with('\n') {
+            text.pop();
         }
-
-        let trimmed: Vec<&str> = text.lines().map(|l| l.trim_end()).collect();
-        Some(trimmed.join("\n"))
+        Some(text)
     }
 
     /// Check if a cell is within the selection.

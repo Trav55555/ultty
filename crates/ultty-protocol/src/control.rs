@@ -231,6 +231,8 @@ pub enum ControlRequest {
     },
 
     // === State Queries ===
+    /// The pane's text, one logical line per newline: soft-wrapped rows are
+    /// joined and trailing blanks dropped, so lines do not map to rows.
     GetText {
         include_scrollback: bool,
         scrollback_lines: Option<usize>,

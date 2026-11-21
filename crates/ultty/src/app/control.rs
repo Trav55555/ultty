@@ -2164,7 +2164,7 @@ mod tests {
     }
 
     fn lines(text: &str) -> Vec<&str> {
-        text.lines().map(str::trim_end).collect()
+        text.lines().collect()
     }
 
     /// A socket session whose peer is this process, so its group is ours,
@@ -2274,6 +2274,18 @@ mod tests {
     fn text_with_a_scrollback_limit_keeps_the_most_recent_lines() {
         let buffer = buffer_with_history();
         assert_eq!(lines(&buffer_text(&buffer, 1)), ["three", "four", "five"]);
+    }
+
+    #[test]
+    fn text_joins_soft_wrapped_rows_and_drops_padding() {
+        let mut terminal = ultty::grid::Terminal::new(ultty::grid::Dimensions::new(10, 6));
+        let mut parser = ultty::protocol::ansi::AnsiParser::new();
+        let mut handler = ultty::grid::TerminalHandler::new(&mut terminal);
+        let long = "日本語abcdefghijklmnopqrstuvwxyz";
+        parser.feed(format!("{long}\r\nab").as_bytes(), |action| {
+            handler.handle(action)
+        });
+        assert_eq!(buffer_text(terminal.buffer(), 0), format!("{long}\nab\n\n"));
     }
     use ultty_protocol::control::{ControlRequest, ControlResponse};
     use ultty_protocol::Key;

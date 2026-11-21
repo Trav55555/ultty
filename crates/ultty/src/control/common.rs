@@ -109,20 +109,21 @@ pub fn terminal_working_directory(
         .or_else(|| terminal.event_loop.child_working_directory())
 }
 
-/// The text of `buffer`: up to `history_lines` of the most recent scrollback,
-/// then the screen, one line per row. Each row has one char per column
-/// (wide-char spacers print as spaces) plus the extra codepoints of each
-/// grapheme. This ignores the viewport's scroll position.
+/// The text of `buffer`: up to `history_lines` of the most recent scrollback
+/// rows, then the screen, as the user wrote it (see
+/// [`crate::grid::Buffer::copy_text`]). Soft-wrapped rows join into one
+/// logical line, so a line may span several rows; wide characters appear
+/// once; each line ends in a newline with its trailing blanks dropped.
+/// Blank screen rows come out as empty lines. This ignores the viewport's
+/// scroll position.
 pub fn buffer_text(buffer: &crate::grid::Buffer, history_lines: usize) -> String {
     let history = buffer.history_len();
     let first = history - history.min(history_lines);
-    let mut text = String::new();
-    for index in first..buffer.total_lines() {
-        if let Some(row) = buffer.row_at(index) {
-            text.push_str(&row.text());
-        }
-        text.push('\n');
-    }
+    let Some(last) = buffer.total_lines().checked_sub(1) else {
+        return String::new();
+    };
+    let mut text = buffer.copy_text(first..=last, 0, u16::MAX);
+    text.push('\n');
     text
 }
 
