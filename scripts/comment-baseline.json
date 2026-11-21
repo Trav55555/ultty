@@ -182,7 +182,7 @@
  "crates/ultty/src/renderer/native_render/borders.rs": 5,
  "crates/ultty/src/renderer/native_render/cache.rs": 6,
  "crates/ultty/src/renderer/native_render/mod.rs": 16,
- "crates/ultty/src/renderer/native_render/widgets.rs": 15,
+ "crates/ultty/src/renderer/native_render/widgets.rs": 14,
  "crates/ultty/src/renderer/overlays.rs": 45,
  "crates/ultty/src/renderer/panes.rs": 38,
  "crates/ultty/src/renderer/pipeline.rs": 1,
