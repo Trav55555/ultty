@@ -86,6 +86,12 @@ pub(super) const CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 /// Width of the resize band just inside each window edge.
 const WINDOW_RESIZE_EDGE_BAND: f32 = 8.0;
 
+/// Maximum width of the resize band inside the left and right edges where
+/// they overlap the terminal cell grid, in logical pixels. Kept narrow (and
+/// further capped to a quarter of `cell_width`) so clicks in column 0 start
+/// text selection instead of resizing the window.
+const WINDOW_RESIZE_GRID_SIDE_BAND: f32 = 2.0;
+
 /// Resize band outside the window edge, for compositors that report
 /// pointer positions there.
 const WINDOW_RESIZE_OUTER_BAND: f32 = 8.0;
@@ -161,8 +167,9 @@ pub struct App {
     accessibility: Option<ultty::a11y::Adapter>,
     /// The GPU renderer and its surface, once the GPU is up; see `gpu`.
     renderer: gpu::RendererState,
-    /// Frames drawn on the CPU until the renderer arrives, when
-    /// `ULTTY_CPU_FIRST_FRAMES=1`; see `cpu_frames`.
+    /// Frames drawn on the CPU until the renderer arrives, when enabled by
+    /// `behavior.cpu_first_frames` or `ULTTY_CPU_FIRST_FRAMES`; see
+    /// `cpu_frames`.
     cpu_frames: Option<cpu_frames::CpuFrames>,
     /// Whether a frame has shown the shell's output yet (startup log).
     output_shown: bool,
@@ -340,7 +347,7 @@ impl App {
                 .is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)))
         };
         // Before the GPU's surface: see `cpu_frames`.
-        let mut cpu_frames = cpu_frames::enabled()
+        let mut cpu_frames = cpu_frames::enabled(config.behavior.cpu_first_frames)
             .then(|| {
                 cpu_frames::CpuFrames::new(event_loop.owned_display_handle(), Arc::clone(&window))
                     .inspect_err(|error| tracing::warn!("No CPU first frames: {error:#}"))
@@ -1323,12 +1330,15 @@ impl App {
         if window_should_use_square_corners(size, monitor_size, self.window.is_maximized()) {
             return None;
         }
+        let (cell_width, _) = self.renderer.cell_dimensions();
         resize_direction_at_window_edge(
             x,
             y,
             size.width as f32,
             size.height as f32,
             self.window.scale_factor() as f32,
+            self.tab_bar.content_top(),
+            cell_width,
         )
     }
 
@@ -1617,12 +1627,19 @@ fn near_scaled_dimension(value: u32, target: u32, divisor: u32) -> bool {
 
 /// The resize direction for a pointer at physical (x, y) in a window of
 /// physical size (width, height), or None away from the edges.
+///
+/// Below `grid_top`, the cell grid sits flush against the left edge (and
+/// within any fractional-cell slack of the right edge), so when
+/// `cell_width > 0` the interior left and right bands are narrowed to leave
+/// column 0 and the last column clickable for text selection.
 fn resize_direction_at_window_edge(
     x: f32,
     y: f32,
     width: f32,
     height: f32,
     scale: f32,
+    grid_top: f32,
+    cell_width: f32,
 ) -> Option<ResizeDirection> {
     if width <= 0.0 || height <= 0.0 {
         return None;
@@ -1642,26 +1659,39 @@ fn resize_direction_at_window_edge(
     let from_top = y;
     let from_bottom = height - y;
 
-    let on_edge = |d: f32| d <= band;
-    let near_corner = |a: f32, b: f32| {
-        (on_edge(a) && b <= arm) || (on_edge(b) && a <= arm) || (a <= square && b <= square)
+    let (left_band, right_band) = if y >= grid_top && cell_width > 0.0 {
+        let side = (WINDOW_RESIZE_GRID_SIDE_BAND * scale)
+            .min(cell_width * 0.25)
+            .max(1.0);
+        let right_slack = (width - (width / cell_width).floor() * cell_width).max(0.0);
+        (side, band.min(right_slack + side))
+    } else {
+        (band, band)
     };
 
-    if near_corner(from_left, from_top) {
+    let on_left = from_left <= left_band;
+    let on_right = from_right <= right_band;
+    let on_top = from_top <= band;
+    let on_bottom = from_bottom <= band;
+    let near_corner = |on_a: bool, a: f32, on_b: bool, b: f32| {
+        (on_a && b <= arm) || (on_b && a <= arm) || (a <= square && b <= square)
+    };
+
+    if near_corner(on_left, from_left, on_top, from_top) {
         Some(ResizeDirection::NorthWest)
-    } else if near_corner(from_right, from_top) {
+    } else if near_corner(on_right, from_right, on_top, from_top) {
         Some(ResizeDirection::NorthEast)
-    } else if near_corner(from_left, from_bottom) {
+    } else if near_corner(on_left, from_left, on_bottom, from_bottom) {
         Some(ResizeDirection::SouthWest)
-    } else if near_corner(from_right, from_bottom) {
+    } else if near_corner(on_right, from_right, on_bottom, from_bottom) {
         Some(ResizeDirection::SouthEast)
-    } else if on_edge(from_left) {
+    } else if on_left {
         Some(ResizeDirection::West)
-    } else if on_edge(from_right) {
+    } else if on_right {
         Some(ResizeDirection::East)
-    } else if on_edge(from_top) {
+    } else if on_top {
         Some(ResizeDirection::North)
-    } else if on_edge(from_bottom) {
+    } else if on_bottom {
         Some(ResizeDirection::South)
     } else {
         None
@@ -2064,7 +2094,17 @@ mod tests {
     }
 
     fn hit(x: f32, y: f32, scale: f32) -> Option<ResizeDirection> {
-        resize_direction_at_window_edge(x, y, 800.0, 600.0, scale)
+        resize_direction_at_window_edge(x, y, 800.0, 600.0, scale, 0.0, 0.0)
+    }
+
+    fn hit_grid(
+        x: f32,
+        y: f32,
+        scale: f32,
+        grid_top: f32,
+        cell_width: f32,
+    ) -> Option<ResizeDirection> {
+        resize_direction_at_window_edge(x, y, 800.0, 600.0, scale, grid_top, cell_width)
     }
 
     #[test]
@@ -2102,6 +2142,44 @@ mod tests {
         assert_eq!(hit(16.0, 300.0, 1.0), None);
         assert_eq!(hit(64.0, 8.0, 2.0), Some(ResizeDirection::NorthWest));
         assert_eq!(hit(28.0, 28.0, 2.0), Some(ResizeDirection::NorthWest));
+    }
+
+    #[test]
+    fn resize_side_band_leaves_column_zero_clickable_in_grid() {
+        assert_eq!(
+            hit_grid(0.0, 300.0, 1.0, 34.0, 7.0),
+            Some(ResizeDirection::West)
+        );
+        assert_eq!(
+            hit_grid(1.0, 300.0, 1.0, 34.0, 7.0),
+            Some(ResizeDirection::West)
+        );
+        assert_eq!(
+            hit_grid(-4.0, 300.0, 1.0, 34.0, 7.0),
+            Some(ResizeDirection::West)
+        );
+        assert_eq!(hit_grid(2.0, 300.0, 1.0, 34.0, 7.0), None);
+        assert_eq!(hit_grid(3.5, 300.0, 1.0, 34.0, 7.0), None);
+        assert_eq!(hit_grid(6.0, 300.0, 1.0, 34.0, 7.0), None);
+        assert_eq!(
+            hit_grid(8.0, 10.0, 1.0, 34.0, 7.0),
+            Some(ResizeDirection::NorthWest)
+        );
+        assert_eq!(hit_grid(794.5, 300.0, 1.0, 34.0, 7.0), None);
+        assert_eq!(
+            hit_grid(799.0, 300.0, 1.0, 34.0, 7.0),
+            Some(ResizeDirection::East)
+        );
+        assert_eq!(
+            hit_grid(3.0, 300.0, 2.0, 68.0, 14.0),
+            Some(ResizeDirection::West)
+        );
+        assert_eq!(hit_grid(7.0, 300.0, 2.0, 68.0, 14.0), None);
+        assert_eq!(
+            hit_grid(2.0, 595.0, 1.0, 34.0, 7.0),
+            Some(ResizeDirection::SouthWest)
+        );
+        assert_eq!(hit_grid(3.5, 575.0, 1.0, 34.0, 7.0), None);
     }
 
     #[test]
