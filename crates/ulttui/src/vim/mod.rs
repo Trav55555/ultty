@@ -6,9 +6,11 @@
 //! - `VimConfig` for customizing vim behavior
 
 mod parser;
+mod text_object;
 mod types;
 
 pub use parser::KeyParser;
+pub use text_object::resolve_text_object;
 pub use types::{VimAction, VimCommand, VimMode, VimMotion, VimOperator, VimRegister, VimState};
 
 use ultty_protocol::{Key, Modifiers};

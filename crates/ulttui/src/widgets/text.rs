@@ -708,9 +708,7 @@ impl TextInput {
         let (start, end) = clamp_range(start, end, chars.len());
         let deleted: String = chars[start..end].iter().collect();
         self.value = chars[..start].iter().chain(chars[end..].iter()).collect();
-        if self.cursor > start {
-            self.cursor = start;
-        }
+        self.cursor = start;
         deleted
     }
 
@@ -741,13 +739,26 @@ impl TextInput {
                 self.vim_state.mode = VimMode::Insert;
                 VimResult::ModeChanged(VimMode::Insert)
             }
-            VimOperator::Yank => VimResult::Handled,
+            VimOperator::Yank => {
+                self.cursor = start.min(self.value.chars().count());
+                VimResult::Handled
+            }
             VimOperator::Uppercase => {
                 self.map_range(start, end, |c| c.to_uppercase().collect());
                 VimResult::Handled
             }
             VimOperator::Lowercase => {
                 self.map_range(start, end, |c| c.to_lowercase().collect());
+                VimResult::Handled
+            }
+            VimOperator::SwapCase => {
+                self.map_range(start, end, |c| {
+                    if c.is_uppercase() {
+                        c.to_lowercase().collect()
+                    } else {
+                        c.to_uppercase().collect()
+                    }
+                });
                 VimResult::Handled
             }
             _ => VimResult::Ignored,
@@ -1192,6 +1203,23 @@ impl VimHandler for TextInput {
         let count = command.effective_count();
         let start_pos = self.cursor;
 
+        if command.motion.is_text_object() {
+            let chars: Vec<char> = self.value.chars().collect();
+            let Some((start, end)) =
+                crate::vim::resolve_text_object(&chars, self.cursor, &command.motion, count)
+            else {
+                return VimResult::Handled;
+            };
+            if command.operator != VimOperator::None {
+                return self.apply_operator(&command.operator, start, end);
+            }
+            if self.vim_state.mode.is_visual() {
+                self.selection_start = Some(start);
+                self.cursor = end;
+            }
+            return VimResult::Handled;
+        }
+
         self.move_cursor(&command.motion, count);
 
         if command.operator != VimOperator::None {
@@ -1428,6 +1456,91 @@ mod tests {
         assert_eq!(input.current_value(), "hello world", "pending operator");
         input.on_key(&key_event(Key::Char('w')));
         assert_eq!(input.current_value(), "world");
+    }
+
+    #[test]
+    fn normal_mode_text_objects_word_quotes_delimiters_and_invalid() {
+        let send = |input: &mut TextInput, keys: &str| {
+            for ch in keys.chars() {
+                input.on_key(&key_event(Key::Char(ch)));
+            }
+        };
+
+        let mut input = TextInput::new().value("hello world");
+        input.cursor = 1;
+        input.vim_state.mode = VimMode::Normal;
+        send(&mut input, "diw");
+        assert_eq!(input.current_value(), " world");
+        assert_eq!(input.vim_state.mode, VimMode::Normal);
+
+        let mut input = TextInput::new().value("hello world");
+        input.cursor = 1;
+        input.vim_state.mode = VimMode::Normal;
+        send(&mut input, "daw");
+        assert_eq!(input.current_value(), "world");
+
+        let mut input = TextInput::new().value("foo::bar baz");
+        input.cursor = 2;
+        input.vim_state.mode = VimMode::Normal;
+        send(&mut input, "diW");
+        assert_eq!(input.current_value(), " baz");
+
+        let mut input = TextInput::new().value("say \"hello\" world");
+        input.cursor = 0;
+        input.vim_state.mode = VimMode::Normal;
+        send(&mut input, "ci\"");
+        assert_eq!(input.current_value(), "say \"\" world");
+        assert_eq!(input.vim_state.mode, VimMode::Insert);
+        assert_eq!(input.cursor_position(), 5);
+        send(&mut input, "hi");
+        assert_eq!(input.current_value(), "say \"hi\" world");
+
+        let mut input = TextInput::new().value("fn((a + b) * c)");
+        input.cursor = 5;
+        input.vim_state.mode = VimMode::Normal;
+        send(&mut input, "da(");
+        assert_eq!(input.current_value(), "fn( * c)");
+
+        let mut input = TextInput::new().value("items[0] = {k: v}");
+        input.cursor = 6;
+        input.vim_state.mode = VimMode::Normal;
+        send(&mut input, "yi[");
+        assert_eq!(input.current_value(), "items[0] = {k: v}");
+        assert_eq!(input.cursor_position(), 6);
+
+        let mut input = TextInput::new().value("items[0] = {k: v}");
+        input.cursor = 13;
+        input.vim_state.mode = VimMode::Normal;
+        send(&mut input, "ca{");
+        assert_eq!(input.current_value(), "items[0] = ");
+        assert_eq!(input.vim_state.mode, VimMode::Insert);
+
+        let mut input = TextInput::new().value("hello world");
+        input.cursor = 1;
+        input.vim_state.mode = VimMode::Normal;
+        send(&mut input, "gUiw");
+        assert_eq!(input.current_value(), "HELLO world");
+
+        let mut input = TextInput::new().value("hello world");
+        input.cursor = 0;
+        input.vim_state.mode = VimMode::Normal;
+        send(&mut input, "diz");
+        assert_eq!(input.current_value(), "hello world");
+        assert!(!input.vim_state.has_pending_operator());
+        send(&mut input, "dw");
+        assert_eq!(input.current_value(), "world");
+
+        let mut input = TextInput::new().multiline().value("p1\n\np2");
+        input.cursor = 0;
+        input.vim_state.mode = VimMode::Normal;
+        send(&mut input, "dap");
+        assert_eq!(input.current_value(), "p2");
+
+        let mut input = TextInput::new().value("One. Two! Three?");
+        input.cursor = 6;
+        input.vim_state.mode = VimMode::Normal;
+        send(&mut input, "das");
+        assert_eq!(input.current_value(), "One. Three?");
     }
 
     #[test]
