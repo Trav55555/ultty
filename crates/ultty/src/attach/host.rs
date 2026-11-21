@@ -1,6 +1,7 @@
 //! Authoritative session operations, independent of viewer connections.
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use ultty_protocol::control::PaneStatus;
@@ -563,14 +564,29 @@ fn missing_pane() -> io::Error {
 /// Serve until an authenticated owner explicitly terminates the host.
 /// Connection loss and an empty runtime never terminate it.
 pub fn serve(
+    host: HostState,
+    server: Server,
+    authority: Authority,
+    control: super::control::HostControl,
+) -> io::Result<()> {
+    let shutdown = AtomicBool::new(false);
+    serve_until(host, server, authority, control, &shutdown)
+}
+
+/// Serve until an authenticated owner terminates the host or `shutdown` is set.
+pub fn serve_until(
     mut host: HostState,
     mut server: Server,
     mut authority: Authority,
     mut control: super::control::HostControl,
+    shutdown: &AtomicBool,
 ) -> io::Result<()> {
     server.write_admin_token(&authority.admin_token())?;
     let mut stopping = None;
     loop {
+        if shutdown.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let now = Instant::now();
         for client in authority.expire(now) {
             server.disconnect(client);

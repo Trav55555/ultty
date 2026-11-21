@@ -145,10 +145,13 @@ impl ControlServer {
     /// Listen on this process's own socket in the private control
     /// directory (see [`super::paths`]).
     pub fn new() -> io::Result<Self> {
-        Self::new_at(ControlEndpoint::for_pid(
-            &control_dir()?,
-            std::process::id(),
-        ))
+        Self::new_in(&control_dir()?)
+    }
+
+    /// Listen on this process's own socket inside `dir`, sweeping stale
+    /// control sockets and tokens left by dead instances first.
+    pub fn new_in(dir: &Path) -> io::Result<Self> {
+        Self::new_at(ControlEndpoint::for_pid(dir, std::process::id()))
     }
 
     /// Bind this process's local privileged control endpoint using an already
@@ -165,10 +168,16 @@ impl ControlServer {
     }
 
     fn new_at_with_owner(endpoint: ControlEndpoint, owner: OwnerRef) -> io::Result<Self> {
+        let should_sweep = endpoint.pid().is_some();
         let ControlEndpoint {
             socket: socket_path,
             token: token_path,
         } = endpoint;
+        if should_sweep {
+            if let Some(dir) = socket_path.parent() {
+                crate::platform::runtime_files::sweep_stale_control_files(dir);
+            }
+        }
         if socket_path.exists() {
             remove_stale_socket(&socket_path)?;
         }
@@ -1519,6 +1528,53 @@ mod tests {
 
         assert!(UnixStream::connect(first.socket_path()).is_ok());
         assert!(first.token_path().exists());
+    }
+
+    #[test]
+    fn startup_sweeps_stale_control_sockets_and_tokens_and_preserves_live_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let reaped = || {
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            child.wait().unwrap();
+            child.id()
+        };
+        let dead_pair = ControlEndpoint::for_pid(dir.path(), reaped());
+        drop(UnixListener::bind(&dead_pair.socket).unwrap());
+        fs::write(&dead_pair.token, "dead-pair").unwrap();
+
+        let dead_token_only = ControlEndpoint::for_pid(dir.path(), reaped());
+        fs::write(&dead_token_only.token, "orphan-token").unwrap();
+
+        let dead_socket_only = ControlEndpoint::for_pid(dir.path(), reaped());
+        drop(UnixListener::bind(&dead_socket_only.socket).unwrap());
+
+        let live = ControlEndpoint::for_pid(dir.path(), 1);
+        let _live_listener = UnixListener::bind(&live.socket).unwrap();
+        fs::write(&live.token, "live-token").unwrap();
+
+        let shared_token = dir.path().join("ultty-auth.token");
+        fs::write(&shared_token, "shared").unwrap();
+
+        let own = ControlEndpoint::for_pid(dir.path(), std::process::id());
+        fs::write(&own.token, "own-token").unwrap();
+
+        let server = ControlServer::new_in(dir.path()).unwrap();
+
+        assert!(!dead_pair.socket.exists());
+        assert!(!dead_pair.token.exists());
+        assert!(!dead_token_only.token.exists());
+        assert!(!dead_socket_only.socket.exists());
+        assert!(live.socket.exists());
+        assert!(live.token.exists());
+        assert!(shared_token.exists());
+        assert!(own.token.exists());
+        assert!(server.socket_path().exists());
+
+        let socket_path = server.socket_path().to_path_buf();
+        let token_path = server.token_path().to_path_buf();
+        drop(server);
+        assert!(!socket_path.exists());
+        assert!(!token_path.exists());
     }
 
     #[test]
