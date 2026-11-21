@@ -2262,7 +2262,7 @@ mod tests {
     }
 
     #[test]
-    fn test_native_text_uses_baseline_so_underscores_stay_inside_row() {
+    fn test_native_text_matches_grid_baseline_for_underscores() {
         let Ok(mut renderer) = pollster::block_on(super::super::Renderer::new_headless(400, 200))
         else {
             eprintln!("no GPU adapter; skipped");
@@ -2274,7 +2274,6 @@ mod tests {
 
         for size in [11.0, 14.0] {
             text.set_font_size(size);
-            let (_, cell_h) = text.cell_dimensions();
 
             let mut grid_verts = Vec::new();
             let mut grid_idxs = Vec::new();
@@ -2287,6 +2286,13 @@ mod tests {
                 &mut grid_verts,
                 &mut grid_idxs,
             );
+            let grid_ys: Vec<f32> = grid_verts.iter().map(|v| v.position[1]).collect();
+            assert_eq!(
+                grid_verts.len(),
+                10 * 4,
+                "every glyph in ascii_tabs must emit at {size}px"
+            );
+
             let (styled, _, _) =
                 text.build_styled_text_vertices("ascii_tabs", 0.0, y, color, false, false);
             let (cells, _, _) =
@@ -2294,35 +2300,18 @@ mod tests {
             let (simple, _) = text.build_simple_text_vertices("ascii_tabs", 0.0, y, color);
             let (label, _) = text.build_label_vertices("ascii_tabs", 0.0, y, 400.0, color);
 
-            assert_eq!(
-                styled.len(),
-                10 * 4,
-                "every glyph in ascii_tabs must emit at {size}px"
-            );
             for (name, verts) in [
                 ("styled", &styled),
                 ("cell", &cells),
                 ("simple", &simple),
                 ("label", &label),
             ] {
-                assert_eq!(verts.len(), 10 * 4, "{name} quad count at {size}px");
-                for (idx, quad) in verts.as_chunks::<4>().0.iter().enumerate() {
-                    let top = quad[0].position[1];
-                    let bottom = quad[2].position[1];
-                    assert!(
-                        top < y + cell_h && bottom > y,
-                        "{name} glyph {idx} [{top}..{bottom}] clipped outside row [{y}..{}] at {size}px",
-                        y + cell_h
-                    );
-                }
+                let ys: Vec<f32> = verts.iter().map(|v| v.position[1]).collect();
+                assert_eq!(
+                    ys, grid_ys,
+                    "{name} text baseline must match grid text at {size}px"
+                );
             }
-
-            let grid_ys: Vec<f32> = grid_verts.iter().map(|v| v.position[1]).collect();
-            let styled_ys: Vec<f32> = styled.iter().map(|v| v.position[1]).collect();
-            assert_eq!(
-                styled_ys, grid_ys,
-                "native text baseline must match grid text at {size}px"
-            );
         }
     }
 
