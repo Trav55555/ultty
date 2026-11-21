@@ -1073,6 +1073,12 @@ pub struct BehaviorConfig {
     /// falls back to all drivers if no matching GPU or ICD is present. Read
     /// at start only.
     pub narrow_vulkan_icd: bool,
+    /// Draw the first frames on the CPU via `softbuffer` while the GPU
+    /// renderer starts on a background thread, then hand over to the GPU
+    /// (ADR 0030). Defaults to `false`. `ULTTY_CPU_FIRST_FRAMES=1` forces it
+    /// on and `ULTTY_CPU_FIRST_FRAMES=0` forces it off for a single launch.
+    /// Read at start only.
+    pub cpu_first_frames: bool,
 }
 
 impl Default for BehaviorConfig {
@@ -1091,6 +1097,7 @@ impl Default for BehaviorConfig {
             inherit_working_directory: true,
             accessibility: true,
             narrow_vulkan_icd: true,
+            cpu_first_frames: false,
         }
     }
 }
@@ -1201,15 +1208,28 @@ impl BehaviorConfig {
     }
 
     /// Put back the settings a reload cannot apply (`accessibility`,
-    /// `narrow_vulkan_icd`) from `running`, so the config describes the app as
-    /// it is. Returns whether the reloaded file asked for something different,
-    /// which takes effect after a restart.
+    /// `narrow_vulkan_icd`, `cpu_first_frames`) from `running`, so the config
+    /// describes the app as it is. Returns whether the reloaded file asked for
+    /// something different, which takes effect after a restart.
     pub fn keep_start_only(&mut self, running: &BehaviorConfig) -> bool {
         let changed = self.accessibility != running.accessibility
-            || self.narrow_vulkan_icd != running.narrow_vulkan_icd;
+            || self.narrow_vulkan_icd != running.narrow_vulkan_icd
+            || self.cpu_first_frames != running.cpu_first_frames;
         self.accessibility = running.accessibility;
         self.narrow_vulkan_icd = running.narrow_vulkan_icd;
+        self.cpu_first_frames = running.cpu_first_frames;
         changed
+    }
+}
+
+/// Resolve whether CPU first frames are enabled from `config_default` and an
+/// optional `ULTTY_CPU_FIRST_FRAMES` environment value: `"1"` forces on,
+/// `"0"` forces off, and any other value (or unset) keeps `config_default`.
+pub fn resolve_cpu_first_frames(config_default: bool, env: Option<&std::ffi::OsStr>) -> bool {
+    match env.and_then(|value| value.to_str()) {
+        Some("1") => true,
+        Some("0") => false,
+        _ => config_default,
     }
 }
 
@@ -1836,6 +1856,36 @@ copy = "ctrl+c"
         let mut reloaded = BehaviorConfig::default();
         assert!(reloaded.keep_start_only(&running));
         assert!(!reloaded.narrow_vulkan_icd);
+    }
+
+    #[test]
+    fn cpu_first_frames_defaults_off_parses_and_stays_start_only() {
+        assert!(!Config::default().behavior.cpu_first_frames);
+        let config: Config = toml::from_str("[behavior]\ncpu_first_frames = true\n").unwrap();
+        assert!(config.behavior.cpu_first_frames);
+
+        let running = BehaviorConfig {
+            cpu_first_frames: true,
+            ..BehaviorConfig::default()
+        };
+        let mut reloaded = BehaviorConfig::default();
+        assert!(reloaded.keep_start_only(&running));
+        assert!(reloaded.cpu_first_frames);
+        assert!(!reloaded.keep_start_only(&running));
+    }
+
+    #[test]
+    fn cpu_first_frames_env_override_takes_precedence_over_config() {
+        use std::ffi::OsStr;
+
+        assert!(!resolve_cpu_first_frames(false, None));
+        assert!(resolve_cpu_first_frames(true, None));
+        assert!(resolve_cpu_first_frames(false, Some(OsStr::new("1"))));
+        assert!(resolve_cpu_first_frames(true, Some(OsStr::new("1"))));
+        assert!(!resolve_cpu_first_frames(false, Some(OsStr::new("0"))));
+        assert!(!resolve_cpu_first_frames(true, Some(OsStr::new("0"))));
+        assert!(!resolve_cpu_first_frames(false, Some(OsStr::new(""))));
+        assert!(resolve_cpu_first_frames(true, Some(OsStr::new("maybe"))));
     }
 
     #[test]

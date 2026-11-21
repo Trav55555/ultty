@@ -2,10 +2,11 @@
 
 ## Status
 
-**Proposed** 2026-11-20. Code references are to the `cpu-first-frames`
-branch, which sits on the `startup-shell-before-gpu` branch (`0443e0f`,
-PR #179); that branch is not on `main` yet.
-The prototype is behind `ULTTY_CPU_FIRST_FRAMES=1` and off by default.
+**In progress** 2026-11-20. Slice 1 (`startup-shell-before-gpu`, PR #179) and
+the CPU-grid prototype (PR #180) are on `main`. Slice 2's `[behavior]
+cpu_first_frames` config setting (default `false`, with
+`ULTTY_CPU_FIRST_FRAMES=1`/`0` overrides) and Slice 3's CPU tab bar and window
+chrome rendering are implemented.
 
 ## Context
 
@@ -97,12 +98,13 @@ until the T4 numbers say it pays.
    Ultty builds it without the KMS backend and with the X11 and Wayland
    libraries loaded at run time, as winit does; it adds `softbuffer`,
    `tiny-xlib`, `ctor` and `dtor` to the lock file on Linux.
-2. **What the CPU draws.** The focused pane's grid: cell backgrounds,
-   glyphs and the cursor (`renderer::CpuFrame`), and in a later slice the
-   tab bar and window chrome. Glyphs come from the same `Fonts` the GPU
-   renderer is built from: the font database is copied (its face list; no
-   font file is read again), each character is shaped through cosmic-text
-   (so fallback matches) and rasterised by swash. Pixels are opaque sRGB.
+2. **What the CPU draws.** The focused pane's grid (cell backgrounds,
+   glyphs and the cursor) and the tab bar / window chrome (`renderer::CpuFrame`,
+   sharing `renderer::tabbar`'s geometry and colours). Glyphs come from the same
+   `Fonts` the GPU renderer is built from: the font database is copied (its face
+   list; no font file is read again), each character is shaped through
+   cosmic-text (so fallback matches) and rasterised by swash. Pixels are opaque
+   sRGB.
 3. **The GPU on a thread.** As in `startup-shell-before-gpu`: instance,
    adapter, device, swapchain and pipelines on a worker, handed back
    through the event loop. On macOS the `CAMetalLayer` must be created on
@@ -187,7 +189,8 @@ each platform before the setting can default on there.
    regress beyond their run-to-run spread, and an `ulttyctl` capture taken
    across the handover shows no blank frame.
 3. **Tab bar and chrome on the CPU,** so nothing visibly appears at the
-   switch.
+   switch (implemented: `CpuFrame::draw` renders the CSD title band, logo,
+   chrome buttons, divider, and multi-tab row matching `renderer::tabbar`).
 4. **Wayland,** then **macOS** (surface on the main thread, layer order),
    then **Windows**: each needs a run that shows the switch without a
    blank frame before the setting can default on there.
@@ -260,7 +263,8 @@ confirmed prompt pixels before handover (`@120 ms`: 323 bright prompt pixels,
 
 - Run the steady-state `scripts/bench/compare.sh` suite on the T4 (keypress to
   pixel, throughput, RSS) to verify no regression.
-- Replace `ULTTY_CPU_FIRST_FRAMES=1` with a `[behavior]` config setting.
+- `[behavior] cpu_first_frames` config setting (done; `ULTTY_CPU_FIRST_FRAMES=1`/`0`
+  overrides remain available for one-off launches).
 
 ## Consequences
 

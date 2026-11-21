@@ -1,10 +1,12 @@
 //! Frames drawn on the CPU until the GPU renderer arrives (ADR 0030).
 //!
-//! An experiment, off unless `ULTTY_CPU_FIRST_FRAMES=1`. While the GPU starts
-//! on its worker thread (see `gpu`), frames are drawn by
-//! [`ultty::renderer::CpuFrame`] and presented with softbuffer. When the
-//! renderer is handed over, the softbuffer surface is dropped before the
-//! GPU's first present, and the GPU draws every frame from then on.
+//! Controlled by `[behavior] cpu_first_frames` (default off), with
+//! `ULTTY_CPU_FIRST_FRAMES=1` forcing it on and `ULTTY_CPU_FIRST_FRAMES=0`
+//! forcing it off. While the GPU starts on its worker thread (see `gpu`),
+//! frames are drawn by [`ultty::renderer::CpuFrame`] and presented with
+//! softbuffer. When the renderer is handed over, the softbuffer surface is
+//! dropped before the GPU's first present, and the GPU draws every frame from
+//! then on.
 //!
 //! The softbuffer surface is made before the GPU setup starts. On macOS
 //! both attach a sublayer to the view, and the later one is drawn on top;
@@ -22,9 +24,14 @@ use winit::window::Window;
 
 use super::App;
 
-/// Whether to draw the first frames on the CPU: `ULTTY_CPU_FIRST_FRAMES=1`.
-pub(super) fn enabled() -> bool {
-    std::env::var_os("ULTTY_CPU_FIRST_FRAMES").is_some_and(|value| value == "1")
+/// Whether to draw the first frames on the CPU: `ULTTY_CPU_FIRST_FRAMES=1`
+/// forces on, `ULTTY_CPU_FIRST_FRAMES=0` forces off, otherwise uses
+/// `config_default`.
+pub(super) fn enabled(config_default: bool) -> bool {
+    ultty::config::resolve_cpu_first_frames(
+        config_default,
+        std::env::var_os("ULTTY_CPU_FIRST_FRAMES").as_deref(),
+    )
 }
 
 /// The window's softbuffer surface, and what draws into it once the fonts
@@ -85,6 +92,7 @@ impl App {
             tracing::debug!(target: "ultty::startup", "drawing the first CPU frame");
         }
         let top = self.renderer.tab_bar_height();
+        let tab_bar = self.tab_bar.visible.then_some(&self.tab_bar);
         if let Err(error) = cpu.surface.resize(width, height) {
             tracing::warn!("CPU frame: resize failed: {error}");
             return true;
@@ -102,6 +110,7 @@ impl App {
                 width.get(),
                 top,
                 &terminal.event_loop.terminal(),
+                tab_bar,
             ),
             None => false,
         };
