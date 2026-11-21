@@ -56,6 +56,10 @@ The current dated evidence set is:
 - [`2026-11-08-control-latency.md`](./2026-11-08-control-latency.md) for
   control request and event delivery latency, and background tabs no longer
   redrawing the window.
+- [`2026-11-21-b1-agent-console.md`](./2026-11-21-b1-agent-console.md) for
+  B1's four numbers for the agent console in native and ANSI mode, against
+  Alacritty and Ghostty: copy clean everywhere; Ultty does not hold the
+  scroll position, and native resize corrupts frozen cards.
 - [`2026-11-19-t4-rerun.md`](./2026-11-19-t4-rerun.md) for the T4 rerun on
   `main`: D6 control latency met on a real display; D3 memory and D4 startup
   still behind Alacritty.
