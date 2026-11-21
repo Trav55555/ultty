@@ -143,7 +143,12 @@ fn spawn_on_pty(out: &std::path::Path) -> (Child, File) {
     let stdio = || Stdio::from(slave.try_clone().unwrap());
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
-        .args(["--exact", "app_on_pty", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "ansi_pty::app_on_pty",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env_remove("ULTTY_SOCKET")
         .env_remove("ULTTY_PID")
         .env("ULTTY_IN_BAND", "0")

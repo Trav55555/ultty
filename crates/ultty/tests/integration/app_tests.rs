@@ -18,9 +18,7 @@ fn command_exists(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[path = "support/tmux_server.rs"]
-mod tmux_server;
-use tmux_server::TmuxServer;
+use crate::tmux_server::TmuxServer;
 
 // ============================================================================
 // NEOVIM TESTS

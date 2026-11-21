@@ -99,7 +99,8 @@ fn hex(s: &str) -> Vec<u8> {
 
 #[test]
 fn test_v1_wire_vectors() {
-    let vectors: Vec<Vector> = serde_json::from_str(include_str!("conformance/v1.json")).unwrap();
+    let vectors: Vec<Vector> =
+        serde_json::from_str(include_str!("../conformance/v1.json")).unwrap();
 
     for Vector {
         name,
