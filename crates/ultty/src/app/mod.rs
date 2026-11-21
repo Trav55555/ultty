@@ -1519,10 +1519,10 @@ impl App {
         // logical points.
         let font_size = self.renderer.font_size() / self.scale_factor * scale_factor;
         tracing::info!(
-            "Scale factor {} -> {}, font size {:.1}px",
+            "Scale factor {} -> {}, font size {:.1}pt",
             self.scale_factor,
             scale_factor,
-            font_size
+            font_size / scale_factor
         );
         self.scale_factor = scale_factor;
         self.tab_bar.scale = scale_factor;
