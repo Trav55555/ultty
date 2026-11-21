@@ -261,7 +261,8 @@ impl Rewrap {
         self.lines += 1;
         // A line holding an image's corner is content even if blank.
         let holds_image = self.watched.back().is_some_and(|w| w.0 == index);
-        if line.is_empty() && marks.is_empty() && !holds_image {
+        let holds_cursor = self.cursor.is_some_and(|(row, _)| row == index);
+        if line.is_empty() && marks.is_empty() && !holds_image && !holds_cursor {
             self.pending_empty += 1;
             return;
         }
@@ -760,6 +761,7 @@ impl Buffer {
         if self.max_history == 0 {
             return;
         }
+        let old_top = self.is_scrolled().then(|| self.screen_top_line());
         for index in 0..n.min(self.grid.dimensions().rows as usize) as u16 {
             let Some(row) = self.grid.page.row(index) else {
                 break;
@@ -777,6 +779,7 @@ impl Buffer {
             self.history.push(row, &self.grid.styles);
         }
         self.prune_evicted_images();
+        self.keep_view_after_history_append(old_top);
     }
 
     /// Push lines from grid top into history (called when grid scrolls up).
@@ -784,6 +787,7 @@ impl Buffer {
         if self.max_history == 0 {
             return; // No history storage configured (e.g., alternate screen)
         }
+        let old_top = self.is_scrolled().then(|| self.screen_top_line());
         let mut packer = RowPacker::new();
         for row in rows {
             if self.history.len() >= self.max_history {
@@ -794,6 +798,14 @@ impl Buffer {
             self.history.push_row(&row, &mut packer);
         }
         self.prune_evicted_images();
+        self.keep_view_after_history_append(old_top);
+    }
+
+    fn keep_view_after_history_append(&mut self, old_top: Option<usize>) {
+        if let Some(old_top) = old_top {
+            let appended = self.screen_top_line() - old_top;
+            self.scroll_offset = (self.scroll_offset + appended).min(self.history.len());
+        }
     }
 
     /// Get a row at the given visual index (accounting for scroll).
@@ -1388,6 +1400,7 @@ impl Buffer {
                     .collect();
                 self.history.truncate(start);
                 self.grid.prepend_rows(pulled);
+                self.scroll_offset = self.scroll_offset.saturating_sub(rows_to_pull);
                 self.unsettle_anchors();
             }
         }
@@ -1472,14 +1485,14 @@ impl Buffer {
             let row = &grid_rows[idx];
             !row.is_blank() || !row.marks().is_empty() || kept[idx] || image_on[idx]
         };
-        let last_content_row = (0..grid_rows.len()).rposition(has_content).unwrap_or(0);
+        let last_content_row = (0..grid_rows.len())
+            .rposition(has_content)
+            .unwrap_or(0)
+            .max(old_cursor_row);
 
         for (idx, row) in grid_rows.iter().enumerate() {
-            if idx > last_content_row && !has_content(idx) {
-                if idx == old_cursor_row {
-                    out.set_cursor(0);
-                }
-                continue;
+            if idx > last_content_row {
+                break;
             }
             if kept[idx] {
                 finish_open(&mut out, &mut current_line, &mut current_marks, &mut open);
@@ -1542,7 +1555,6 @@ impl Buffer {
     /// Write a character, saving to history if scrolling occurs.
     #[inline]
     pub fn write_char(&mut self, c: char) {
-        self.scroll_offset = 0;
         // A character that fits on the row with no wrap pending writes only
         // there, so it cannot scroll.
         if let Err(width) = self.grid.print_in_row(c) {
@@ -1566,8 +1578,6 @@ impl Buffer {
         if width > cols {
             return;
         }
-        self.scroll_offset = 0;
-
         let cursor = self.grid.cursor();
         let wraps = cursor.wrap_pending || width > cols.saturating_sub(cursor.position.col);
         if self.grid.auto_wrap()
@@ -1646,7 +1656,6 @@ impl Buffer {
             return;
         }
 
-        self.scroll_offset = 0;
         let mut remaining = bytes;
         while !remaining.is_empty() {
             if self.grid.cursor().wrap_pending
@@ -1886,6 +1895,35 @@ mod tests {
 
         buf.scroll_to_top();
         assert_eq!(buf.scroll_offset(), 50);
+    }
+
+    #[test]
+    fn test_output_keeps_the_viewport_on_the_same_history_line() {
+        let mut buffer = Buffer::with_scrollback(Dimensions::new(8, 2), 4);
+        for c in 'a'..='d' {
+            let mut row = Row::new(8);
+            row[0].set_char(c);
+            buffer.push_to_history(vec![row]);
+        }
+        buffer.scroll_up(2);
+
+        buffer.write_ascii_span(b"ascii");
+        buffer.newline();
+        buffer.write_char('界');
+        buffer.write_text_with_width("a", 2);
+        buffer.newline();
+        assert_eq!(buffer.visible_row(0).unwrap().text().trim_end(), "c");
+
+        buffer.newline();
+        buffer.newline();
+        let oldest = buffer.row_at(0).unwrap().text();
+        assert_eq!(buffer.visible_row(0).unwrap().text(), oldest);
+        assert_eq!(buffer.scroll_offset(), buffer.history_len());
+
+        buffer.scroll_to_bottom();
+        buffer.write_ascii_span(b"follow");
+        buffer.newline();
+        assert_eq!(buffer.scroll_offset(), 0);
     }
 
     #[test]
@@ -2458,7 +2496,7 @@ mod tests {
         let mut buf = Buffer::new(Dimensions::new(20, 5));
 
         // Write text on row 0 only, leave cursor at bottom (row 4)
-        for c in "Hello".chars() {
+        for c in "Hello, terminal!".chars() {
             buf.grid_mut().write_char(c);
         }
         // Move cursor to row 4 (blank trailing row)
@@ -2466,15 +2504,10 @@ mod tests {
 
         assert_eq!(buf.grid().cursor().position.row, 4);
 
-        // Narrow — reflow should not lose cursor
+        // Row 0 wraps to two rows and the cursor follows its own blank line.
         buf.resize(Dimensions::new(10, 5));
 
-        // Cursor should end up at a valid position (not row 0 col 0 due to lost tracking)
-        let cursor = buf.grid().cursor().position;
-        assert!(
-            cursor.row < 5,
-            "cursor row {} should be in bounds",
-            cursor.row
-        );
+        assert_eq!(buf.grid().cursor().position.row, 4);
+        assert_eq!(buf.history_len(), 1);
     }
 }

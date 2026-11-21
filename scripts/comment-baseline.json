@@ -64,7 +64,7 @@
  "crates/ultty-vt/src/ansi/osc.rs": 77,
  "crates/ultty-vt/src/ansi/sgr.rs": 18,
  "crates/ultty-vt/src/ansi/tests.rs": 68,
- "crates/ultty-vt/src/grid/buffer.rs": 123,
+ "crates/ultty-vt/src/grid/buffer.rs": 122,
  "crates/ultty-vt/src/grid/buffer/images.rs": 8,
  "crates/ultty-vt/src/grid/cell.rs": 4,
  "crates/ultty-vt/src/grid/char_class.rs": 2,
