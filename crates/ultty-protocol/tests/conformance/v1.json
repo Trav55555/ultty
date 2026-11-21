@@ -1,0 +1,68 @@
+[
+  {
+    "name": "v1 hello with capability bits",
+    "direction": "app",
+    "hex": "5554010006000000010011030000",
+    "expected": { "type": "client_hello", "version": 1, "requested_capabilities": 785 }
+  },
+  {
+    "name": "server grants a subset of requested bits",
+    "direction": "terminal",
+    "hex": "5554010006000000010001010000",
+    "expected": { "type": "server_hello", "version": 1, "capabilities": 257 }
+  },
+  {
+    "name": "session ready with a 64-bit ID and asymmetric viewport",
+    "direction": "terminal",
+    "hex": "555402001000000008070605040302010000000078002800",
+    "expected": { "type": "session_ready", "session_id": "72623859790382856", "root_region": 0, "width": 120, "height": 40 }
+  },
+  {
+    "name": "plain content counts UTF-8 bytes",
+    "direction": "app",
+    "hex": "555420000f0000002a0000000103000000e7958c020000",
+    "expected": { "type": "text", "region": 42, "text": "界" }
+  },
+  {
+    "name": "v1 legacy Markdown widget",
+    "direction": "app",
+    "hex": "55542000100000002a000000030106000000232048690a78",
+    "expected": { "type": "markdown", "region": 42, "source": "# Hi\nx" }
+  },
+  {
+    "name": "v1 legacy Code widget",
+    "direction": "app",
+    "hex": "55542000160000002a0000000302040000006128290a030000006c756101",
+    "expected": { "type": "code", "region": 42, "source": "a()\n", "language": "lua", "line_numbers": true }
+  },
+  {
+    "name": "ping uses the terminal namespace",
+    "direction": "terminal",
+    "hex": "5554700000000000",
+    "expected": { "type": "ping" }
+  },
+  {
+    "name": "the same frame is pong in the app namespace",
+    "direction": "app",
+    "hex": "5554700000000000",
+    "expected": { "type": "pong" }
+  },
+  {
+    "name": "partial frame body is rejected",
+    "direction": "app",
+    "hex": "55540100060000000100110300",
+    "expected": { "type": "reject", "error": "unexpected_eof" }
+  },
+  {
+    "name": "wrong magic is rejected",
+    "direction": "terminal",
+    "hex": "5455700000000000",
+    "expected": { "type": "reject", "error": "invalid_magic" }
+  },
+  {
+    "name": "invalid UTF-8 is rejected",
+    "direction": "app",
+    "hex": "555420000d0000002a0000000101000000ff020000",
+    "expected": { "type": "reject", "error": "invalid_utf8" }
+  }
+]
