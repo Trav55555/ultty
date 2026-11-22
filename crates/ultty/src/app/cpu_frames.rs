@@ -1,6 +1,7 @@
 //! Frames drawn on the CPU until the GPU renderer arrives (ADR 0030).
 //!
-//! Controlled by `[behavior] cpu_first_frames` (default off), with
+//! Controlled by `[behavior] cpu_first_frames` (default on on Linux, off on
+//! other platforms until verified there), with
 //! `ULTTY_CPU_FIRST_FRAMES=1` forcing it on and `ULTTY_CPU_FIRST_FRAMES=0`
 //! forcing it off. While the GPU starts on its worker thread (see `gpu`),
 //! frames are drawn by [`ultty::renderer::CpuFrame`] and presented with

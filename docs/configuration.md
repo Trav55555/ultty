@@ -660,7 +660,7 @@ changing it.
 
 ```toml
 [behavior]
-cpu_first_frames = false   # true draws the first frames on the CPU while the GPU starts
+cpu_first_frames = true    # default on Linux (false on macOS/Windows)
 ```
 
 With `true`, Ultty renders the focused pane's grid and the tab bar/window
@@ -669,6 +669,8 @@ the GPU renderer starts on a background thread, then hands over to the GPU
 once it is ready. This brings the first shell prompt onto the screen much
 sooner on drivers with slow GPU initialization.
 
-The default is `false`. Read at start; restart Ultty after changing it. For a
-single launch, `ULTTY_CPU_FIRST_FRAMES=1` forces it on and
-`ULTTY_CPU_FIRST_FRAMES=0` forces it off regardless of `config.toml`.
+The default is `true` on Linux (X11 and Wayland) and `false` on other
+platforms until hardware handover is verified there. Read at start; restart
+Ultty after changing it. For a single launch, `ULTTY_CPU_FIRST_FRAMES=1`
+forces it on and `ULTTY_CPU_FIRST_FRAMES=0` forces it off regardless of
+`config.toml`.
