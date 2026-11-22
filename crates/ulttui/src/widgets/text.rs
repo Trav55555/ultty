@@ -327,6 +327,9 @@ pub struct TextInput {
     rows: u16,
     cursor: usize,
     selection_start: Option<usize>,
+    visual_line_selection: bool,
+    yank_register: String,
+    pending_yank: Option<String>,
     history: super::input_history::InputHistory,
     vim_state: VimState,
     vim_config: VimConfig,
@@ -348,6 +351,9 @@ impl Default for TextInput {
             rows: 1,
             cursor: 0,
             selection_start: None,
+            visual_line_selection: false,
+            yank_register: String::new(),
+            pending_yank: None,
             history: Default::default(),
             vim_state: VimState::new(),
             vim_config: VimConfig::for_text_input(),
@@ -498,6 +504,17 @@ impl TextInput {
                 (self.cursor, start)
             }
         })
+    }
+
+    /// Drain the most recently yanked text so the app can emit
+    /// [`crate::Cmd::copy_to_clipboard`]. Password inputs never expose yanks.
+    pub fn take_yanked_text(&mut self) -> Option<String> {
+        self.pending_yank.take()
+    }
+
+    /// The most recently yanked or deleted text stored in the input's vim register.
+    pub fn yank_register(&self) -> &str {
+        &self.yank_register
     }
 
     fn move_cursor(&mut self, motion: &VimMotion, count: usize) {
@@ -703,12 +720,26 @@ impl TextInput {
         self.value = value;
     }
 
+    fn slice_range(&self, start: usize, end: usize) -> String {
+        let chars: Vec<char> = self.value.chars().collect();
+        let (start, end) = clamp_range(start, end, chars.len());
+        chars[start..end].iter().collect()
+    }
+
+    fn record_yank(&mut self, text: String) {
+        self.yank_register = text.clone();
+        if !self.password {
+            self.pending_yank = Some(text);
+        }
+    }
+
     fn delete_range(&mut self, start: usize, end: usize) -> String {
         let chars: Vec<char> = self.value.chars().collect();
         let (start, end) = clamp_range(start, end, chars.len());
         let deleted: String = chars[start..end].iter().collect();
         self.value = chars[..start].iter().chain(chars[end..].iter()).collect();
         self.cursor = start;
+        self.yank_register = deleted.clone();
         deleted
     }
 
@@ -740,6 +771,8 @@ impl TextInput {
                 VimResult::ModeChanged(VimMode::Insert)
             }
             VimOperator::Yank => {
+                let yanked = self.slice_range(start, end);
+                self.record_yank(yanked);
                 self.cursor = start.min(self.value.chars().count());
                 VimResult::Handled
             }
@@ -1173,10 +1206,47 @@ impl VimHandler for TextInput {
                 self.vim_state.mode = VimMode::Insert;
                 VimResult::ModeChanged(VimMode::Insert)
             }
+            VimAction::YankLine => {
+                let chars: Vec<char> = self.value.chars().collect();
+                let start = if self.multiline {
+                    self.find_line_start(&chars, self.cursor)
+                } else {
+                    0
+                };
+                let end = if self.multiline {
+                    self.find_line_end(&chars, self.cursor)
+                } else {
+                    chars.len()
+                };
+                let yanked = self.slice_range(start, end);
+                self.record_yank(yanked);
+                VimResult::Handled
+            }
+            VimAction::PasteAfter => {
+                if !self.yank_register.is_empty() {
+                    let chars_len = self.value.chars().count();
+                    if self.cursor < chars_len {
+                        self.cursor += 1;
+                    }
+                    let text = self.yank_register.clone();
+                    self.insert_text(&text);
+                    self.cursor = self.cursor.saturating_sub(1);
+                }
+                VimResult::Handled
+            }
+            VimAction::PasteBefore => {
+                if !self.yank_register.is_empty() {
+                    let text = self.yank_register.clone();
+                    self.insert_text(&text);
+                    self.cursor = self.cursor.saturating_sub(1);
+                }
+                VimResult::Handled
+            }
             VimAction::Undo => VimResult::Handled,
             VimAction::Redo => VimResult::Handled,
             VimAction::EnterVisual => {
                 self.selection_start = Some(self.cursor);
+                self.visual_line_selection = false;
                 self.vim_state.mode = VimMode::Visual;
                 VimResult::ModeChanged(VimMode::Visual)
             }
@@ -1187,11 +1257,13 @@ impl VimHandler for TextInput {
                 } else {
                     0
                 });
+                self.visual_line_selection = true;
                 self.vim_state.mode = VimMode::VisualLine;
                 VimResult::ModeChanged(VimMode::VisualLine)
             }
             VimAction::ExitToNormal => {
                 self.selection_start = None;
+                self.visual_line_selection = false;
                 self.vim_state.reset_to_normal();
                 VimResult::ModeChanged(VimMode::Normal)
             }
@@ -1218,6 +1290,31 @@ impl VimHandler for TextInput {
                 self.cursor = end;
             }
             return VimResult::Handled;
+        }
+
+        if command.operator != VimOperator::None {
+            if let Some(anchor) = self.selection_start.take() {
+                let visual_line = std::mem::take(&mut self.visual_line_selection);
+                let chars: Vec<char> = self.value.chars().collect();
+                let (lo, hi) = if anchor <= self.cursor {
+                    (anchor, self.cursor)
+                } else {
+                    (self.cursor, anchor)
+                };
+                let (start, end) = if visual_line {
+                    if self.multiline {
+                        (
+                            self.find_line_start(&chars, lo),
+                            self.find_line_end(&chars, hi),
+                        )
+                    } else {
+                        (0, chars.len())
+                    }
+                } else {
+                    (lo, (hi + 1).min(chars.len()))
+                };
+                return self.apply_operator(&command.operator, start, end);
+            }
         }
 
         self.move_cursor(&command.motion, count);
@@ -1295,6 +1392,79 @@ mod tests {
         let mut single = TextInput::new();
         single.insert_text("a\r\nb\u{3}c");
         assert_eq!(single.current_value(), "abc");
+    }
+
+    #[test]
+    fn test_vim_yank_motion_and_text_object_populate_clipboard_and_register() {
+        let mut input = TextInput::new().value("hello \"world\" end").cursor(0);
+        input.on_key(&key_event(Key::Escape));
+
+        input.on_key(&key_event(Key::Char('y')));
+        input.on_key(&key_event(Key::Char('w')));
+        assert_eq!(input.take_yanked_text().as_deref(), Some("hello "));
+        assert_eq!(input.take_yanked_text(), None);
+        assert_eq!(input.yank_register(), "hello ");
+
+        input.on_key(&key_event(Key::Char('w')));
+        input.on_key(&key_event(Key::Char('l')));
+        input.on_key(&key_event(Key::Char('y')));
+        input.on_key(&key_event(Key::Char('i')));
+        input.on_key(&key_event(Key::Char('"')));
+        assert_eq!(input.take_yanked_text().as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn test_vim_yy_yanks_current_line_and_pastes() {
+        let mut input = TextInput::new()
+            .multiline()
+            .value("first\nsecond\nthird")
+            .cursor(7);
+        input.on_key(&key_event(Key::Escape));
+
+        input.on_key(&key_event(Key::Char('y')));
+        input.on_key(&key_event(Key::Char('y')));
+        assert_eq!(input.take_yanked_text().as_deref(), Some("second"));
+
+        let mut single = TextInput::new().value("ab").cursor(0);
+        single.on_key(&key_event(Key::Escape));
+        single.on_key(&key_event(Key::Char('y')));
+        single.on_key(&key_event(Key::Char('y')));
+        assert_eq!(single.take_yanked_text().as_deref(), Some("ab"));
+        single.on_key(&key_event(Key::Char('p')));
+        assert_eq!(single.current_value(), "aabb");
+    }
+
+    #[test]
+    fn test_vim_visual_yank_captures_selection_and_clears_anchor() {
+        let mut input = TextInput::new().value("abcdef").cursor(1);
+        input.on_key(&key_event(Key::Escape));
+
+        input.on_key(&key_event(Key::Char('v')));
+        input.on_key(&key_event(Key::Char('l')));
+        input.on_key(&key_event(Key::Char('l')));
+        input.on_key(&key_event(Key::Char('y')));
+        assert_eq!(input.take_yanked_text().as_deref(), Some("bcd"));
+        assert_eq!(input.selection(), None);
+
+        let mut multi = TextInput::new()
+            .multiline()
+            .value("one\ntwo\nthree")
+            .cursor(5);
+        multi.on_key(&key_event(Key::Escape));
+        multi.on_key(&key_event(Key::Char('V')));
+        multi.on_key(&key_event(Key::Char('y')));
+        assert_eq!(multi.take_yanked_text().as_deref(), Some("two"));
+        assert_eq!(multi.selection(), None);
+    }
+
+    #[test]
+    fn test_vim_yank_in_password_input_does_not_expose_clipboard_yank() {
+        let mut input = TextInput::new().password().value("secret").cursor(0);
+        input.on_key(&key_event(Key::Escape));
+
+        input.on_key(&key_event(Key::Char('y')));
+        input.on_key(&key_event(Key::Char('y')));
+        assert_eq!(input.take_yanked_text(), None);
     }
 
     #[test]
