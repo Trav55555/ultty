@@ -154,7 +154,14 @@ jobs:
         with:
           tool: cargo-fuzz@0.12.0
       - name: Fuzz targets (parallel waves)
-        run: scripts/ci-fuzz-smoke.sh nightly
+        run: scripts/ci-fuzz-smoke.sh --mode smoke nightly
+      - name: Upload fuzz crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
 
   gui-smoke:
     name: GUI smoke (Xvfb, software Vulkan)

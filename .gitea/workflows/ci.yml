@@ -24,6 +24,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
+  CI_AUTO_LINKER: "1"
   # The stable toolchain comes from rust-toolchain.toml; the runner image's
   # RUST_TOOLCHAIN matches it, so bump the image with the file.
   # Minimum supported Rust version declared in the root Cargo.toml; the
@@ -92,7 +93,14 @@ jobs:
         run: scripts/install-sh-test.sh
       - name: Runner step wrapper
         run: scripts/ci-runner-step-test.sh
-      - run: scripts/ci-runner-step.sh cargo test --locked --workspace
+      - name: Workspace tests
+        run: |
+          if command -v cargo-nextest >/dev/null 2>&1; then
+            scripts/ci-runner-step.sh cargo nextest run --locked --workspace
+            scripts/ci-runner-step.sh cargo test --locked --doc -p ultty-vt -p ultty-protocol -p ultty-client -p ulttui
+          else
+            scripts/ci-runner-step.sh cargo test --locked --workspace
+          fi
       - name: Protocol roundtrip property tests
         run: scripts/ci-runner-step.sh cargo test --locked -p ultty-protocol --test roundtrip -- --ignored
         env:
@@ -138,14 +146,25 @@ jobs:
     env:
       # cargo-fuzz supplies its own sanitizer and coverage flags.
       RUSTFLAGS: ""
+      CI_AUTO_LINKER: "0"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       # fuzz/ inherits the repository's pinned stable rust-toolchain.toml, so
       # the script names the nightly; cargo-fuzz needs -Z sanitizer flags.
-      - name: Fuzz targets (parallel waves)
-        run: scripts/ci-runner-step.sh scripts/ci-fuzz-smoke.sh "$RUST_NIGHTLY"
+      - name: Fuzz targets (parallel waves with S3 corpus)
+        run: scripts/ci-runner-step.sh scripts/ci-fuzz-smoke.sh --mode smoke --base "$FUZZ_BASE" "$RUST_NIGHTLY"
         env:
+          FUZZ_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           CI_SCCACHE_STATS: "1"
+      - name: Upload fuzz crash artifacts
+        if: failure()
+        uses: christopherhx/gitea-upload-artifact@81f940d004763f986ba3582c007fd842dd5cb0d7
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
 
   # Instruction counts (callgrind) of the VT core, this commit against its
   # merge-base, built and measured in this job so toolchain and libc cancel
