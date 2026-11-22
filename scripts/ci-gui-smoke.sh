@@ -236,8 +236,11 @@ if [ "$SHARD" = all ] || [ "$SHARD" = native-lua ]; then
   if command -v xdotool >/dev/null 2>&1; then
     queue_check inline-surface env ULTTY="$ULTTY_BIN" ULTTYCTL="$ULTTYCTL_BIN" INLINE_APP="$INLINE_APP_BIN" \
       scripts/e2e/inline-surface.sh "$OUT/inline-surface"
+    queue_check native-split env ULTTY="$ULTTY_BIN" ULTTYCTL="$ULTTYCTL_BIN" COUNTER_APP="$COUNTER_BIN" \
+      scripts/e2e/native-split.sh "$OUT/native-split"
   else
     record_skip inline-surface "needs xdotool"
+    record_skip native-split "needs xdotool"
   fi
   queue_check agent-transcript env ULTTY="$ULTTY_BIN" ULTTYCTL="$ULTTYCTL_BIN" AGENT_TRANSCRIPT="$AGENT_TRANSCRIPT_BIN" \
     scripts/e2e/agent-transcript.sh "$OUT/agent-transcript"
