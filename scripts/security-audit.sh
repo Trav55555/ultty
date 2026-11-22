@@ -17,3 +17,12 @@ cargo audit \
   --ignore RUSTSEC-2026-0370 \
   --ignore RUSTSEC-2026-0371 \
   --ignore RUSTSEC-2026-0372
+
+if command -v cargo-deny >/dev/null 2>&1; then
+  cargo deny check --hide-inclusion-graph licenses bans sources
+elif [ "${CI_REQUIRE_CARGO_DENY:-0}" = 1 ]; then
+  echo "cargo-deny is required when CI_REQUIRE_CARGO_DENY=1" >&2
+  exit 1
+else
+  echo "note: cargo-deny not installed; skipping license/source/ban checks" >&2
+fi

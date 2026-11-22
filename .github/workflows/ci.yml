@@ -46,8 +46,10 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
         with:
-          tool: cargo-audit@0.22.1
+          tool: cargo-audit@0.22.1,cargo-deny@0.22.0
       - run: scripts/security-audit.sh
+        env:
+          CI_REQUIRE_CARGO_DENY: "1"
 
   clippy:
     name: Clippy
@@ -181,7 +183,7 @@ jobs:
           libx11-xcb1 libxcursor1 libxrandr2 libxi6
           xvfb xdotool tmux mesa-vulkan-drivers fonts-dejavu-core
       - run: cargo build --locked -p ultty -p hello-native -p counter-app -p agent-transcript -p agent-console -p ulttui-lua --bins
-      - run: cargo build --locked -p ultty-client --example inline-surface
+      - run: cargo build --locked -p ultty-client --example inline-surface --example session-frame-fixture
       - run: scripts/ci-gui-smoke.sh "$RUNNER_TEMP/gui-smoke"
       - name: Upload smoke artifacts
         if: failure()

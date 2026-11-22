@@ -53,6 +53,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: scripts/ci-runner-step.sh scripts/security-audit.sh
+        env:
+          CI_REQUIRE_CARGO_DENY: "1"
 
   clippy:
     name: Clippy
@@ -198,7 +200,7 @@ jobs:
       # display. Ultty runs for real and the live smokes drive it. The runner
       # image carries the X11 client libraries winit loads at runtime.
       - run: scripts/ci-runner-step.sh cargo build --locked -p ultty -p hello-native -p counter-app -p agent-transcript -p agent-console -p ulttui-lua --bins
-      - run: scripts/ci-runner-step.sh cargo build --locked -p ultty-client --example inline-surface
+      - run: scripts/ci-runner-step.sh cargo build --locked -p ultty-client --example inline-surface --example session-frame-fixture
         env:
           CI_SCCACHE_STATS: "1"
       # Jobs install nothing on this runner, so the tmux half of
@@ -213,3 +215,18 @@ jobs:
         with:
           name: gui-smoke
           path: ${{ runner.temp }}/gui-smoke
+
+  # ADR 0029 Slice 2: dispatch & watch GitHub's macos-latest workflow for owner
+  # PRs and main pushes once GH_MACOS_CI_TOKEN is configured as a Gitea secret.
+  macos:
+    name: macOS (GitHub Actions)
+    runs-on: ultty
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run macOS CI on GitHub
+        run: scripts/ci-runner-step.sh scripts/ci-macos-dispatch.sh
+        env:
+          GH_TOKEN: ${{ secrets.GH_MACOS_CI_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
