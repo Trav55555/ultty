@@ -507,7 +507,7 @@ impl TextInput {
     }
 
     /// Drain the most recently yanked text so the app can emit
-    /// [`crate::Cmd::copy_to_clipboard`]. Password inputs never expose yanks.
+    /// [`crate::cmd::Cmd::copy_to_clipboard`]. Password inputs never expose yanks.
     pub fn take_yanked_text(&mut self) -> Option<String> {
         self.pending_yank.take()
     }
