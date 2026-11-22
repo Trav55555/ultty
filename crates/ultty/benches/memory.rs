@@ -781,6 +781,7 @@ fn main() -> ExitCode {
         "case", "live bytes", "budget", "peak bytes", "rss delta"
     );
     let mut over = 0;
+    let mut summary_rows = Vec::new();
     for case in CASES.iter().filter(|case| case.name.contains(&filter)) {
         let m = (case.run)();
         let ok = m.live <= case.budget
@@ -795,6 +796,12 @@ fn main() -> ExitCode {
         let rss = m
             .rss_delta
             .map_or_else(|| "n/a".to_string(), |d| d.to_string());
+        let pct = if case.budget > 0 {
+            (m.live as f64 / case.budget as f64) * 100.0
+        } else {
+            0.0
+        };
+        summary_rows.push((case.name, m.live, case.budget, pct, m.peak, ok));
         println!(
             "{:<30} {:>12} {:>12} {:>12} {:>12}  {}",
             case.name,
@@ -804,6 +811,32 @@ fn main() -> ExitCode {
             rss,
             if ok { "ok" } else { "OVER BUDGET" }
         );
+    }
+    if let Ok(path) = std::env::var("GITHUB_STEP_SUMMARY") {
+        if !path.is_empty() {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                use std::io::Write as _;
+                let status = if over > 0 { "FAILED" } else { "passed" };
+                let _ = writeln!(file, "### Memory budgets ({status})\n");
+                let _ = writeln!(
+                    file,
+                    "| Case | Live bytes | Budget | Used | Peak bytes | Status |"
+                );
+                let _ = writeln!(file, "|---|---:|---:|---:|---:|---|");
+                for (name, live, budget, pct, peak, ok) in &summary_rows {
+                    let mark = if *ok { "ok" } else { "**OVER BUDGET**" };
+                    let _ = writeln!(
+                        file,
+                        "| `{name}` | {live} | {budget} | {pct:.1}% | {peak} | {mark} |"
+                    );
+                }
+                let _ = writeln!(file);
+            }
+        }
     }
     if over > 0 {
         eprintln!("{over} memory case(s) over budget");

@@ -20,6 +20,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  CI_AUTO_LINKER: "1"
   RUSTC_WRAPPER: sccache
   SCCACHE_REGION: us-east-1
   SCCACHE_S3_KEY_PREFIX: ultty/
@@ -30,18 +31,58 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Test before publishing
+  preflight:
+    name: Check tag, Cargo.toml, and CHANGELOG
+    runs-on: ultty
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify release metadata
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(awk '/^\[workspace\.package\]/{in_sec=1; next} /^\[/{in_sec=0} in_sec && /^version *=/{gsub(/"/, "", $3); print $3; exit}' Cargo.toml)"
+          if [ "$cargo_version" != "$version" ]; then
+            echo "Tag $GITHUB_REF_NAME ($version) does not match Cargo.toml workspace version ($cargo_version)" >&2
+            exit 1
+          fi
+          awk -v v="$version" '
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md >"$RUNNER_TEMP/release-notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/release-notes.md"; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
+
+  fmt:
+    name: Format before publishing
     runs-on: ultty
     steps:
       - uses: actions/checkout@v4
       - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy before publishing
+    runs-on: ultty
+    steps:
+      - uses: actions/checkout@v4
       - run: scripts/ci-runner-step.sh cargo clippy --locked --workspace --all-targets -- -D warnings
+        env:
+          CI_SCCACHE_STATS: "1"
+
+  test:
+    name: Test before publishing
+    runs-on: ultty
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
       - run: scripts/ci-runner-step.sh cargo test --locked --workspace
+        env:
+          CI_SCCACHE_STATS: "1"
 
   release:
     name: Build and publish Linux x86_64
-    needs: test
+    needs: [preflight, fmt, clippy, test]
     runs-on: ultty
     timeout-minutes: 60
     permissions:
@@ -51,6 +92,8 @@ jobs:
 
       - name: Build
         run: scripts/ci-runner-step.sh cargo build --locked --release -p ultty --target "$TARGET"
+        env:
+          CI_SCCACHE_STATS: "1"
 
       - name: Package
         run: |

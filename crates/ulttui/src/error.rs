@@ -34,7 +34,7 @@ pub enum Error {
     /// (see [`crate::inline::Console::open`]).
     #[error("invalid inline card: {0}")]
     InvalidCard(String),
-    /// An error injected into a [`crate::backend::MockBackend`] by a test.
+    /// An error injected into a `MockBackend` by a test.
     #[error("{0}")]
     Mock(String),
 }

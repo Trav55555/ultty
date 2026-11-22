@@ -20,9 +20,7 @@
 use std::time::Duration;
 use ultty::event_loop::{EventLoop, TerminalEvent};
 
-#[path = "support/tmux_server.rs"]
-mod tmux_server;
-use tmux_server::TmuxServer;
+use crate::tmux_server::TmuxServer;
 
 /// How long an app gets to start and draw. The waits below end as soon as
 /// the app is ready, so this only matters when it is slow: on a loaded
@@ -39,6 +37,7 @@ pub struct AppTester {
     rows: u16,
 }
 
+#[allow(dead_code)]
 impl AppTester {
     /// Create a new tester that runs a shell.
     pub fn new_shell(cols: u16, rows: u16) -> std::io::Result<Self> {

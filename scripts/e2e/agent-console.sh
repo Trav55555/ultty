@@ -27,8 +27,11 @@ if [ -z "${ULTTY:-}" ] || [ -z "${ULTTYCTL:-}" ]; then
     ULTTY=${ULTTY:-target/debug/ultty}
     ULTTYCTL=${ULTTYCTL:-target/debug/ulttyctl}
 fi
-cargo build -q --locked -p agent-console
-console="$PWD/target/debug/agent-console"
+if [ -z "${AGENT_CONSOLE:-}" ]; then
+    cargo build -q --locked -p agent-console
+    AGENT_CONSOLE="$PWD/target/debug/agent-console"
+fi
+console=$(realpath "$AGENT_CONSOLE")
 fixture="$PWD/examples/agent-console/fixtures/short.jsonl"
 ULTTY=$(realpath "$ULTTY")
 ULTTYCTL=$(realpath "$ULTTYCTL")

@@ -48,7 +48,8 @@ def run(args):
     originals = {}
     result = {"passed": False}
     receipts = (out / "receipts.jsonl").open("w")
-    runtime_parent = Path(os.environ.get("TMPDIR", "/tmp")).resolve().parent
+    tmp_dir = Path(os.environ.get("TMPDIR", "/tmp")).resolve()
+    runtime_parent = tmp_dir.parent if (tmp_dir != Path("/tmp") and os.access(tmp_dir.parent, os.W_OK)) else tmp_dir
     runtime = tempfile.TemporaryDirectory(prefix="cp-", dir=runtime_parent)
     env = dict(os.environ, XDG_RUNTIME_DIR=runtime.name)
     for key in ("ULTTY_PID", "ULTTY_PANE", "ULTTY_SOCKET", "ULTTY_AUTH_TOKEN", "ULTTY_OWNER_EPOCH"):

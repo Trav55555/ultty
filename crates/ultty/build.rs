@@ -24,10 +24,13 @@ fn main() {
             .file_stem()
             .and_then(|s| s.to_str())
             .expect("utf-8 name");
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("utf-8 file name");
         writeln!(
             source,
-            "    ({stem:?}, include_str!({:?})),",
-            path.to_str().expect("utf-8 path")
+            "    ({stem:?}, include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/themes/\", {file_name:?}))),"
         )
         .expect("write to string");
     }

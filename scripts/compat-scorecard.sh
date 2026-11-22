@@ -35,7 +35,7 @@ kitty_text_sizing|Kitty text sizing (OSC 66)|Keeping emoji, symbols and box glyp
 EOF
 )
 
-results=$(cargo test --workspace --no-fail-fast -- scorecard_ 2>&1 || true)
+results=$(cargo test --locked -p ultty-vt -p ultty --no-fail-fast -- scorecard_ 2>&1 || true)
 grep -q '^test result' <<<"$results" || { echo "$results" >&2; exit 1; }
 
 status_of() {

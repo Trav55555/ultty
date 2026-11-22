@@ -26,6 +26,7 @@ case "$1" in
       echo "sccache: error: Timed out waiting for server startup. Maybe the remote service is unreachable?" >&2
       exit 2
     fi
+    echo "Compile requests 1 (cache hits 1)"
     exit 0 ;;
 esac
 # Invoked as the rustc wrapper: fails while the server is down, and its first
@@ -57,6 +58,7 @@ if [ -n "${RUSTC_WRAPPER:-}" ]; then
   "$RUSTC_WRAPPER" rustc -vV || { echo "wrapper failed" >&2; exit 101; }
 fi
 echo "wrapper=${RUSTC_WRAPPER:-none}"
+echo "rustflags=${RUSTFLAGS:-}"
 exit "${FAKE_CARGO_EXIT:-0}"
 SH
 chmod 755 "$work/bin/"*
@@ -118,6 +120,20 @@ expect "server dies mid-step" "exit status 0" test "$status" -eq 0
 run_step "mid-step failure, then real failure" 0 3 1
 expect "mid-step failure, then real failure" "exit status 3" test "$status" -eq 3
 expect "mid-step failure, then real failure" "rerun once only" test "$runs" -eq 2
+
+CI_SCCACHE_STATS=1 run_step "stats printed when enabled" 0 0
+expect "stats printed when enabled" "prints sccache stats" contains "Compile requests 1 (cache hits 1)"
+expect "stats printed when enabled" "exit status 0" test "$status" -eq 0
+
+printf '#!/bin/sh\nexit 0\n' >"$work/bin/mold"
+chmod 755 "$work/bin/mold"
+CI_AUTO_LINKER=1 RUSTFLAGS="-Dwarnings" run_step "auto-linker detects mold" 0 0
+expect "auto-linker detects mold" "appends -fuse-ld=mold" contains "rustflags=-Dwarnings -C link-arg=-fuse-ld=mold"
+expect "auto-linker detects mold" "exit status 0" test "$status" -eq 0
+
+CI_AUTO_LINKER=0 RUSTFLAGS="-Dwarnings" run_step "auto-linker disabled" 0 0
+expect "auto-linker disabled" "leaves RUSTFLAGS unchanged" contains "rustflags=-Dwarnings"
+rm -f "$work/bin/mold"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures check(s) failed" >&2

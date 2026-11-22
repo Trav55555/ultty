@@ -98,7 +98,7 @@ pub struct RowSnapshot {
     pub anchor_first: bool,
 }
 
-/// One character cell. Colors use [kind,r,g,b]: default=0, named=1,
+/// One character cell. Colors use `[kind,r,g,b]`: default=0, named=1,
 /// indexed=2, RGB=3; named/indexed place their index in r.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CellSnapshot {

@@ -1,0 +1,41 @@
+# Nightly deep fuzzing on main with persistent S3 corpus minimization.
+# Restores each target's corpus from S3, runs 15 minutes of parallel fuzzing
+# (10 min vt_terminal, 3-5 min for each decoder/graphics target), minimizes
+# with -merge=1, and syncs the corpus back so PR smoke runs replay real edge
+# cases immediately.
+name: Nightly Fuzz
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_NIGHTLY: nightly-2026-11-01
+  CARGO_INCREMENTAL: "0"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_REGION: us-east-1
+  SCCACHE_S3_KEY_PREFIX: ultty/
+
+jobs:
+  fuzz-nightly:
+    name: Fuzz (nightly corpus)
+    runs-on: ultty
+    timeout-minutes: 45
+    env:
+      # cargo-fuzz supplies its own sanitizer and coverage flags.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run nightly fuzzing and sync corpus
+        run: scripts/ci-runner-step.sh scripts/ci-fuzz-smoke.sh --mode nightly "$RUST_NIGHTLY"
+        env:
+          CI_SCCACHE_STATS: "1"
+      - name: Upload crash artifacts
+        if: failure()
+        uses: christopherhx/gitea-upload-artifact@81f940d004763f986ba3582c007fd842dd5cb0d7
+        with:
+          name: fuzz-nightly-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

@@ -131,7 +131,7 @@ echo "native-split: counter-app draws in pane $app_pane (${cols}x${rows}); the s
 
 # 2. Keys sent to the app's pane reach the app.
 for _ in 1 2 3; do
-    "$ULTTYCTL" --pane "$app_pane" send-text + >/dev/null
+    "$ULTTYCTL" --pane "$app_pane" send-key + >/dev/null
 done
 wait_regions count "$app_pane" --cols "$cols" --rows "$rows" --text 3 ||
     fail "three presses of + did not count to 3"
@@ -183,7 +183,7 @@ for pane in "$first_inband" "$second_inband"; do
     wait_regions "inband-$pane" "$pane" --cols "$cols" --rows "$rows" --text Counter --text 0 ||
         fail "in-band app did not draw in pane $pane"
 done
-"$ULTTYCTL" --pane "$first_inband" send-text + >/dev/null || fail "first in-band input"
+"$ULTTYCTL" --pane "$first_inband" send-key + >/dev/null || fail "first in-band input"
 cols=$(pane_field "$first_inband" cols)
 rows=$(pane_field "$first_inband" rows)
 wait_regions inband-count "$first_inband" --cols "$cols" --rows "$rows" --text 1 || fail "first in-band count"
@@ -200,9 +200,9 @@ wait_regions inband-gui "$second_inband" --cols "$cols" --rows "$rows" --text 1 
 cols=$(pane_field "$first_inband" cols)
 rows=$(pane_field "$first_inband" rows)
 wait_regions inband-gui-isolated "$first_inband" --cols "$cols" --rows "$rows" --text 1 || fail "GUI key also reached sibling"
-"$ULTTYCTL" --pane "$first_inband" send-text q >/dev/null 2>&1 || true
-"$ULTTYCTL" --pane "$second_inband" send-text q >/dev/null 2>&1 || true
+"$ULTTYCTL" --pane "$first_inband" send-key q >/dev/null 2>&1 || true
+"$ULTTYCTL" --pane "$second_inband" send-key q >/dev/null 2>&1 || true
 echo "native-split: independent in-band panes"
 
-"$ULTTYCTL" --pane "$app_pane" send-text q >/dev/null 2>&1 || true
+"$ULTTYCTL" --pane "$app_pane" send-key q >/dev/null 2>&1 || true
 echo "native-split: ok"

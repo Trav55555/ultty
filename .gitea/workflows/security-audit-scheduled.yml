@@ -1,0 +1,16 @@
+# Daily RustSec advisory check on main, so newly published advisories are
+# caught even when no pull requests are open.
+name: Scheduled Security Audit
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  security-audit:
+    name: Security Audit
+    runs-on: ultty
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/ci-runner-step.sh scripts/security-audit.sh

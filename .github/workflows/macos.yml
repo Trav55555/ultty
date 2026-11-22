@@ -1,0 +1,52 @@
+# macOS CI on GitHub-hosted arm64 runners (ADR 0029 Slice 1).
+# Runs on pushes to main and on manual workflow_dispatch so macOS compile,
+# clippy, and test regressions are caught automatically.
+name: macOS CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to check out (defaults to the workflow ref)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+  # Pinned to match rust-toolchain.toml and ci.yml. Bump all workflows together.
+  RUST_TOOLCHAIN: 1.98.1
+
+jobs:
+  macos:
+    name: macOS (arm64)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' && inputs.ref == '' }}
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Headless check
+        run: cargo check --locked -p ultty --no-default-features
+      - name: Build ultty
+        run: cargo build --locked -p ultty
+      - name: Test workspace
+        run: cargo test --locked --workspace
