@@ -52,6 +52,19 @@ start_sccache() {
   return 1
 }
 
+if [ "${CI_AUTO_LINKER:-0}" = 1 ]; then
+  case " ${RUSTFLAGS:-} " in
+    *"-fuse-ld="*) ;;
+    *)
+      if command -v mold >/dev/null 2>&1; then
+        export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-C link-arg=-fuse-ld=mold"
+      elif command -v ld.lld >/dev/null 2>&1; then
+        export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-C link-arg=-fuse-ld=lld"
+      fi
+      ;;
+  esac
+fi
+
 if [ "${RUSTC_WRAPPER:-}" = sccache ]; then
   eval "$(aws configure export-credentials --format env)"
   if [ -z "${SCCACHE_BUCKET:-}" ]; then
