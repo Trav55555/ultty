@@ -174,6 +174,10 @@ jobs:
     name: VT icount
     runs-on: ultty
     timeout-minutes: 30
+    env:
+      # Valgrind callgrind on the runner image fails to resolve symbols in
+      # mold-linked binaries; use the default GNU linker for ultty-bench.
+      CI_AUTO_LINKER: "0"
     steps:
       - uses: actions/checkout@v4
         with:
