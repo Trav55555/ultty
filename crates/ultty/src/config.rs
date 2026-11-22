@@ -60,6 +60,14 @@ impl Config {
             raw.get("colors").and_then(toml::Value::as_table),
         );
         config.warn_on_duplicate_keybindings();
+        if config.font.metrics == FontMetricsMode::Legacy
+            && raw
+                .get("font")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|font| !font.contains_key("size"))
+        {
+            config.font.size = 14.0;
+        }
         config.font.clamp_size();
         config.font.clamp_line_height();
         config.behavior.clamp_scrollback();
@@ -568,6 +576,27 @@ impl PaletteConfig {
     }
 }
 
+/// Units and line-height basis used to size terminal cells.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FontMetricsMode {
+    /// Typographic points and the font's natural line height.
+    #[default]
+    Points,
+    /// Logical pixels and the font size as the line-height basis.
+    Legacy,
+}
+
+impl FontMetricsMode {
+    /// Suffix for the configured size before the display scale is applied.
+    pub fn size_unit(self) -> &'static str {
+        match self {
+            Self::Points => "pt",
+            Self::Legacy => "px",
+        }
+    }
+}
+
 /// Font configuration.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
@@ -593,11 +622,12 @@ pub struct FontConfig {
     /// tables. A later entry wins where ranges overlap. See
     /// [`parse_codepoint_map`].
     pub codepoint_map: Vec<CodepointMapEntry>,
-    /// Font size in typographic points (1/72 inch, rendered at 96 DPI times
-    /// the display scale factor).
+    /// Selects the units for size and the line-height basis.
+    pub metrics: FontMetricsMode,
+    /// Font size in the units selected by `metrics`, before display scaling.
     pub size: f32,
-    /// Multiplier on the font's natural line height (`ascent - descent +
-    /// line gap`), rounded up to whole pixels. Clamped to
+    /// Multiplier on the line-height basis selected by `metrics`.
+    /// Cell height rounds up to whole pixels. The multiplier is clamped to
     /// [`MIN_LINE_HEIGHT`]..=[`MAX_LINE_HEIGHT`].
     pub line_height: f32,
     /// Draw font ligatures (`=>`, `!=`, `===` in fonts such as Fira Code).
@@ -632,6 +662,7 @@ impl Default for FontConfig {
             bold_italic_family: String::new(),
             features: Vec::new(),
             codepoint_map: Vec::new(),
+            metrics: FontMetricsMode::Points,
             size: 11.0,
             // 1.0 = no extra spacing between lines, required for block characters
             // to touch (e.g., OpenCode logo). Users can increase if they prefer
@@ -643,10 +674,10 @@ impl Default for FontConfig {
     }
 }
 
-/// Smallest font size (points) the renderer accepts.
+/// Smallest font size the renderer accepts in the selected units.
 pub const MIN_FONT_SIZE: f32 = 4.0;
 
-/// Largest font size (points) the renderer accepts.
+/// Largest font size the renderer accepts in the selected units.
 pub const MAX_FONT_SIZE: f32 = 128.0;
 
 impl FontConfig {
@@ -1680,6 +1711,29 @@ copy = "ctrl+c"
         let config = Config::load_from_path(&path).unwrap();
 
         assert_eq!(config.font.size, MIN_FONT_SIZE);
+    }
+
+    #[test]
+    fn test_loaded_font_metrics_preserve_explicit_sizes_and_default_by_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (font, mode, size) in [
+            ("", FontMetricsMode::Points, 11.0),
+            ("size = 14.0", FontMetricsMode::Points, 14.0),
+            ("metrics = 'legacy'", FontMetricsMode::Legacy, 14.0),
+            (
+                "metrics = 'legacy'\nsize = 11.0",
+                FontMetricsMode::Legacy,
+                11.0,
+            ),
+            ("metrics = 'points'", FontMetricsMode::Points, 11.0),
+        ] {
+            std::fs::write(&path, format!("[font]\n{font}\n")).unwrap();
+            let config = Config::load_from_path(&path).unwrap();
+
+            assert_eq!(config.font.metrics, mode, "{font}");
+            assert_eq!(config.font.size, size, "{font}");
+        }
     }
 
     #[test]
