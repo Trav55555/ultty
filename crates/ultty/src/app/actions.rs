@@ -269,7 +269,7 @@ impl App {
     pub(super) fn change_font_size(&mut self, increase: bool) {
         let new_size = self.renderer.step_font_size(increase);
 
-        tracing::info!("Font size: {:.1}pt", new_size);
+        tracing::info!("Font size: {:.1}pt", new_size / self.scale_factor);
 
         // Cell size changed: re-size every pane's grid.
         self.relayout_terminals();
@@ -282,7 +282,7 @@ impl App {
         let default_size = self.config.font.size * self.scale_factor;
         let new_size = self.renderer.set_font_size(default_size);
 
-        tracing::info!("Font size reset to: {:.1}pt", new_size);
+        tracing::info!("Font size reset to: {:.1}pt", new_size / self.scale_factor);
 
         // Cell size changed: re-size every pane's grid.
         self.relayout_terminals();

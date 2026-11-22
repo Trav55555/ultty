@@ -60,7 +60,7 @@ pub(super) enum RendererState {
 pub(super) struct Starting {
     /// Cell size the renderer is being built with.
     cell: (f32, f32),
-    /// The font size the renderer should have, in physical pixels.
+    /// The font size the renderer should have, in scaled points (`pt * scale_factor`).
     font_size: f32,
     /// Fonts applied (a config reload) while starting.
     font_config: Option<Box<FontConfig>>,

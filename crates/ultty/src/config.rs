@@ -593,10 +593,11 @@ pub struct FontConfig {
     /// tables. A later entry wins where ranges overlap. See
     /// [`parse_codepoint_map`].
     pub codepoint_map: Vec<CodepointMapEntry>,
-    /// Font size in points
+    /// Font size in typographic points (1/72 inch, rendered at 96 DPI times
+    /// the display scale factor).
     pub size: f32,
-    /// Line height as a multiple of the font size: the cell height is
-    /// `size * line_height`, rounded up to whole pixels. Clamped to
+    /// Multiplier on the font's natural line height (`ascent - descent +
+    /// line gap`), rounded up to whole pixels. Clamped to
     /// [`MIN_LINE_HEIGHT`]..=[`MAX_LINE_HEIGHT`].
     pub line_height: f32,
     /// Draw font ligatures (`=>`, `!=`, `===` in fonts such as Fira Code).
@@ -631,7 +632,7 @@ impl Default for FontConfig {
             bold_italic_family: String::new(),
             features: Vec::new(),
             codepoint_map: Vec::new(),
-            size: 14.0,
+            size: 11.0,
             // 1.0 = no extra spacing between lines, required for block characters
             // to touch (e.g., OpenCode logo). Users can increase if they prefer
             // more line spacing for regular text.
@@ -1440,7 +1441,7 @@ mod tests {
     fn default_config() {
         let config = Config::default();
         assert_eq!(config.font.family, DEFAULT_FONT_FAMILY);
-        assert_eq!(config.font.size, 14.0);
+        assert_eq!(config.font.size, 11.0);
         assert_eq!(config.font.emoji, "", "picked from the installed fonts");
         assert_eq!(config.behavior.scrollback_lines, 10_000);
     }

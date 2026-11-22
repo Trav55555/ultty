@@ -414,6 +414,17 @@ match nearest the cursor in the search direction. Esc leaves the prompt.
 - A logical line over 1 MiB is searched in pieces, so a match cannot cross
   those cuts.
 
+## Font size
+
+```toml
+[font]
+size = 11.0
+```
+
+Font size in typographic points (1/72 inch), rendered at 96 DPI multiplied by
+the display scale factor (so `1 pt = 4/3` logical pixels, matching Alacritty
+and Ghostty). Values outside 4.0 to 128.0 are clamped.
+
 ## Line height
 
 ```toml
@@ -421,10 +432,11 @@ match nearest the cursor in the search direction. Esc leaves the prompt.
 line_height = 1.0
 ```
 
-The cell height as a multiple of the font size, rounded up to whole pixels.
-Values outside 0.5 to 3.0 are clamped. At 1.0, block and box-drawing
-characters in adjacent rows touch; larger values add space between lines.
-Font settings apply when the config is reloaded; see
+A multiplier on the font's natural line height (`ascent - descent + line gap`
+at the configured point size), rounded up to whole pixels. Values outside 0.5
+to 3.0 are clamped. At 1.0, block and box-drawing characters in adjacent rows
+touch; larger values add space between lines. Font settings apply when the
+config is reloaded; see
 [Changing fonts without a restart](#changing-fonts-without-a-restart).
 
 ## Bold and italic families

@@ -543,6 +543,12 @@ pub struct TextRenderer {
     pipeline: TextPipeline,
     cell_width: f32,
     cell_height: f32,
+    /// Configured font size in scaled points (`pt * scale_factor`).
+    font_size: f32,
+    /// Configured line-height multiplier.
+    line_height_multiplier: f32,
+    /// Primary face natural line height divided by em size (`(ascent - descent + leading) / upem`).
+    natural_line_ratio: f32,
     metrics: Metrics,
     decoration: DecorationMetrics,
     device: Arc<wgpu::Device>,
@@ -609,13 +615,51 @@ fn grid_buffer(
     })
 }
 
-/// Font size and line height for `font_config`. The size is clamped so
-/// cells are never 0 px wide; the line height, which is the cell height, is
-/// `size * line_height` rounded up to whole pixels.
-fn font_metrics(font_config: &FontConfig) -> Metrics {
-    let font_size = crate::config::clamp_font_size(font_config.size);
-    let line_height = (font_size * font_config.line_height).ceil().max(1.0);
-    Metrics::new(font_size, line_height)
+/// Pixels per typographic point at the standard 96 DPI reference (`96 / 72`).
+const POINTS_TO_PIXELS: f32 = 96.0 / 72.0;
+
+/// Convert a size in typographic points (already multiplied by display scale
+/// factor when applicable) into physical pixels.
+fn points_to_pixels(points: f32) -> f32 {
+    points * POINTS_TO_PIXELS
+}
+
+/// Pixel metrics for a font size in scaled points, a configured `line_height`
+/// multiplier, and the primary face's natural line-height-to-em ratio.
+fn font_metrics(size_pt: f32, line_height_multiplier: f32, natural_line_ratio: f32) -> Metrics {
+    let font_size_px = points_to_pixels(crate::config::clamp_font_size(size_pt));
+    let line_height_px = (font_size_px * natural_line_ratio * line_height_multiplier)
+        .ceil()
+        .max(1.0);
+    Metrics::new(font_size_px, line_height_px)
+}
+
+/// Measure `(ascent - descent + leading) / units_per_em` for the primary face
+/// resolved for `font_family`, falling back to `1.0` if unavailable.
+fn measure_natural_line_ratio(font_system: &mut FontSystem, font_family: &str) -> f32 {
+    let mut buffer = Buffer::new(font_system, Metrics::new(16.0, 16.0));
+    buffer.set_text("M", &font_attrs(font_family), Shaping::Advanced, None);
+    buffer.shape_until_scroll(font_system, false);
+    let Some(font_id) = buffer
+        .layout_runs()
+        .next()
+        .and_then(|run| run.glyphs.first())
+        .map(|g| g.font_id)
+    else {
+        return 1.0;
+    };
+    let Some(font) = font_system.get_font(font_id, Weight::NORMAL) else {
+        return 1.0;
+    };
+    let m = font.metrics();
+    let upem = f32::from(m.units_per_em);
+    if upem > 0.0 {
+        let natural = (m.ascent - m.descent + m.leading.max(0.0)) / upem;
+        if natural.is_finite() && natural > 0.5 {
+            return natural;
+        }
+    }
+    1.0
 }
 
 /// The fonts text is shaped with and the cell size they give, measured on
@@ -625,6 +669,10 @@ fn font_metrics(font_config: &FontConfig) -> Metrics {
 /// measured here.
 pub struct Fonts {
     font_system: FontSystem,
+    /// Clamped font size in scaled points (`pt * scale_factor`).
+    font_size: f32,
+    line_height_multiplier: f32,
+    natural_line_ratio: f32,
     metrics: Metrics,
     selection: FontSelection,
     emoji_family: Option<String>,
@@ -639,13 +687,19 @@ impl Fonts {
     /// Load the system fonts and measure the cell for `font_config`.
     pub fn load(font_config: &FontConfig) -> Self {
         let mut font_system = FontSystem::new();
-        let metrics = font_metrics(font_config);
         let selection = FontSelection::new(font_system.db(), font_config);
+        let font_size = crate::config::clamp_font_size(font_config.size);
+        let line_height_multiplier = font_config.line_height;
+        let natural_line_ratio = measure_natural_line_ratio(&mut font_system, selection.family());
+        let metrics = font_metrics(font_size, line_height_multiplier, natural_line_ratio);
         let (cell_width, cell_height, baseline) =
             TextRenderer::measure_cell_with_font(&mut font_system, metrics, selection.family());
         let emoji_family = installed_emoji_family(font_system.db(), &font_config.emoji);
         Self {
             font_system,
+            font_size,
+            line_height_multiplier,
+            natural_line_ratio,
             metrics,
             selection,
             emoji_family,
@@ -661,9 +715,9 @@ impl Fonts {
         (self.cell_width, self.cell_height)
     }
 
-    /// The font size in pixels.
+    /// The font size in scaled points (`pt * scale_factor`).
     pub fn font_size(&self) -> f32 {
-        self.metrics.font_size
+        self.font_size
     }
 
     /// A font system over the same fonts, for the CPU frames. Copies the
@@ -718,6 +772,9 @@ impl TextRenderer {
     ) -> anyhow::Result<Self> {
         let Fonts {
             mut font_system,
+            font_size,
+            line_height_multiplier,
+            natural_line_ratio,
             metrics,
             selection,
             emoji_family,
@@ -746,6 +803,9 @@ impl TextRenderer {
             pipeline,
             cell_width,
             cell_height,
+            font_size,
+            line_height_multiplier,
+            natural_line_ratio,
             metrics,
             decoration: DecorationMetrics {
                 baseline,
@@ -1113,9 +1173,17 @@ impl TextRenderer {
     /// grid needs resizing.
     pub fn apply_font_config(&mut self, config: &FontConfig) -> bool {
         let old_cell = (self.cell_width, self.cell_height);
-        self.metrics = font_metrics(config);
-        self.styled_text_buffer.set_metrics(self.metrics);
         self.fonts = FontSelection::new(self.font_system.db(), config);
+        self.font_size = crate::config::clamp_font_size(config.size);
+        self.line_height_multiplier = config.line_height;
+        self.natural_line_ratio =
+            measure_natural_line_ratio(&mut self.font_system, self.fonts.family());
+        self.metrics = font_metrics(
+            self.font_size,
+            self.line_height_multiplier,
+            self.natural_line_ratio,
+        );
+        self.styled_text_buffer.set_metrics(self.metrics);
         self.emoji_family = installed_emoji_family(self.font_system.db(), &config.emoji);
         self.ligatures = config.ligatures;
         self.font_generation += 1;
@@ -1138,20 +1206,19 @@ impl TextRenderer {
         self.grid_caches.iter_mut().for_each(GridTextCache::clear);
     }
 
-    /// Get the current font size.
+    /// Get the current font size in scaled points (`pt * scale_factor`).
     pub fn font_size(&self) -> f32 {
-        self.metrics.font_size
+        self.font_size
     }
 
-    /// Set the font size and recalculate cell dimensions.
+    /// Set the font size (in scaled points) and recalculate cell dimensions.
     pub fn set_font_size(&mut self, size: f32) {
         // Clamp to reasonable range
         let size = crate::config::clamp_font_size(size);
 
         // Calculate new metrics with same line height ratio
-        let line_height_ratio = self.metrics.line_height / self.metrics.font_size;
-        let new_line_height = (size * line_height_ratio).ceil();
-        self.metrics = Metrics::new(size, new_line_height);
+        self.font_size = size;
+        self.metrics = font_metrics(size, self.line_height_multiplier, self.natural_line_ratio);
         self.styled_text_buffer.set_metrics(self.metrics);
 
         // Recalculate cell dimensions
@@ -2591,15 +2658,33 @@ mod tests {
 
     #[test]
     fn line_height_multiplies_the_cell_height() {
-        let font = |line_height| FontConfig {
-            size: 14.0,
-            line_height,
-            ..FontConfig::default()
-        };
-        assert_eq!(font_metrics(&font(1.0)).line_height, 14.0);
-        assert_eq!(font_metrics(&font(1.5)).line_height, 21.0);
+        let natural = 1.0;
+        assert_eq!(font_metrics(12.0, 1.0, natural).font_size, 16.0);
+        assert_eq!(font_metrics(12.0, 1.0, natural).line_height, 16.0);
+        assert_eq!(font_metrics(12.0, 1.5, natural).line_height, 24.0);
         // Rounded up to whole pixels.
-        assert_eq!(font_metrics(&font(1.2)).line_height, 17.0);
+        assert_eq!(font_metrics(12.0, 1.2, natural).line_height, 20.0);
+
+        let dejavu_ratio = (1901.0 + 483.0) / 2048.0;
+        let m = font_metrics(11.0, 1.0, dejavu_ratio);
+        assert!((m.font_size - 11.0 * 96.0 / 72.0).abs() < 1e-4);
+        assert_eq!(m.line_height, 18.0);
+    }
+
+    #[test]
+    fn dejavu_sans_mono_11pt_matches_96_dpi_cell_size() {
+        let fonts = Fonts::load(&FontConfig {
+            family: "DejaVu Sans Mono".to_string(),
+            size: 11.0,
+            line_height: 1.0,
+            ..FontConfig::default()
+        });
+        if fonts.family().eq_ignore_ascii_case("DejaVu Sans Mono") {
+            let (cw, ch) = fonts.cell_dimensions();
+            assert_eq!(cw, 9.0);
+            assert!((17.0..=18.0).contains(&ch), "unexpected cell height {ch}");
+            assert_eq!(fonts.font_size(), 11.0);
+        }
     }
 
     #[test]
