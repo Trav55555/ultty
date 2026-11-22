@@ -141,7 +141,6 @@ pub enum ControlRequest {
         target: Option<u64>,
     },
 
-    // === Input Injection ===
     SendText {
         text: String,
         /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
@@ -164,7 +163,6 @@ pub enum ControlRequest {
         target: Option<u64>,
     },
 
-    // === Command Execution ===
     NewTab {
         title: Option<String>,
         command: Option<String>,
@@ -230,7 +228,6 @@ pub enum ControlRequest {
         index: Option<usize>,
     },
 
-    // === State Queries ===
     /// The pane's text, one logical line per newline: soft-wrapped rows are
     /// joined and trailing blanks dropped, so lines do not map to rows.
     GetText {
@@ -337,7 +334,6 @@ pub enum ControlRequest {
         target: Option<u64>,
     },
 
-    // === Search ===
     Search {
         pattern: String,
         regex: bool,
@@ -348,7 +344,6 @@ pub enum ControlRequest {
         target: Option<u64>,
     },
 
-    // === Wait Operations ===
     /// Wait until something happens in a pane: `pattern` appears (the
     /// default), or the event `until` names. The pane is fixed when the
     /// request arrives: `target`, or the pane focused at that moment.
@@ -366,7 +361,6 @@ pub enum ControlRequest {
         target: Option<u64>,
     },
 
-    // === Events ===
     /// Turn this connection into an event stream: after the `Subscribed`
     /// reply, one [`ControlEvent`] per line until the client disconnects.
     Subscribe {
@@ -375,7 +369,6 @@ pub enum ControlRequest {
         target: Option<u64>,
     },
 
-    // === Window Control ===
     FocusWindow,
 
     SwitchTab {
@@ -422,17 +415,14 @@ pub enum ControlRequest {
         target: Option<u64>,
     },
 
-    // === Screenshot ===
     Screenshot {
         path: Option<String>,
     },
 
-    // === Batch Mode ===
     Batch {
         commands: Vec<ControlRequest>,
     },
 
-    // === Auth ===
     Authenticate {
         token: String,
     },
@@ -447,7 +437,6 @@ pub enum ControlRequest {
         request: Box<ControlRequest>,
     },
 
-    // === Misc ===
     Ping,
 
     Version,

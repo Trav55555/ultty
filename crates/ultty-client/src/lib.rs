@@ -562,8 +562,6 @@ impl UlttyClient {
         Ok(events)
     }
 
-    // ── Private helpers ──────────────────────────────────────────
-
     fn handshake(&mut self) -> Result<(), Error> {
         self.send(&AppMessage::ClientHello {
             version: PROTOCOL_VERSION,
@@ -1366,7 +1364,6 @@ mod tests {
             wire.extend_from_slice(b"\x1b[?62;22c");
             master.write_all(&wire).unwrap();
 
-            // Collect what the client sends until Disconnect.
             let mut splitter = Splitter::default();
             let mut frames = Vec::new();
             let mut raw = Vec::new();

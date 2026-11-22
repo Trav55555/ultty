@@ -18,14 +18,12 @@ pub struct FrameId(pub u32);
 /// Messages from app to terminal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppMessage {
-    // Connection
     /// Client hello (version negotiation).
     ClientHello {
         version: u16,
         requested_capabilities: u32,
     },
 
-    // Region management
     /// Create a new region.
     CreateRegion {
         id: RegionId,
@@ -72,7 +70,6 @@ pub enum AppMessage {
     /// Delete a region.
     DeleteRegion { id: RegionId },
 
-    // Inline surfaces
     /// Create region `id` as a second root of the scene, laid out at
     /// `cols x rows` cells (ADR 0020). Its width and height constraints are
     /// ignored.
@@ -94,14 +91,12 @@ pub enum AppMessage {
         insert_index: i32,
     },
 
-    // Frame batching
     /// Begin atomic frame update.
     BeginFrame { frame_id: FrameId },
 
     /// End atomic frame update.
     EndFrame { frame_id: FrameId },
 
-    // Interaction
     /// Programmatic scroll.
     Scroll {
         id: RegionId,
@@ -116,29 +111,24 @@ pub enum AppMessage {
     /// Blur (remove focus).
     Blur,
 
-    // Events
     /// Subscribe to events.
     Subscribe { id: RegionId, events: u32 },
 
     /// Unsubscribe from events.
     Unsubscribe { id: RegionId, events: u32 },
 
-    // Clipboard
     /// Request clipboard contents.
     ClipboardGet,
 
     /// Set clipboard contents.
     ClipboardSet { text: String },
 
-    // Session
     /// Disconnect cleanly.
     Disconnect,
 
-    // Keepalive
     /// Pong response to a Ping from the terminal.
     Pong,
 
-    // Overrides
     /// The answer to a `SetOverride`: applied when `error` is `None`,
     /// otherwise why it was not (ADR 0023 §9).
     OverrideResult {
@@ -160,7 +150,6 @@ pub enum AppMessage {
 pub enum TerminalMessage {
     /// Invoke an explicitly declared action against one committed app frame.
     InvokeAction(SemanticActionRequest),
-    // Connection
     /// Server hello (capabilities).
     ServerHello { version: u16, capabilities: u32 },
 
@@ -172,7 +161,6 @@ pub enum TerminalMessage {
         height: u16,
     },
 
-    // Layout
     /// Layout computed after change.
     LayoutComputed {
         frame_id: Option<FrameId>,
@@ -180,7 +168,6 @@ pub enum TerminalMessage {
         regions: Vec<ComputedRegionLayout>,
     },
 
-    // Events
     /// Input event.
     Input(InputEvent),
 
@@ -193,22 +180,18 @@ pub enum TerminalMessage {
     /// Scroll position changed.
     Scroll(ScrollEvent),
 
-    // Clipboard
     /// Clipboard content response.
     ClipboardContent { text: Option<String> },
 
-    // Inline surfaces
     /// Something happened to a surface.
     SurfaceEvent {
         id: RegionId,
         kind: SurfaceEventKind,
     },
 
-    // Keepalive
     /// Ping request to the app (expects a Pong reply).
     Ping,
 
-    // Overrides
     /// Apply a user override pushed through the terminal, or clear the
     /// pushed one when `pushed` is `None` (ADR 0023 §9). Sent only to a
     /// session that negotiated `CAP_OVERRIDE_PUSH`; the app answers with
@@ -218,7 +201,6 @@ pub enum TerminalMessage {
         pushed: Option<PushedOverride>,
     },
 
-    // Errors
     /// Error response.
     Error { code: u16, message: String },
 }

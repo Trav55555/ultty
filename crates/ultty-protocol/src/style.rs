@@ -351,7 +351,6 @@ mod tests {
     fn easing_ease_in() {
         assert_eq!(Easing::EaseIn.apply(0.0), 0.0);
         assert_eq!(Easing::EaseIn.apply(1.0), 1.0);
-        // EaseIn should be slower at the start
         assert!(Easing::EaseIn.apply(0.5) < 0.5);
     }
 
@@ -359,7 +358,6 @@ mod tests {
     fn easing_ease_out() {
         assert_eq!(Easing::EaseOut.apply(0.0), 0.0);
         assert_eq!(Easing::EaseOut.apply(1.0), 1.0);
-        // EaseOut should be faster at the start
         assert!(Easing::EaseOut.apply(0.5) > 0.5);
     }
 
@@ -368,9 +366,7 @@ mod tests {
         assert_eq!(Easing::EaseInOut.apply(0.0), 0.0);
         assert_eq!(Easing::EaseInOut.apply(1.0), 1.0);
         assert_eq!(Easing::EaseInOut.apply(0.5), 0.5);
-        // First half is slow (ease in)
         assert!(Easing::EaseInOut.apply(0.25) < 0.25);
-        // Second half is fast then slow (ease out)
         assert!(Easing::EaseInOut.apply(0.75) > 0.75);
     }
 

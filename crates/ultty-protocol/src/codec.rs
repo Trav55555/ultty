@@ -35,10 +35,6 @@ use crate::{
 
 use frame::{begin_frame, decode_frame_header, finish_frame};
 
-// ============================================================================
-// Constants
-// ============================================================================
-
 /// Maximum allowed string length (1 MB) to prevent OOM attacks.
 const MAX_STRING_LEN: usize = 1024 * 1024;
 
@@ -82,10 +78,6 @@ pub const MAX_SEMANTICS_STRING_LEN: usize = 4 * 1024;
 /// Maximum bytes across all strings of one `Semantics`.
 pub const MAX_SEMANTICS_TOTAL_BYTES: usize = 8 * 1024;
 
-// ============================================================================
-// Validation helpers
-// ============================================================================
-
 /// Reject NaN and Infinity values in decoded floats.
 fn validate_f32(v: f32) -> Result<f32> {
     if v.is_nan() || v.is_infinite() {
@@ -107,10 +99,6 @@ fn bounded_capacity(buf: &impl Buf, declared: usize, min_element_len: usize) -> 
     declared.min(buf.remaining() / min_element_len.max(1))
 }
 
-// ============================================================================
-// Traits
-// ============================================================================
-
 /// Trait for encoding messages to bytes.
 pub trait Encode {
     /// Encode to a byte buffer.
@@ -129,10 +117,6 @@ pub trait Decode: Sized {
     /// Decode from a byte buffer.
     fn decode(buf: &mut impl Buf) -> Result<Self>;
 }
-
-// ============================================================================
-// Helper functions
-// ============================================================================
 
 fn encode_string(s: &str, buf: &mut BytesMut) {
     let bytes = s.as_bytes();
@@ -246,10 +230,6 @@ fn decode_option_string(buf: &mut impl Buf) -> Result<Option<String>> {
     }
 }
 
-// ============================================================================
-// Basic Types
-// ============================================================================
-
 impl Encode for RegionId {
     fn encode(&self, buf: &mut BytesMut) {
         buf.put_u32_le(self.0);
@@ -285,10 +265,6 @@ impl Decode for FrameId {
         Ok(FrameId(buf.get_u32_le()))
     }
 }
-
-// ============================================================================
-// Color Types
-// ============================================================================
 
 impl Encode for NamedColor {
     fn encode(&self, buf: &mut BytesMut) {
@@ -413,10 +389,6 @@ fn decode_option_color(buf: &mut impl Buf) -> Result<Option<Color>> {
     }
 }
 
-// ============================================================================
-// Border Types
-// ============================================================================
-
 impl Encode for BorderType {
     fn encode(&self, buf: &mut BytesMut) {
         buf.put_u8(*self as u8);
@@ -500,10 +472,6 @@ impl Decode for BorderStyle {
         })
     }
 }
-
-// ============================================================================
-// Style
-// ============================================================================
 
 impl Encode for Style {
     fn encode(&self, buf: &mut BytesMut) {
@@ -591,10 +559,6 @@ impl Decode for Transition {
         })
     }
 }
-
-// ============================================================================
-// Layout Types
-// ============================================================================
 
 impl Encode for Dimension {
     fn encode(&self, buf: &mut BytesMut) {
@@ -1109,10 +1073,6 @@ impl Decode for Constraints {
         })
     }
 }
-
-// ============================================================================
-// Content Types
-// ============================================================================
 
 impl Encode for TextWrap {
     fn encode(&self, buf: &mut BytesMut) {
@@ -1639,10 +1599,6 @@ impl Decode for Content {
     }
 }
 
-// ============================================================================
-// Event Types
-// ============================================================================
-
 impl Encode for MouseButton {
     fn encode(&self, buf: &mut BytesMut) {
         buf.put_u8(*self as u8);
@@ -2021,13 +1977,7 @@ impl Decode for ComputedRegionLayout {
     }
 }
 
-// ============================================================================
-// Messages
-// ============================================================================
-
-// Message type codes
 mod msg_type {
-    // App -> Terminal
     pub const CLIENT_HELLO: u16 = 0x0001;
     pub const CREATE_REGION: u16 = 0x0010;
     pub const SET_REGION_METADATA: u16 = 0x0014;
@@ -2056,7 +2006,6 @@ mod msg_type {
     pub const ACTION_RESULT: u16 = 0x0081;
     pub const DISCONNECT: u16 = 0x00FF;
 
-    // Terminal -> App
     pub const SERVER_HELLO: u16 = 0x0001;
     pub const SESSION_READY: u16 = 0x0002;
     pub const LAYOUT_COMPUTED: u16 = 0x0010;
@@ -2498,7 +2447,6 @@ impl Decode for AppMessage {
             _ => Err(ProtocolError::UnknownMessageType(header.type_code)),
         };
 
-        // Verify we consumed exactly the declared payload length
         if result.is_ok() {
             let actual_remaining = buf.remaining();
             if actual_remaining < expected_remaining {
@@ -2766,7 +2714,6 @@ impl Decode for TerminalMessage {
             _ => Err(ProtocolError::UnknownMessageType(header.type_code)),
         };
 
-        // Verify we consumed exactly the declared payload length
         if result.is_ok() {
             let actual_remaining = buf.remaining();
             if actual_remaining < expected_remaining {
@@ -3120,8 +3067,6 @@ mod tests {
         assert!(matches!(result, Err(ProtocolError::InvalidMagic(_))));
     }
 
-    // ── Float validation tests ──────────────────────────────────────
-
     #[test]
     fn validate_f32_rejects_nan() {
         assert!(validate_f32(f32::NAN).is_err());
@@ -3162,13 +3107,11 @@ mod tests {
     fn constraints_decode_rejects_nan_flex_grow() {
         use crate::Constraints;
 
-        // Verify we can decode valid constraints
         let mut buf2 = BytesMut::new();
         Constraints::default().encode(&mut buf2);
         let mut cursor = buf2.freeze();
         assert!(Constraints::decode(&mut cursor).is_ok());
 
-        // Now encode with NaN flex_grow via raw construction
         let mut raw = BytesMut::new();
         raw.put_u8(1); // display: Flex
         raw.put_u8(0); // flex_direction: Row
@@ -3215,8 +3158,6 @@ mod tests {
         let result = Constraints::decode(&mut cursor);
         assert!(result.is_err(), "NaN flex_grow should be rejected");
     }
-
-    // ── Hardening: every decoded float is validated ─────────────────
 
     /// Sentinel float that is unlikely to collide with any other byte pattern
     /// in an encoded message.
@@ -3377,8 +3318,6 @@ mod tests {
         }
     }
 
-    // ── Hardening: images ───────────────────────────────────────────
-
     fn encode_raw_image(width: u32, height: u32, data_len: u32) -> BytesMut {
         let mut buf = BytesMut::new();
         buf.put_u32_le(width);
@@ -3432,8 +3371,6 @@ mod tests {
         assert_eq!(img.data.len(), 8);
     }
 
-    // ── Hardening: enums and allocations ────────────────────────────
-
     #[test]
     fn transition_decode_rejects_unknown_easing() {
         let mut buf = BytesMut::new();
@@ -3472,8 +3409,6 @@ mod tests {
         buf.put_u32_le(MAX_REGION_COUNT as u32);
         assert!(TerminalMessage::decode(&mut buf.freeze()).is_err());
     }
-
-    // ── Drift guard: wire constants match the documented tables ─────
 
     #[test]
     fn message_type_codes_match_documented_table() {

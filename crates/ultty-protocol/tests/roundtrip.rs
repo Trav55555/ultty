@@ -6,79 +6,19 @@
 use proptest::prelude::*;
 
 use ultty_protocol::{
-    // Layout types
-    AlignContent,
-    AlignItems,
-    AlignSelf,
-    // Message types
-    AppMessage,
-    // Style types
-    BorderEdges,
-    BorderStyle,
-    BorderType,
-    // Content types
-    CodeWidget,
-    Color,
-    ComputedRegionLayout,
-    Constraints,
-    Content,
-    // Codec traits
-    Decode,
-    Dimension,
-    Display,
-    Edges,
-    Encode,
-    FlexDirection,
-    FlexWrap,
-    // Event types
-    FocusEvent,
-    FrameId,
-    GridLine,
-    GridPlacement,
-    InputEvent,
-    InputType,
-    InputWidget,
-    JustifyContent,
-    Key,
-    LayoutTrigger,
-    MarkdownWidget,
-    Modifiers,
-    MouseButton,
-    NamedColor,
-    Overflow,
-    OverflowAxis,
-    ProgressWidget,
-    // Core types
-    RegionId,
-    ResizeEvent,
-    RichText,
-    // Semantics types
-    Role,
-    ScrollEvent,
-    SemanticValue,
-    Semantics,
-    SetPosition,
-    Size,
-    Span,
-    SpinnerWidget,
-    Style,
-    TerminalMessage,
-    TextAlign,
-    TextContent,
-    TextOverflow,
-    TextWrap,
-    Toggled,
-    TrackSizingFunction,
-    WidgetContent,
+    AlignContent, AlignItems, AlignSelf, AppMessage, BorderEdges, BorderStyle, BorderType,
+    CodeWidget, Color, ComputedRegionLayout, Constraints, Content, Decode, Dimension, Display,
+    Edges, Encode, FlexDirection, FlexWrap, FocusEvent, FrameId, GridLine, GridPlacement,
+    InputEvent, InputType, InputWidget, JustifyContent, Key, LayoutTrigger, MarkdownWidget,
+    Modifiers, MouseButton, NamedColor, Overflow, OverflowAxis, ProgressWidget, RegionId,
+    ResizeEvent, RichText, Role, ScrollEvent, SemanticValue, Semantics, SetPosition, Size, Span,
+    SpinnerWidget, Style, TerminalMessage, TextAlign, TextContent, TextOverflow, TextWrap, Toggled,
+    TrackSizingFunction, WidgetContent,
 };
 use ultty_protocol::{
     Expanded, Live, OverrideFormat, PushedOverride, SurfaceEventKind, MAX_SURFACE_ROWS,
     MIN_SURFACE_ROWS,
 };
-
-// ============================================================================
-// Arbitrary Implementations for Basic Types
-// ============================================================================
 
 fn arb_region_id() -> impl Strategy<Value = RegionId> {
     any::<u32>().prop_map(RegionId)
@@ -87,10 +27,6 @@ fn arb_region_id() -> impl Strategy<Value = RegionId> {
 fn arb_frame_id() -> impl Strategy<Value = FrameId> {
     any::<u32>().prop_map(FrameId)
 }
-
-// ============================================================================
-// Style Types
-// ============================================================================
 
 fn arb_named_color() -> impl Strategy<Value = NamedColor> {
     prop_oneof![
@@ -183,10 +119,6 @@ fn arb_style() -> impl Strategy<Value = Style> {
             },
         )
 }
-
-// ============================================================================
-// Layout Types
-// ============================================================================
 
 fn arb_display() -> impl Strategy<Value = Display> {
     prop_oneof![
@@ -357,33 +289,33 @@ fn arb_constraints() -> impl Strategy<Value = Constraints> {
         arb_align_items(),
         arb_align_self(),
         arb_align_content(),
-        arb_finite_f32(), // flex_grow
-        arb_finite_f32(), // flex_shrink
-        arb_dimension(),  // flex_basis
+        arb_finite_f32(),
+        arb_finite_f32(),
+        arb_dimension(),
     );
 
     let size_props = (
-        arb_dimension(),                        // width
-        arb_dimension(),                        // height
-        arb_dimension(),                        // min_width
-        arb_dimension(),                        // min_height
-        arb_dimension(),                        // max_width
-        arb_dimension(),                        // max_height
-        proptest::option::of(arb_finite_f32()), // aspect_ratio
+        arb_dimension(),
+        arb_dimension(),
+        arb_dimension(),
+        arb_dimension(),
+        arb_dimension(),
+        arb_dimension(),
+        proptest::option::of(arb_finite_f32()),
     );
 
     let spacing_props = (
-        arb_edges_dimension(), // margin
-        arb_edges_dimension(), // padding
-        arb_size_dimension(),  // gap
+        arb_edges_dimension(),
+        arb_edges_dimension(),
+        arb_size_dimension(),
         arb_overflow(),
     );
 
     let grid_props = (
-        proptest::collection::vec(arb_track_sizing_function(), 0..3), // grid_template_columns
-        proptest::collection::vec(arb_track_sizing_function(), 0..3), // grid_template_rows
-        arb_grid_placement(),                                         // grid_column
-        arb_grid_placement(),                                         // grid_row
+        proptest::collection::vec(arb_track_sizing_function(), 0..3),
+        proptest::collection::vec(arb_track_sizing_function(), 0..3),
+        arb_grid_placement(),
+        arb_grid_placement(),
     );
 
     // Combine groups using nested tuples (4 groups, each <=10 elements)
@@ -435,10 +367,6 @@ fn arb_constraints() -> impl Strategy<Value = Constraints> {
         },
     )
 }
-
-// ============================================================================
-// Content Types
-// ============================================================================
 
 fn arb_text_wrap() -> impl Strategy<Value = TextWrap> {
     prop_oneof![
@@ -574,10 +502,6 @@ fn arb_content() -> impl Strategy<Value = Content> {
         arb_widget_content().prop_map(Content::Widget),
     ]
 }
-
-// ============================================================================
-// Event Types
-// ============================================================================
 
 fn arb_mouse_button() -> impl Strategy<Value = MouseButton> {
     prop_oneof![
@@ -729,10 +653,6 @@ fn arb_computed_region_layout() -> impl Strategy<Value = ComputedRegionLayout> {
         )
 }
 
-// ============================================================================
-// Semantics
-// ============================================================================
-
 fn arb_semantics() -> impl Strategy<Value = Semantics> {
     let enums = (
         proptest::sample::select(Role::ALL.to_vec()),
@@ -797,20 +717,14 @@ fn arb_semantics() -> impl Strategy<Value = Semantics> {
     )
 }
 
-// ============================================================================
-// Message Types
-// ============================================================================
-
 fn arb_app_message() -> impl Strategy<Value = AppMessage> {
     prop_oneof![
-        // ClientHello
         (any::<u16>(), any::<u32>()).prop_map(|(version, requested_capabilities)| {
             AppMessage::ClientHello {
                 version,
                 requested_capabilities,
             }
         }),
-        // CreateRegion
         (
             arb_region_id(),
             arb_region_id(),
@@ -827,24 +741,16 @@ fn arb_app_message() -> impl Strategy<Value = AppMessage> {
                     style,
                 }
             }),
-        // SetConstraints
         (arb_region_id(), arb_constraints())
             .prop_map(|(id, constraints)| AppMessage::SetConstraints { id, constraints }),
-        // SetStyle
         (arb_region_id(), arb_style()).prop_map(|(id, style)| AppMessage::SetStyle { id, style }),
-        // SetContent
         (arb_region_id(), arb_content())
             .prop_map(|(id, content)| AppMessage::SetContent { id, content }),
-        // SetSemantics
         (arb_region_id(), arb_semantics())
             .prop_map(|(id, semantics)| AppMessage::SetSemantics { id, semantics }),
-        // DeleteRegion
         arb_region_id().prop_map(|id| AppMessage::DeleteRegion { id }),
-        // CreateSurface
         arb_create_surface(),
-        // CloseSurface
         arb_surface_id().prop_map(|id| AppMessage::CloseSurface { id }),
-        // ReparentRegion
         (arb_region_id(), arb_region_id(), any::<i32>()).prop_map(
             |(id, new_parent, insert_index)| {
                 AppMessage::ReparentRegion {
@@ -854,11 +760,8 @@ fn arb_app_message() -> impl Strategy<Value = AppMessage> {
                 }
             }
         ),
-        // BeginFrame
         arb_frame_id().prop_map(|frame_id| AppMessage::BeginFrame { frame_id }),
-        // EndFrame
         arb_frame_id().prop_map(|frame_id| AppMessage::EndFrame { frame_id }),
-        // Scroll
         (
             arb_region_id(),
             arb_finite_f32(),
@@ -866,19 +769,13 @@ fn arb_app_message() -> impl Strategy<Value = AppMessage> {
             any::<bool>()
         )
             .prop_map(|(id, x, y, animate)| AppMessage::Scroll { id, x, y, animate }),
-        // Focus
         arb_region_id().prop_map(|id| AppMessage::Focus { id }),
-        // Blur
         Just(AppMessage::Blur),
-        // Subscribe
         (arb_region_id(), any::<u32>())
             .prop_map(|(id, events)| AppMessage::Subscribe { id, events }),
-        // Unsubscribe
         (arb_region_id(), any::<u32>())
             .prop_map(|(id, events)| AppMessage::Unsubscribe { id, events }),
-        // Disconnect
         Just(AppMessage::Disconnect),
-        // OverrideResult
         (any::<u32>(), proptest::option::of(".*"))
             .prop_map(|(request_id, error)| { AppMessage::OverrideResult { request_id, error } }),
     ]
@@ -897,14 +794,12 @@ fn arb_set_override() -> impl Strategy<Value = TerminalMessage> {
 
 fn arb_terminal_message() -> impl Strategy<Value = TerminalMessage> {
     prop_oneof![
-        // ServerHello
         (any::<u16>(), any::<u32>()).prop_map(|(version, capabilities)| {
             TerminalMessage::ServerHello {
                 version,
                 capabilities,
             }
         }),
-        // SessionReady
         (any::<u64>(), arb_region_id(), any::<u16>(), any::<u16>()).prop_map(
             |(session_id, root_region, width, height)| TerminalMessage::SessionReady {
                 session_id,
@@ -913,7 +808,6 @@ fn arb_terminal_message() -> impl Strategy<Value = TerminalMessage> {
                 height,
             }
         ),
-        // LayoutComputed
         (
             proptest::option::of(arb_frame_id()),
             arb_layout_trigger(),
@@ -926,26 +820,15 @@ fn arb_terminal_message() -> impl Strategy<Value = TerminalMessage> {
                     regions,
                 }
             ),
-        // Input
         arb_input_event().prop_map(TerminalMessage::Input),
-        // Resize
         arb_resize_event().prop_map(TerminalMessage::Resize),
-        // Focus
         arb_focus_event().prop_map(TerminalMessage::Focus),
-        // Scroll
         arb_scroll_event().prop_map(TerminalMessage::Scroll),
-        // SurfaceEvent
         arb_surface_event(),
-        // SetOverride
         arb_set_override(),
-        // Error
         (any::<u16>(), ".*").prop_map(|(code, message)| TerminalMessage::Error { code, message }),
     ]
 }
-
-// ============================================================================
-// Inline surfaces
-// ============================================================================
 
 /// Any region id but the root, which is never a surface.
 fn arb_surface_id() -> impl Strategy<Value = RegionId> {
@@ -974,10 +857,6 @@ fn arb_surface_event() -> impl Strategy<Value = TerminalMessage> {
     )
         .prop_map(|(id, kind)| TerminalMessage::SurfaceEvent { id, kind })
 }
-
-// ============================================================================
-// Roundtrip Tests
-// ============================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(100))]
@@ -1048,10 +927,6 @@ fn surface_messages_roundtrip() {
         .join()
         .expect("surface roundtrip cases pass");
 }
-
-// ============================================================================
-// Edge Case Tests
-// ============================================================================
 
 #[test]
 fn empty_content_roundtrip() {
@@ -1428,7 +1303,6 @@ fn all_widget_types_roundtrip() {
 
 #[test]
 fn disconnect_roundtrip() {
-    // This should work even with the current placeholder implementation
     let msg = AppMessage::Disconnect;
     let encoded = msg.encode_to_bytes();
     let mut cursor = encoded.as_ref();
@@ -1444,10 +1318,6 @@ fn blur_roundtrip() {
     let decoded = AppMessage::decode(&mut cursor).expect("decode should succeed");
     assert_eq!(msg, decoded);
 }
-
-// ============================================================================
-// Negative Tests (Malformed Input)
-// ============================================================================
 
 #[test]
 fn decode_empty_buffer_fails() {
@@ -1469,10 +1339,6 @@ fn decode_invalid_magic_fails() {
     let result = AppMessage::decode(&mut cursor);
     assert!(result.is_err());
 }
-
-// ============================================================================
-// Specific Variant Tests (to ensure no variant is missed)
-// ============================================================================
 
 #[test]
 fn app_message_client_hello_roundtrip() {
