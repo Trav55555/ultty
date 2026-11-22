@@ -3633,6 +3633,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ratatui-ultty"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "ratatui",
+ "thiserror 1.0.69",
+ "tracing",
+ "ultty-client",
+ "ultty-protocol",
+ "unicode-width",
+]
+
+[[package]]
 name = "ratatui-widgets"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
