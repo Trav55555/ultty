@@ -10,7 +10,7 @@
 //! - Navigation: h/j/k/l, w/b/e, 0/$, gg/G, Ctrl-d/u/f/b, H/M/L
 //! - Search: /, ?, n, N (Ctrl-r while typing toggles regex; see [`search`])
 //! - Selection: v (char), V (line), Ctrl-v (block)
-//! - Yank: y (copies selection to clipboard)
+//! - Yank: y (selection), yy / Y (current line) -> copies to clipboard
 //! - Exit: Esc, q, Enter (with selection copies and exits)
 
 use ultty_protocol::{Key, Modifiers};
@@ -84,6 +84,8 @@ pub struct CopyMode {
     search_evicted: usize,
     /// A `g` was pressed and we are waiting for the second key of `gg`.
     pending_g: bool,
+    /// A `y` was pressed in normal mode and we are waiting for the second key of `yy`.
+    pending_y: bool,
     /// Count prefix typed before a motion (`5j`), if any.
     count: Option<usize>,
 }
@@ -111,6 +113,7 @@ impl Default for CopyMode {
             search_status: SearchStatus::Idle,
             search_evicted: 0,
             pending_g: false,
+            pending_y: false,
             count: None,
         }
     }
@@ -137,6 +140,7 @@ impl CopyMode {
         self.cursor_col = 0;
         self.selection_anchor = None;
         self.pending_g = false;
+        self.pending_y = false;
         self.count = None;
         self.search_matches.clear();
         self.current_match = 0;
@@ -185,6 +189,7 @@ impl CopyMode {
         self.active = false;
         self.selection_anchor = None;
         self.pending_g = false;
+        self.pending_y = false;
         self.count = None;
         self.mode = VimMode::Normal;
     }
@@ -258,6 +263,10 @@ impl CopyMode {
             return self.handle_search_key(key, modifiers);
         }
 
+        if matches!(key, Key::Char('\0')) {
+            return CopyModeResult::Handled;
+        }
+
         // `gg`: the second key completes the motion, anything else cancels it.
         if self.pending_g {
             self.pending_g = false;
@@ -266,6 +275,22 @@ impl CopyMode {
                 self.cursor_row = target.unwrap_or(0).min(self.total_rows.saturating_sub(1));
                 self.ensure_cursor_visible();
                 return CopyModeResult::Handled;
+            }
+        }
+
+        if self.pending_y {
+            self.pending_y = false;
+            if matches!(key, Key::Char('y')) && !modifiers.ctrl() {
+                let n = self.count.take().unwrap_or(1).max(1);
+                if self.total_rows == 0 {
+                    return CopyModeResult::Handled;
+                }
+                let last = self.total_rows.saturating_sub(1);
+                let end_row = self.cursor_row.saturating_add(n - 1).min(last);
+                return CopyModeResult::Copy(Some(Selection::Line {
+                    start_row: self.cursor_row,
+                    end_row,
+                }));
             }
         }
 
@@ -457,7 +482,26 @@ impl CopyMode {
                     self.mode = VimMode::Normal;
                     CopyModeResult::Copy(selection)
                 } else {
+                    self.pending_y = true;
+                    self.count = count;
                     CopyModeResult::Handled
+                }
+            }
+            Key::Char('Y') => {
+                if self.selection_anchor.is_some() {
+                    let selection = self.selection();
+                    self.selection_anchor = None;
+                    self.mode = VimMode::Normal;
+                    CopyModeResult::Copy(selection)
+                } else if self.total_rows == 0 {
+                    CopyModeResult::Handled
+                } else {
+                    let last = self.total_rows.saturating_sub(1);
+                    let end_row = self.cursor_row.saturating_add(repeat - 1).min(last);
+                    CopyModeResult::Copy(Some(Selection::Line {
+                        start_row: self.cursor_row,
+                        end_row,
+                    }))
                 }
             }
 
@@ -1619,6 +1663,64 @@ mod tests {
         assert!(matches!(
             r,
             CopyModeResult::Copy(Some(Selection::Block { .. }))
+        ));
+    }
+
+    #[test]
+    fn yy_yanks_current_line_and_count_yanks_multiple_lines() {
+        let mut m = active_mode();
+        let row = m.cursor_position().0;
+        assert!(matches!(
+            m.handle_key(&Key::Char('y'), Modifiers::NONE),
+            CopyModeResult::Handled
+        ));
+        assert!(matches!(
+            m.handle_key(&Key::Char('y'), Modifiers::NONE),
+            CopyModeResult::Copy(Some(Selection::Line {
+                start_row,
+                end_row,
+            })) if start_row == row && end_row == row
+        ));
+
+        m.handle_key(&Key::Char('3'), Modifiers::NONE);
+        m.handle_key(&Key::Char('y'), Modifiers::NONE);
+        assert!(matches!(
+            m.handle_key(&Key::Char('y'), Modifiers::NONE),
+            CopyModeResult::Copy(Some(Selection::Line {
+                start_row,
+                end_row,
+            })) if start_row == row && end_row == row + 2
+        ));
+    }
+
+    #[test]
+    fn capital_y_yanks_line_and_bare_modifier_preserves_count() {
+        let mut m = active_mode();
+        let row = m.cursor_position().0;
+        m.handle_key(&Key::Char('2'), Modifiers::NONE);
+        m.handle_key(&Key::Char('\0'), Modifiers::SHIFT);
+        assert!(matches!(
+            m.handle_key(&Key::Char('Y'), Modifiers::SHIFT),
+            CopyModeResult::Copy(Some(Selection::Line {
+                start_row,
+                end_row,
+            })) if start_row == row && end_row == row + 1
+        ));
+    }
+
+    #[test]
+    fn y_followed_by_motion_cancels_pending_y() {
+        let mut m = active_mode();
+        let start_row = m.cursor_position().0;
+        m.handle_key(&Key::Char('y'), Modifiers::NONE);
+        assert!(matches!(
+            m.handle_key(&Key::Char('j'), Modifiers::NONE),
+            CopyModeResult::Handled
+        ));
+        assert_eq!(m.cursor_position().0, start_row + 1);
+        assert!(matches!(
+            m.handle_key(&Key::Char('y'), Modifiers::NONE),
+            CopyModeResult::Handled
         ));
     }
 

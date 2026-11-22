@@ -1073,64 +1073,7 @@ impl App {
         let Some(terminal) = self.terminal() else {
             return String::new();
         };
-        let buffer = terminal.buffer();
-        let mut text = String::new();
-
-        match selection {
-            VimSelection::Char {
-                start_row,
-                start_col,
-                end_row,
-                end_col,
-            } => {
-                for row in *start_row..=*end_row {
-                    if let Some(grid_row) = buffer.visible_row(row as u16) {
-                        let sc = if row == *start_row { *start_col } else { 0 };
-                        let ec = if row == *end_row {
-                            *end_col
-                        } else {
-                            grid_row.width() as usize - 1
-                        };
-
-                        if sc <= ec {
-                            text.push_str(&grid_row.copy_text(sc as u16, ec as u16));
-                        }
-                        if row < *end_row {
-                            text.push('\n');
-                        }
-                    }
-                }
-            }
-            VimSelection::Line { start_row, end_row } => {
-                for row in *start_row..=*end_row {
-                    if let Some(grid_row) = buffer.visible_row(row as u16) {
-                        text.push_str(grid_row.copy_text(0, grid_row.width()).trim_end());
-                        if row < *end_row {
-                            text.push('\n');
-                        }
-                    }
-                }
-            }
-            VimSelection::Block {
-                start_row,
-                start_col,
-                end_row,
-                end_col,
-            } => {
-                for row in *start_row..=*end_row {
-                    if let Some(grid_row) = buffer.visible_row(row as u16) {
-                        if start_col <= end_col {
-                            text.push_str(&grid_row.copy_text(*start_col as u16, *end_col as u16));
-                        }
-                        if row < *end_row {
-                            text.push('\n');
-                        }
-                    }
-                }
-            }
-        }
-
-        text
+        extract_vim_selection_text(terminal.buffer(), selection)
     }
 
     /// Perform search in scrollback.
@@ -1625,6 +1568,45 @@ fn near_scaled_dimension(value: u32, target: u32, divisor: u32) -> bool {
     (scaled - target).abs() <= tolerance
 }
 
+/// Extract text from a copy-mode selection using absolute buffer row indices
+/// (`0..buffer.total_lines()`).
+fn extract_vim_selection_text(buffer: &ultty::grid::Buffer, selection: &VimSelection) -> String {
+    match selection {
+        VimSelection::Char {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+        } => buffer.copy_text(*start_row..=*end_row, *start_col as u16, *end_col as u16),
+        VimSelection::Line { start_row, end_row } => {
+            buffer.copy_text(*start_row..=*end_row, 0, u16::MAX)
+        }
+        VimSelection::Block {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+        } => {
+            let mut text = String::new();
+            for row in *start_row..=*end_row {
+                if let Some(grid_row) = buffer.row_at(row) {
+                    if start_col <= end_col {
+                        text.push_str(
+                            grid_row
+                                .copy_text(*start_col as u16, *end_col as u16)
+                                .trim_end(),
+                        );
+                    }
+                    if row < *end_row {
+                        text.push('\n');
+                    }
+                }
+            }
+            text
+        }
+    }
+}
+
 /// The resize direction for a pointer at physical (x, y) in a window of
 /// physical size (width, height), or None away from the edges.
 ///
@@ -1879,8 +1861,8 @@ mod tests {
     use winit::window::ResizeDirection;
 
     use super::{
-        resize_direction_at_window_edge, window_should_use_square_corners,
-        MAINTENANCE_POLL_INTERVAL,
+        extract_vim_selection_text, resize_direction_at_window_edge,
+        window_should_use_square_corners, MAINTENANCE_POLL_INTERVAL,
     };
 
     #[test]
@@ -2091,6 +2073,96 @@ mod tests {
     #[test]
     fn maintenance_poll_interval_is_not_frame_cadence() {
         assert_eq!(MAINTENANCE_POLL_INTERVAL, Duration::from_millis(250));
+    }
+
+    fn feed_terminal(term: &mut ultty::grid::Terminal, bytes: &[u8]) {
+        let mut parser = ultty_vt::ansi::AnsiParser::new();
+        let mut handler = ultty_vt::grid::TerminalHandler::new(term);
+        parser.feed(bytes, |action| handler.handle(action));
+    }
+
+    #[test]
+    fn extract_vim_selection_reads_scrollback_and_screen_by_absolute_row() {
+        use ultty::grid::{Dimensions, Terminal};
+        use ultty::vim::Selection as VimSelection;
+
+        let mut term = Terminal::new(Dimensions::new(20, 4));
+        for i in 0..10 {
+            let line = format!("row-{i:02}-abcdefgh\r\n");
+            feed_terminal(&mut term, line.as_bytes());
+        }
+        let buf = term.buffer();
+        assert!(buf.history_len() >= 6);
+
+        let screen_first = buf.history_len();
+        assert_eq!(
+            extract_vim_selection_text(
+                buf,
+                &VimSelection::Line {
+                    start_row: screen_first,
+                    end_row: screen_first,
+                }
+            ),
+            format!("row-{screen_first:02}-abcdefgh")
+        );
+        assert_eq!(
+            extract_vim_selection_text(
+                buf,
+                &VimSelection::Line {
+                    start_row: 1,
+                    end_row: 2,
+                }
+            ),
+            "row-01-abcdefgh\nrow-02-abcdefgh"
+        );
+        assert_eq!(
+            extract_vim_selection_text(
+                buf,
+                &VimSelection::Char {
+                    start_row: screen_first,
+                    start_col: 4,
+                    end_row: screen_first,
+                    end_col: 9,
+                }
+            ),
+            format!("{screen_first:02}-abc")
+        );
+        assert_eq!(
+            extract_vim_selection_text(
+                buf,
+                &VimSelection::Block {
+                    start_row: screen_first,
+                    start_col: 0,
+                    end_row: screen_first + 1,
+                    end_col: 5,
+                }
+            ),
+            format!("row-{screen_first:02}\nrow-{:02}", screen_first + 1)
+        );
+    }
+
+    #[test]
+    fn extract_vim_selection_joins_soft_wrapped_lines() {
+        use ultty::grid::{Dimensions, Terminal};
+        use ultty::vim::Selection as VimSelection;
+
+        let mut term = Terminal::new(Dimensions::new(10, 4));
+        for i in 0..6 {
+            feed_terminal(&mut term, format!("hdr-{i}\r\n").as_bytes());
+        }
+        feed_terminal(&mut term, b"0123456789abcdef\r\n");
+        let buf = term.buffer();
+        let wrap_start = buf.total_lines() - 3;
+        assert_eq!(
+            extract_vim_selection_text(
+                buf,
+                &VimSelection::Line {
+                    start_row: wrap_start,
+                    end_row: wrap_start + 1,
+                }
+            ),
+            "0123456789abcdef"
+        );
     }
 
     fn hit(x: f32, y: f32, scale: f32) -> Option<ResizeDirection> {
