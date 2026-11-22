@@ -1,0 +1,20 @@
+[package]
+name = "ratatui-ultty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Bridge crate allowing existing ratatui apps to opt specific areas into Ultty native regions with ANSI fallback."
+
+[dependencies]
+crossterm.workspace = true
+ratatui.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ultty-client.workspace = true
+ultty-protocol.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true

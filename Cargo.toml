@@ -7,6 +7,7 @@ members = [
     "crates/ultty-client",
     "crates/ultty-vt",
     "crates/ulttui-lua",
+    "crates/ratatui-ultty",
     "examples/hello-native",
     "examples/counter-app",
     "examples/todo-app",
@@ -78,6 +79,7 @@ ultty-protocol = { path = "crates/ultty-protocol" }
 ultty-client = { path = "crates/ultty-client" }
 ultty-vt = { path = "crates/ultty-vt" }
 ulttui = { path = "crates/ulttui" }
+ratatui-ultty = { path = "crates/ratatui-ultty" }
 ultty = { path = "crates/ultty" }
 
 [profile.release]
