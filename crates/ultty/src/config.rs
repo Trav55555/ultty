@@ -1076,9 +1076,10 @@ pub struct BehaviorConfig {
     pub narrow_vulkan_icd: bool,
     /// Draw the first frames on the CPU via `softbuffer` while the GPU
     /// renderer starts on a background thread, then hand over to the GPU
-    /// (ADR 0030). Defaults to `false`. `ULTTY_CPU_FIRST_FRAMES=1` forces it
-    /// on and `ULTTY_CPU_FIRST_FRAMES=0` forces it off for a single launch.
-    /// Read at start only.
+    /// (ADR 0030). Defaults to `true` on Linux (X11 and Wayland) and `false`
+    /// on other platforms until hardware handover is verified there.
+    /// `ULTTY_CPU_FIRST_FRAMES=1` forces it on and `ULTTY_CPU_FIRST_FRAMES=0`
+    /// forces it off for a single launch. Read at start only.
     pub cpu_first_frames: bool,
 }
 
@@ -1098,7 +1099,7 @@ impl Default for BehaviorConfig {
             inherit_working_directory: true,
             accessibility: true,
             narrow_vulkan_icd: true,
-            cpu_first_frames: false,
+            cpu_first_frames: cfg!(target_os = "linux"),
         }
     }
 }
@@ -1860,18 +1861,24 @@ copy = "ctrl+c"
     }
 
     #[test]
-    fn cpu_first_frames_defaults_off_parses_and_stays_start_only() {
-        assert!(!Config::default().behavior.cpu_first_frames);
-        let config: Config = toml::from_str("[behavior]\ncpu_first_frames = true\n").unwrap();
-        assert!(config.behavior.cpu_first_frames);
+    fn cpu_first_frames_defaults_by_platform_parses_and_stays_start_only() {
+        let expected_default = cfg!(target_os = "linux");
+        assert_eq!(
+            Config::default().behavior.cpu_first_frames,
+            expected_default
+        );
+        let toggled = !expected_default;
+        let config: Config =
+            toml::from_str(&format!("[behavior]\ncpu_first_frames = {toggled}\n")).unwrap();
+        assert_eq!(config.behavior.cpu_first_frames, toggled);
 
         let running = BehaviorConfig {
-            cpu_first_frames: true,
+            cpu_first_frames: toggled,
             ..BehaviorConfig::default()
         };
         let mut reloaded = BehaviorConfig::default();
         assert!(reloaded.keep_start_only(&running));
-        assert!(reloaded.cpu_first_frames);
+        assert_eq!(reloaded.cpu_first_frames, toggled);
         assert!(!reloaded.keep_start_only(&running));
     }
 

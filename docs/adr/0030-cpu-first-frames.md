@@ -2,11 +2,13 @@
 
 ## Status
 
-**In progress** 2026-11-20. Slice 1 (`startup-shell-before-gpu`, PR #179) and
-the CPU-grid prototype (PR #180) are on `main`. Slice 2's `[behavior]
-cpu_first_frames` config setting (default `false`, with
-`ULTTY_CPU_FIRST_FRAMES=1`/`0` overrides) and Slice 3's CPU tab bar and window
-chrome rendering are implemented.
+**Default on on Linux** 2026-11-22. Slice 1 (`startup-shell-before-gpu`,
+PR #179), the CPU-grid prototype (PR #180), Slice 2's `[behavior]
+cpu_first_frames` config setting and Slice 3's CPU tab bar and window chrome
+rendering (PR #205) are all on `main`. `[behavior] cpu_first_frames` now
+defaults to `true` on Linux (X11 and Wayland, both verified on NVIDIA T4) and
+remains `false` on macOS/Windows until hardware handover is verified there,
+with `ULTTY_CPU_FIRST_FRAMES=1`/`0` overrides still available on every platform.
 
 ## Context
 
