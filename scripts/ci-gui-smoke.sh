@@ -56,6 +56,7 @@ AGENT_TRANSCRIPT_BIN="$BIN_DIR/agent-transcript"
 AGENT_CONSOLE_BIN="$BIN_DIR/agent-console"
 ULTTUI_LUA_BIN="$BIN_DIR/ulttui-lua"
 INLINE_APP_BIN="$BIN_DIR/examples/inline-surface"
+FRAME_APP_BIN="$BIN_DIR/examples/session-frame-fixture"
 
 XVFB_PID=""
 ULTTY_PID=""
@@ -257,12 +258,27 @@ fi
 if [ "$SHARD" = all ] || [ "$SHARD" = sessions ]; then
   queue_check deploy-bundle env ULTTY_DEPLOY_TEST_BIN_DIR="$BIN_DIR" \
     python3 -S -m unittest discover -s scripts/deploy -p 'test_*.py'
-  rm -rf "$OUT/session-reconnect" "$OUT/control-pid" "$OUT/control-workflows"
+  rm -rf "$OUT/session-reconnect" "$OUT/control-pid" "$OUT/control-workflows" "$OUT/session-control"
   queue_check session-reconnect python3 -S scripts/e2e/session-reconnect.py \
     --ultty "$ULTTY_BIN" \
     --session-bin "$ULTTY_SESSION_BIN" \
     --counter "$COUNTER_BIN" \
     --output "$OUT/session-reconnect"
+  queue_check session-host env \
+    ULTTY_SESSION="$ULTTY_SESSION_BIN" \
+    COUNTER_APP="$COUNTER_BIN" \
+    INLINE_APP="$INLINE_APP_BIN" \
+    FRAME_APP="$FRAME_APP_BIN" \
+    python3 -S scripts/e2e/session-host.py
+  queue_check session-control bash -c '
+    set -euo pipefail
+    tmp="$(mktemp -d /tmp/sc.XXXXXX)"
+    trap "rm -rf \"$tmp\"" EXIT
+    mkdir -p "$tmp/t"
+    ULTTY_SESSION="$1" ULTTYCTL="$2" COUNTER_APP="$3" ULTTUI_LUA="$4" \
+      CARGO_TARGET_DIR="$tmp/t" TMPDIR="$tmp" \
+      python3 -S scripts/e2e/session-control.py "$5"
+  ' _ "$ULTTY_SESSION_BIN" "$ULTTYCTL_BIN" "$COUNTER_BIN" "$ULTTUI_LUA_BIN" "$OUT/session-control"
   queue_check control-pid python3 -S scripts/e2e/control-pid.py \
     --session-bin "$ULTTY_SESSION_BIN" \
     --ctl-bin "$ULTTYCTL_BIN" \
