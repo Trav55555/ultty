@@ -1,0 +1,21 @@
+{
+  "name": "@ultty/client",
+  "version": "0.2.0",
+  "description": "Zero-dependency TypeScript client and Ink-style flex renderer for the Ultty native terminal protocol.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./codec": "./src/codec.ts",
+    "./client": "./src/client.ts",
+    "./ink": "./src/ink.ts"
+  },
+  "scripts": {
+    "test": "node --test tests/conformance.test.ts",
+    "example": "node examples/ink-console.ts --once"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "license": "MIT OR Apache-2.0"
+}
