@@ -157,7 +157,6 @@ impl LayoutEngine {
             self.node_to_region.remove(&node_id);
         }
 
-        // Collect every node whose child list differs from the scene.
         let mut changed = Vec::new();
         for region in scene.iter_all() {
             let Some(&parent_node) = self.region_to_node.get(&region.id) else {
@@ -327,7 +326,6 @@ mod tests {
     fn build_scene() -> SceneTree {
         let mut tree = SceneTree::new();
 
-        // Root with two children: a fixed-size and a flex-grow
         let root = tree.get_mut(RegionId::ROOT).unwrap();
         root.constraints = Constraints {
             display: ProtoDisplay::Flex,
@@ -386,7 +384,6 @@ mod tests {
 
         assert!(engine.get_layout(RegionId::new(1)).is_some());
 
-        // Remove a region from the scene
         scene.remove(RegionId::new(1));
         engine.sync(&scene).unwrap();
 
@@ -482,14 +479,12 @@ mod tests {
         engine.sync(&scene).unwrap();
         engine.compute(80.0, 24.0).unwrap();
 
-        // Move B from P (later sibling) to Q (earlier sibling).
         scene
             .reparent(RegionId::new(3), RegionId::new(1), 0)
             .unwrap();
         engine.sync(&scene).unwrap();
         engine.compute(80.0, 24.0).unwrap();
 
-        // Delete B, then sync again: must not panic and Q must have no children.
         scene.remove(RegionId::new(3));
         engine.sync(&scene).unwrap();
         engine.compute(80.0, 24.0).unwrap();
@@ -506,8 +501,6 @@ mod tests {
         let mut engine = LayoutEngine::new();
 
         for cycle in 0..5 {
-            // Add a nested pair under the body region, lay out, then delete
-            // the parent (cascading) and lay out again with the same engine.
             let mut panel = Region::new(RegionId::new(100 + cycle));
             panel.parent = Some(RegionId::new(2));
             panel.constraints = Constraints {
@@ -549,7 +542,6 @@ mod tests {
             assert_eq!(body.height, 21.0);
         }
 
-        // Re-create an id that was deleted earlier, under a different parent.
         let mut revived = Region::new(RegionId::new(100));
         revived.parent = Some(RegionId::new(1));
         revived.constraints = Constraints {
@@ -574,7 +566,6 @@ mod tests {
         engine.sync(&scene).unwrap();
         engine.compute(80.0, 24.0).unwrap();
 
-        // Root with default constraints gets no explicit size
         let root = engine.get_layout(RegionId::ROOT).unwrap();
         assert!(root.size.width >= 0.0);
         assert!(root.size.height >= 0.0);
@@ -731,7 +722,6 @@ mod tests {
             "children are placed from the surface's own origin"
         );
 
-        // The full-scene tree is exactly what it is without the surface.
         let mut plain = build_scene();
         let plain_layouts = LayoutEngine::new()
             .compute_scene_layout(&mut plain, 80.0, 24.0)
@@ -765,8 +755,6 @@ mod tests {
         assert_eq!(engine.node_count(), 3);
         assert!(engine.get_layout(RegionId::new(11)).is_none());
     }
-
-    // ── constraints_to_style tests ──────────────────────────────────
 
     use ultty_protocol::{
         AlignContent as ProtoAlignContent, AlignItems as ProtoAlignItems,
@@ -1000,8 +988,6 @@ mod tests {
         assert_eq!(style.gap.height, LengthPercentage::percent(0.2));
     }
 
-    // ── dimension_to_taffy tests ────────────────────────────────────
-
     #[test]
     fn dimension_to_taffy_auto_and_cells() {
         assert_eq!(dimension_to_taffy(&ProtoDimension::Auto), Dimension::auto());
@@ -1051,8 +1037,6 @@ mod tests {
         );
     }
 
-    // ── dimension_to_length_auto tests ──────────────────────────────
-
     #[test]
     fn length_auto_basic_variants() {
         assert_eq!(
@@ -1092,8 +1076,6 @@ mod tests {
             LengthPercentageAuto::auto()
         );
     }
-
-    // ── dimension_to_length_pct tests ───────────────────────────────
 
     #[test]
     fn length_pct_cells_and_percent() {
@@ -1141,7 +1123,6 @@ mod tests {
     fn layout_chat_scrollview_hierarchy() {
         let mut tree = SceneTree::new();
 
-        // Root
         let root = tree.get_mut(RegionId::ROOT).unwrap();
         root.constraints = Constraints {
             display: ProtoDisplay::Flex,
@@ -1151,7 +1132,6 @@ mod tests {
             ..Default::default()
         };
 
-        // Top-level Column (id=1)
         let mut col = Region::new(RegionId::new(1));
         col.parent = Some(RegionId::ROOT);
         col.constraints = Constraints {
@@ -1168,7 +1148,6 @@ mod tests {
         };
         tree.insert(col);
 
-        // Title (id=2)
         let mut title = Region::new(RegionId::new(2));
         title.parent = Some(RegionId::new(1));
         title.constraints = Constraints {
@@ -1179,7 +1158,6 @@ mod tests {
         };
         tree.insert(title);
 
-        // Divider 1 (id=3)
         let mut div1 = Region::new(RegionId::new(3));
         div1.parent = Some(RegionId::new(1));
         div1.constraints = Constraints {
@@ -1191,7 +1169,6 @@ mod tests {
         };
         tree.insert(div1);
 
-        // ScrollView (id=4)
         let mut scroll = Region::new(RegionId::new(4));
         scroll.parent = Some(RegionId::new(1));
         scroll.constraints = Constraints {
@@ -1207,7 +1184,6 @@ mod tests {
         };
         tree.insert(scroll);
 
-        // ScrollView child Column (id=5)
         let mut scroll_col = Region::new(RegionId::new(5));
         scroll_col.parent = Some(RegionId::new(4));
         scroll_col.constraints = Constraints {
@@ -1223,7 +1199,6 @@ mod tests {
         };
         tree.insert(scroll_col);
 
-        // RichText inside ScrollView (id=6)
         let mut richtext = Region::new(RegionId::new(6));
         richtext.parent = Some(RegionId::new(5));
         richtext.constraints = Constraints {
@@ -1235,7 +1210,6 @@ mod tests {
         };
         tree.insert(richtext);
 
-        // Divider 2 (id=7)
         let mut div2 = Region::new(RegionId::new(7));
         div2.parent = Some(RegionId::new(1));
         div2.constraints = Constraints {
@@ -1247,7 +1221,6 @@ mod tests {
         };
         tree.insert(div2);
 
-        // Text input (id=8)
         let mut text_input = Region::new(RegionId::new(8));
         text_input.parent = Some(RegionId::new(1));
         text_input.constraints = Constraints {
@@ -1259,7 +1232,6 @@ mod tests {
         };
         tree.insert(text_input);
 
-        // Muted text (id=9)
         let mut muted = Region::new(RegionId::new(9));
         muted.parent = Some(RegionId::new(1));
         muted.constraints = Constraints {
@@ -1270,7 +1242,6 @@ mod tests {
         };
         tree.insert(muted);
 
-        // Compute layout
         let mut engine = LayoutEngine::new();
         engine.sync(&tree).unwrap();
         engine.compute(80.0, 37.0).unwrap();
@@ -1285,7 +1256,6 @@ mod tests {
             );
         }
 
-        // Specifically check the RichText inside ScrollView
         let richtext_layout = engine.get_layout(RegionId::new(6)).unwrap();
         assert!(
             richtext_layout.size.width > 0.0,
@@ -1298,7 +1268,6 @@ mod tests {
             richtext_layout
         );
 
-        // Check ScrollView has non-zero size
         let scroll_layout = engine.get_layout(RegionId::new(4)).unwrap();
         assert!(
             scroll_layout.size.height > 1.0,
@@ -1321,7 +1290,6 @@ mod tests {
     fn layout_chat_input_stays_pinned_with_overflow() {
         let mut tree = SceneTree::new();
 
-        // Root: 80x30 viewport
         let root = tree.get_mut(RegionId::ROOT).unwrap();
         root.constraints = Constraints {
             display: ProtoDisplay::Flex,
@@ -1331,7 +1299,6 @@ mod tests {
             ..Default::default()
         };
 
-        // chat_area Column (id=1)
         let mut chat_col = Region::new(RegionId::new(1));
         chat_col.parent = Some(RegionId::ROOT);
         chat_col.constraints = Constraints {
@@ -1348,7 +1315,6 @@ mod tests {
         };
         tree.insert(chat_col);
 
-        // ScrollView (id=2) — flex_grow:1, flex_shrink:1, min_height:0, overflow_y:scroll
         let mut scroll = Region::new(RegionId::new(2));
         scroll.parent = Some(RegionId::new(1));
         scroll.constraints = Constraints {
@@ -1366,7 +1332,6 @@ mod tests {
         };
         tree.insert(scroll);
 
-        // ScrollView content: Column with many items (id=3)
         let mut content_col = Region::new(RegionId::new(3));
         content_col.parent = Some(RegionId::new(2));
         content_col.constraints = Constraints {
@@ -1377,7 +1342,6 @@ mod tests {
         };
         tree.insert(content_col);
 
-        // 100 message items, each 3 cells tall (ids 100..199)
         for i in 0..100 {
             let mut msg = Region::new(RegionId::new(100 + i));
             msg.parent = Some(RegionId::new(3));
@@ -1390,7 +1354,6 @@ mod tests {
             tree.insert(msg);
         }
 
-        // Divider 1 (id=4)
         let mut div1 = Region::new(RegionId::new(4));
         div1.parent = Some(RegionId::new(1));
         div1.constraints = Constraints {
@@ -1401,7 +1364,6 @@ mod tests {
         };
         tree.insert(div1);
 
-        // Input area (id=5)
         let mut input = Region::new(RegionId::new(5));
         input.parent = Some(RegionId::new(1));
         input.constraints = Constraints {
@@ -1413,7 +1375,6 @@ mod tests {
         };
         tree.insert(input);
 
-        // Divider 2 (id=6)
         let mut div2 = Region::new(RegionId::new(6));
         div2.parent = Some(RegionId::new(1));
         div2.constraints = Constraints {
@@ -1424,7 +1385,6 @@ mod tests {
         };
         tree.insert(div2);
 
-        // Status bar (id=7)
         let mut status = Region::new(RegionId::new(7));
         status.parent = Some(RegionId::new(1));
         status.constraints = Constraints {
@@ -1435,7 +1395,6 @@ mod tests {
         };
         tree.insert(status);
 
-        // Compute layout
         let mut engine = LayoutEngine::new();
         engine.sync(&tree).unwrap();
         engine.compute(80.0, 30.0).unwrap();
@@ -1447,23 +1406,18 @@ mod tests {
         let div2_layout = engine.get_layout(RegionId::new(6)).unwrap();
         let status_layout = engine.get_layout(RegionId::new(7)).unwrap();
 
-        // The chat_area should be 30 cells tall (fills root)
         assert_eq!(chat_layout.size.height, 30.0, "chat_area height");
 
-        // Fixed items total: 1 + 5 + 1 + 1 = 8 cells
-        // ScrollView should get the remaining: 30 - 8 = 22 cells
         assert_eq!(
             scroll_layout.size.height, 22.0,
             "ScrollView height (30 - 8 fixed)"
         );
 
-        // Input should be at y = scroll_height + div1 = 22 + 1 = 23
         assert_eq!(div1_layout.location.y, 22.0, "Divider 1 y position");
         assert_eq!(input_layout.location.y, 23.0, "Input y position");
         assert_eq!(div2_layout.location.y, 28.0, "Divider 2 y position");
         assert_eq!(status_layout.location.y, 29.0, "Status bar y position");
 
-        // All items must be within the 30-cell viewport
         let status_bottom = status_layout.location.y + status_layout.size.height;
         assert!(
             status_bottom <= 30.0,
@@ -1490,7 +1444,6 @@ mod tests {
     fn layout_docklayout_center_with_scrollview_and_bottombar() {
         let mut tree = SceneTree::new();
 
-        // Stack root: 66x30
         let root = tree.get_mut(RegionId::ROOT).unwrap();
         root.constraints = Constraints {
             display: ProtoDisplay::Flex,
@@ -1500,7 +1453,6 @@ mod tests {
             ..Default::default()
         };
 
-        // DockLayout Column (id=1)
         let mut dock = Region::new(RegionId::new(1));
         dock.parent = Some(RegionId::ROOT);
         dock.constraints = Constraints {
@@ -1518,7 +1470,6 @@ mod tests {
         };
         tree.insert(dock);
 
-        // Header (id=2)
         let mut header = Region::new(RegionId::new(2));
         header.parent = Some(RegionId::new(1));
         header.constraints = Constraints {
@@ -1531,7 +1482,6 @@ mod tests {
         };
         tree.insert(header);
 
-        // Middle Row (id=3)
         let mut middle = Region::new(RegionId::new(3));
         middle.parent = Some(RegionId::new(1));
         middle.constraints = Constraints {
@@ -1546,7 +1496,6 @@ mod tests {
         };
         tree.insert(middle);
 
-        // center_content Column (id=4) — matches DockLayout center override
         let mut center = Region::new(RegionId::new(4));
         center.parent = Some(RegionId::new(3));
         center.constraints = Constraints {
@@ -1565,7 +1514,6 @@ mod tests {
         };
         tree.insert(center);
 
-        // ScrollView (id=5)
         let mut scroll = Region::new(RegionId::new(5));
         scroll.parent = Some(RegionId::new(4));
         scroll.constraints = Constraints {
@@ -1583,7 +1531,6 @@ mod tests {
         };
         tree.insert(scroll);
 
-        // Messages column (id=6) inside ScrollView
         let mut msgs = Region::new(RegionId::new(6));
         msgs.parent = Some(RegionId::new(5));
         msgs.constraints = Constraints {
@@ -1594,7 +1541,6 @@ mod tests {
         };
         tree.insert(msgs);
 
-        // 100 message items (ids 100..199)
         for i in 0..100 {
             let mut msg = Region::new(RegionId::new(100 + i));
             msg.parent = Some(RegionId::new(6));
@@ -1607,7 +1553,6 @@ mod tests {
             tree.insert(msg);
         }
 
-        // bottom_bar Column (id=7)
         let mut bar = Region::new(RegionId::new(7));
         bar.parent = Some(RegionId::new(4));
         bar.constraints = Constraints {
@@ -1619,7 +1564,6 @@ mod tests {
         };
         tree.insert(bar);
 
-        // Divider 1 (id=8)
         let mut d1 = Region::new(RegionId::new(8));
         d1.parent = Some(RegionId::new(7));
         d1.constraints = Constraints {
@@ -1631,7 +1575,6 @@ mod tests {
         };
         tree.insert(d1);
 
-        // Input (id=9)
         let mut input = Region::new(RegionId::new(9));
         input.parent = Some(RegionId::new(7));
         input.constraints = Constraints {
@@ -1642,7 +1585,6 @@ mod tests {
         };
         tree.insert(input);
 
-        // Divider 2 (id=10)
         let mut d2 = Region::new(RegionId::new(10));
         d2.parent = Some(RegionId::new(7));
         d2.constraints = Constraints {
@@ -1654,7 +1596,6 @@ mod tests {
         };
         tree.insert(d2);
 
-        // StatusBar (id=11)
         let mut status = Region::new(RegionId::new(11));
         status.parent = Some(RegionId::new(7));
         status.constraints = Constraints {
@@ -1665,7 +1606,6 @@ mod tests {
         };
         tree.insert(status);
 
-        // Compute
         let mut engine = LayoutEngine::new();
         engine.sync(&tree).unwrap();
         engine.compute(66.0, 30.0).unwrap();
@@ -1679,22 +1619,16 @@ mod tests {
         let _input_layout = engine.get_layout(RegionId::new(9)).unwrap();
         let _status_layout = engine.get_layout(RegionId::new(11)).unwrap();
 
-        // Header should be 1 cell tall
         assert_eq!(header_layout.size.height, 1.0, "header height");
 
-        // Middle Row should fill remaining space: 30 - 1 = 29
         assert_eq!(middle_layout.size.height, 29.0, "middle row height");
 
-        // center_content should stretch to middle height
         assert_eq!(center_layout.size.height, 29.0, "center height");
 
-        // bottom_bar should be 8 cells (1+5+1+1)
         assert_eq!(bar_layout.size.height, 8.0, "bottom_bar height");
 
-        // ScrollView should be 29 - 8 = 21
         assert_eq!(scroll_layout.size.height, 21.0, "scroll height");
 
-        // bottom_bar should be within viewport
         let bar_abs_y = bar_layout.location.y;
         assert!(
             bar_abs_y + bar_layout.size.height <= 29.0,
@@ -1794,8 +1728,6 @@ mod tests {
         );
     }
 
-    // ── Regression tests for documented layout bugs ─────────────────
-
     /// Regression: DockLayout middle Row needs AlignItems::Stretch AND children
     /// need height:Percent(100) to fill the cross-axis. Taffy's align-items:stretch
     /// alone doesn't give definite cross-axis height to flex container children
@@ -1812,7 +1744,6 @@ mod tests {
             ..Default::default()
         };
 
-        // Header (fixed)
         let mut header = Region::new(RegionId::new(1));
         header.parent = Some(RegionId::ROOT);
         header.constraints = Constraints {
@@ -1823,7 +1754,6 @@ mod tests {
         };
         tree.insert(header);
 
-        // Middle Row with AlignItems::Stretch
         let mut middle = Region::new(RegionId::new(2));
         middle.parent = Some(RegionId::ROOT);
         middle.constraints = Constraints {
@@ -1836,7 +1766,6 @@ mod tests {
         };
         tree.insert(middle);
 
-        // Sidebar with explicit height:100% — stretches to row height
         let mut sidebar = Region::new(RegionId::new(3));
         sidebar.parent = Some(RegionId::new(2));
         sidebar.constraints = Constraints {
@@ -1847,7 +1776,6 @@ mod tests {
         };
         tree.insert(sidebar);
 
-        // Main with explicit height:100% + flex_grow — stretches to row height
         let mut main = Region::new(RegionId::new(4));
         main.parent = Some(RegionId::new(2));
         main.constraints = Constraints {
@@ -1925,7 +1853,6 @@ mod tests {
         engine.compute(80.0, 24.0).unwrap();
 
         let child_layout = engine.get_layout(RegionId::new(1)).unwrap();
-        // 80 - 2 - 2 = 76 width, 24 - 2 - 2 = 20 height
         assert_eq!(child_layout.size.width, 76.0, "child width after padding");
         assert_eq!(child_layout.size.height, 20.0, "child height after padding");
         assert_eq!(child_layout.location.x, 2.0, "child x offset from padding");
@@ -1945,7 +1872,6 @@ mod tests {
             ..Default::default()
         };
 
-        // Child A: flex_grow: 1
         let mut a = Region::new(RegionId::new(1));
         a.parent = Some(RegionId::ROOT);
         a.constraints = Constraints {
@@ -1954,7 +1880,6 @@ mod tests {
         };
         tree.insert(a);
 
-        // Child B: flex_grow: 2
         let mut b = Region::new(RegionId::new(2));
         b.parent = Some(RegionId::ROOT);
         b.constraints = Constraints {
@@ -1963,7 +1888,6 @@ mod tests {
         };
         tree.insert(b);
 
-        // Child C: flex_grow: 1
         let mut c = Region::new(RegionId::new(3));
         c.parent = Some(RegionId::ROOT);
         c.constraints = Constraints {
@@ -2011,7 +1935,6 @@ mod tests {
             ..Default::default()
         };
 
-        // Fixed header
         let mut header = Region::new(RegionId::new(1));
         header.parent = Some(RegionId::ROOT);
         header.constraints = Constraints {
@@ -2021,7 +1944,6 @@ mod tests {
         };
         tree.insert(header);
 
-        // Body: flex_grow container
         let mut body = Region::new(RegionId::new(2));
         body.parent = Some(RegionId::ROOT);
         body.constraints = Constraints {
@@ -2033,7 +1955,6 @@ mod tests {
         };
         tree.insert(body);
 
-        // Body children: sidebar (fixed) + main (flex_grow)
         let mut sidebar = Region::new(RegionId::new(3));
         sidebar.parent = Some(RegionId::new(2));
         sidebar.constraints = Constraints {

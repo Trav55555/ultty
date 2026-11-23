@@ -337,7 +337,6 @@ impl TabBarState {
         self.total_width = total_width;
         self.tabs.clear();
 
-        // Calculate tab widths
         let tab_count = tabs.len();
         if tab_count == 0 {
             self.visible = false;
@@ -532,18 +531,15 @@ impl TabBarState {
         if !self.visible || !(0.0..self.height()).contains(&y) {
             return false;
         }
-        // Not on window controls
         if self.title_button_at(x, y).is_some() {
             return false;
         }
-        // Not on "+" button
         if self.is_new_tab_button_at(x, y) {
             return false;
         }
         if y < self.title_bar_height() || !self.shows_tab_row() {
             return true;
         }
-        // Not on a tab
         if self.tab_at_x(x).is_some() {
             return false;
         }
@@ -569,7 +565,6 @@ impl TabBarState {
         self.hovered_title_button = self.title_button_at(x, y);
         self.hovered_close_button = self.close_button_at(x, y);
 
-        // Update tab states
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             tab.is_hovered = self.hovered_tab == Some(index);
         }
@@ -630,19 +625,15 @@ impl TabBarState {
 
         self.drag_offset_x = x - self.drag_start_x;
 
-        // Check if we should swap with adjacent tabs
         let tab_width = self.tabs.get(dragging_index)?.width;
 
-        // If dragged more than half a tab width, swap
         if self.drag_offset_x > tab_width / 2.0 && dragging_index + 1 < self.tabs.len() {
-            // Move right
             let new_index = dragging_index + 1;
             self.dragging_tab = Some(new_index);
             self.drag_start_x = x;
             self.drag_offset_x = 0.0;
             return Some((dragging_index, new_index));
         } else if self.drag_offset_x < -tab_width / 2.0 && dragging_index > 0 {
-            // Move left
             let new_index = dragging_index - 1;
             self.dragging_tab = Some(new_index);
             self.drag_start_x = x;
@@ -737,7 +728,6 @@ impl TabState {
 
     /// Get the maximum text width.
     pub fn max_text_width(&self) -> f32 {
-        // Leave space for close button
         self.width
             - self.scaled(TAB_PADDING)
             - self.status_marker_space()
@@ -992,10 +982,6 @@ mod tests {
         assert!(!multi.is_new_tab_button_at(multi.new_tab_button_x + 5.0, 10.0));
     }
 
-    // ---------------------------------------------------------------
-    // Scale factor
-    // ---------------------------------------------------------------
-
     #[test]
     fn scale_one_matches_the_logical_constants() {
         let single = bar_with(1, 0, 800.0);
@@ -1108,10 +1094,6 @@ mod tests {
         assert_eq!(state.content_top(), 48.0 + 31.0 + 4.0);
     }
 
-    // ---------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------
-
     /// A bar at `scale` updated with `count` tabs, the first one active.
     fn scaled_bar_with(count: usize, width: f32, scale: f32) -> TabBarState {
         let mut state = TabBarState::new();
@@ -1146,10 +1128,6 @@ mod tests {
         state
     }
 
-    // ---------------------------------------------------------------
-    // TabBarState::new / Default
-    // ---------------------------------------------------------------
-
     #[test]
     fn new_returns_empty_state() {
         let s = TabBarState::new();
@@ -1172,10 +1150,6 @@ mod tests {
         assert_eq!(a.total_width, b.total_width);
         assert_eq!(a.visible, b.visible);
     }
-
-    // ---------------------------------------------------------------
-    // Visibility
-    // ---------------------------------------------------------------
 
     #[test]
     fn zero_tabs_not_visible() {
@@ -1207,10 +1181,6 @@ mod tests {
         assert_eq!(state.active_index, 2);
     }
 
-    // ---------------------------------------------------------------
-    // Height
-    // ---------------------------------------------------------------
-
     #[test]
     fn height_always_nonzero() {
         let state = bar_with(1, 0, 800.0);
@@ -1229,10 +1199,6 @@ mod tests {
         assert!(bar_with(2, 0, 800.0).shows_tab_row());
     }
 
-    // ---------------------------------------------------------------
-    // Tab width clamping
-    // ---------------------------------------------------------------
-
     #[test]
     fn tab_width_fills_available_rail_equally() {
         // The rail leaves room for "+" after the last tab.
@@ -1245,7 +1211,6 @@ mod tests {
 
     #[test]
     fn tab_width_clamped_to_min() {
-        // 20 tabs in 800px => ideal 40px, clamped to MIN_TAB_WIDTH (80)
         let state = bar_with(20, 0, 800.0);
         for tab in &state.tabs {
             assert_eq!(tab.width, MIN_TAB_WIDTH);
@@ -1254,7 +1219,6 @@ mod tests {
 
     #[test]
     fn tab_width_in_range_not_clamped() {
-        // 10 tabs in 900px => ideal 90 => above MIN_TAB_WIDTH.
         let state = bar_with(10, 0, 900.0);
         let usable = 900.0 - TabBarState::NEW_TAB_BUTTON_WIDTH;
         let expected = usable / 10.0;
@@ -1296,10 +1260,6 @@ mod tests {
         }
     }
 
-    // ---------------------------------------------------------------
-    // Tab x positions
-    // ---------------------------------------------------------------
-
     #[test]
     fn tab_x_positions_are_sequential() {
         let state = bar_with(4, 0, 600.0);
@@ -1322,10 +1282,6 @@ mod tests {
         let state = bar_with(3, 0, 900.0);
         assert_eq!(state.tabs[0].x, 0.0);
     }
-
-    // ---------------------------------------------------------------
-    // Active tab tracking
-    // ---------------------------------------------------------------
 
     #[test]
     fn active_index_tracks_active_tab_id() {
@@ -1358,10 +1314,6 @@ mod tests {
         }
     }
 
-    // ---------------------------------------------------------------
-    // update clears old state
-    // ---------------------------------------------------------------
-
     #[test]
     fn update_replaces_previous_tabs() {
         let mut state = TabBarState::new();
@@ -1376,27 +1328,17 @@ mod tests {
         assert_eq!(state.active_index, 1);
     }
 
-    // ---------------------------------------------------------------
-    // tab_at_x
-    // ---------------------------------------------------------------
-
     #[test]
     fn tab_at_x_exact_boundaries() {
         let state = bar_with(3, 0, 600.0);
         let w = state.tabs[0].width;
         let offset = 0.0;
 
-        // Left edge of first tab
         assert_eq!(state.tab_at_x(offset), Some(0));
-        // Right edge of first tab (exclusive)
         assert_eq!(state.tab_at_x(offset + w), Some(1));
-        // Last pixel of first tab
         assert_eq!(state.tab_at_x(offset + w - 0.001), Some(0));
-        // Left edge of third tab
         assert_eq!(state.tab_at_x(offset + 2.0 * w), Some(2));
-        // Past all tabs
         assert_eq!(state.tab_at_x(offset + 3.0 * w), None);
-        // Before tabs
         assert_eq!(state.tab_at_x(-0.001), None);
     }
 
@@ -1411,10 +1353,6 @@ mod tests {
         let state = TabBarState::new();
         assert_eq!(state.tab_at_x(100.0), None);
     }
-
-    // ---------------------------------------------------------------
-    // set_hover
-    // ---------------------------------------------------------------
 
     #[test]
     fn hover_sets_correct_tab() {
@@ -1440,7 +1378,6 @@ mod tests {
         state.set_hover(100.0, TITLE_BAR_HEIGHT + 10.0);
         assert!(state.hovered_tab.is_some());
 
-        // y > TAB_BAR_HEIGHT => no hover
         state.set_hover(100.0, TAB_BAR_HEIGHT + 1.0);
         assert!(state.hovered_tab.is_none());
     }
@@ -1458,7 +1395,6 @@ mod tests {
     #[test]
     fn hover_updates_all_tab_flags() {
         let mut state = bar_with(4, 0, 800.0);
-        // Hover over tab 2
         state.set_hover(state.tabs[2].x + 5.0, TITLE_BAR_HEIGHT + 5.0);
         for (i, tab) in state.tabs.iter().enumerate() {
             assert_eq!(tab.is_hovered, i == 2, "tab {} is_hovered mismatch", i);
@@ -1470,17 +1406,11 @@ mod tests {
         let mut state = bar_with(3, 0, 600.0);
         state.hovered_tab = Some(1);
 
-        // Re-update: hovered_tab persists and is applied to new TabStates
         let tabs = make_tabs(3);
         state.update(&tabs, TabId::new(0), 600.0);
-        // After update, tab at index 1 should reflect the persisted hovered_tab
         assert!(state.tabs[1].is_hovered);
         assert!(!state.tabs[0].is_hovered);
     }
-
-    // ---------------------------------------------------------------
-    // chrome hit testing
-    // ---------------------------------------------------------------
 
     #[test]
     fn single_tab_plus_is_clickable_in_title_band() {
@@ -1570,17 +1500,12 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------
-    // close_button_at
-    // ---------------------------------------------------------------
-
     #[test]
     fn close_button_hit() {
         let state = bar_with(3, 0, 600.0);
         let tab = &state.tabs[1];
         let close_x = tab.close_button_x();
 
-        // Hit the close button region
         assert_eq!(
             state.close_button_at(close_x + 5.0, TITLE_BAR_HEIGHT + 10.0),
             Some(1)
@@ -1592,7 +1517,6 @@ mod tests {
         let state = bar_with(3, 0, 600.0);
         let tab = &state.tabs[0];
         let close_x = tab.close_button_x();
-        // Just left of the close button
         assert_eq!(
             state.close_button_at(close_x - 1.0, TITLE_BAR_HEIGHT + 10.0),
             None
@@ -1604,7 +1528,6 @@ mod tests {
         let state = bar_with(3, 0, 600.0);
         let tab = &state.tabs[0];
         let close_x = tab.close_button_x();
-        // Just right of the close button
         assert_eq!(
             state.close_button_at(close_x + TAB_CLOSE_BUTTON_SIZE, TITLE_BAR_HEIGHT + 10.0),
             None
@@ -1649,10 +1572,6 @@ mod tests {
         }
     }
 
-    // ---------------------------------------------------------------
-    // Drag and drop
-    // ---------------------------------------------------------------
-
     #[test]
     fn start_drag_valid_index() {
         let mut state = bar_with(3, 0, 600.0);
@@ -1687,7 +1606,6 @@ mod tests {
         let mut state = bar_with(3, 0, 600.0);
         let w = state.tabs[0].width;
         state.start_drag(1, 300.0);
-        // Move less than half a tab width
         let result = state.update_drag(300.0 + w / 4.0);
         assert!(result.is_none());
         assert_eq!(state.dragging_tab, Some(1));
@@ -1698,10 +1616,8 @@ mod tests {
         let mut state = bar_with(3, 0, 600.0);
         let w = state.tabs[0].width;
         state.start_drag(0, 100.0);
-        // Move more than half a tab width to the right
         let result = state.update_drag(100.0 + w / 2.0 + 1.0);
         assert_eq!(result, Some((0, 1)));
-        // dragging_tab should now point to new index
         assert_eq!(state.dragging_tab, Some(1));
     }
 
@@ -1710,7 +1626,6 @@ mod tests {
         let mut state = bar_with(3, 0, 600.0);
         let w = state.tabs[0].width;
         state.start_drag(2, 500.0);
-        // Move more than half a tab width to the left
         let result = state.update_drag(500.0 - w / 2.0 - 1.0);
         assert_eq!(result, Some((2, 1)));
         assert_eq!(state.dragging_tab, Some(1));
@@ -1721,7 +1636,6 @@ mod tests {
         let mut state = bar_with(3, 0, 600.0);
         let w = state.tabs[0].width;
         state.start_drag(0, 50.0);
-        // Try to drag left when at index 0
         let result = state.update_drag(50.0 - w);
         assert!(result.is_none());
         assert_eq!(state.dragging_tab, Some(0));
@@ -1732,7 +1646,6 @@ mod tests {
         let mut state = bar_with(3, 0, 600.0);
         let w = state.tabs[0].width;
         state.start_drag(2, 500.0);
-        // Try to drag right when at last index
         let result = state.update_drag(500.0 + w);
         assert!(result.is_none());
         assert_eq!(state.dragging_tab, Some(2));
@@ -1746,7 +1659,6 @@ mod tests {
         let x = 300.0 + w / 2.0 + 1.0;
         let result = state.update_drag(x);
         assert!(result.is_some());
-        // After swap, offset resets
         assert_eq!(state.drag_offset_x, 0.0);
         assert_eq!(state.drag_start_x, x);
     }
@@ -1767,10 +1679,6 @@ mod tests {
         state.end_drag();
         assert!(!state.is_dragging());
     }
-
-    // ---------------------------------------------------------------
-    // TabState geometry
-    // ---------------------------------------------------------------
 
     #[test]
     fn tab_state_bounds() {
@@ -1874,10 +1782,6 @@ mod tests {
         }
     }
 
-    // ---------------------------------------------------------------
-    // Constants sanity checks
-    // ---------------------------------------------------------------
-
     #[test]
     fn min_tab_width_positive() {
         const {
@@ -1906,22 +1810,13 @@ mod tests {
         }
     }
 
-    // ---------------------------------------------------------------
-    // Edge case: very narrow window
-    // ---------------------------------------------------------------
-
     #[test]
     fn very_narrow_window_clamps_to_min() {
-        // Window narrower than a single MIN_TAB_WIDTH
         let state = bar_with(2, 0, 50.0);
         for tab in &state.tabs {
             assert_eq!(tab.width, MIN_TAB_WIDTH);
         }
     }
-
-    // ---------------------------------------------------------------
-    // Repeated updates are idempotent
-    // ---------------------------------------------------------------
 
     #[test]
     fn repeated_update_is_stable() {
