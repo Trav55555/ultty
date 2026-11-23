@@ -106,10 +106,8 @@ impl UrlDetector {
 
         let row_count = rows as usize;
 
-        // Resize hash cache if row count changed — full rescan needed
         if self.row_hashes.len() != row_count {
             self.row_hashes.resize(row_count, 0);
-            // Force full rescan by zeroing all hashes
             self.row_hashes.fill(0);
             self.urls.clear();
         }
@@ -119,11 +117,9 @@ impl UrlDetector {
             let hash = Self::hash_str(&text);
 
             if hash == self.row_hashes[row_idx as usize] && self.row_hashes[row_idx as usize] != 0 {
-                // Row unchanged, keep existing URLs for this row
                 continue;
             }
 
-            // Row changed: remove old URLs for this row and re-detect
             self.row_hashes[row_idx as usize] = hash;
             self.urls.retain(|u| u.row != row_idx);
             self.detect_in_line(&text, row_idx);
@@ -140,7 +136,6 @@ impl UrlDetector {
     /// Detect URLs in a single line.
     fn detect_in_line(&mut self, text: &str, row: u16) {
         for mat in url_regex().find_iter(text) {
-            // Convert byte offsets to character offsets for column positions
             let start_col = text[..mat.start()].chars().count() as u16;
             let end_col = text[..mat.end()].chars().count() as u16;
 
@@ -181,14 +176,12 @@ impl UrlDetector {
             while col < cols {
                 let hyperlink_id = get_cell_hyperlink(row_idx, col);
                 if hyperlink_id != 0 {
-                    // Found a hyperlink, scan for its extent
                     let start_col = col;
                     while col < cols && get_cell_hyperlink(row_idx, col) == hyperlink_id {
                         col += 1;
                     }
                     let end_col = col;
 
-                    // Get the URI for this hyperlink
                     if let Some(uri) = get_hyperlink_uri(hyperlink_id) {
                         self.urls.push(DetectedUrl {
                             url: uri,
@@ -282,9 +275,6 @@ impl std::error::Error for UrlError {}
 mod tests {
     use super::*;
 
-    // ---------------------------------------------------------------
-    // Helper: run the detector on a single line and return found URLs
-    // ---------------------------------------------------------------
     fn detect_line(text: &str) -> Vec<DetectedUrl> {
         let mut d = UrlDetector::new(true);
         let owned = text.to_string();
@@ -336,8 +326,6 @@ mod tests {
         ));
     }
 
-    // ==================== Basic protocol matching ====================
-
     #[test]
     fn detect_http_url() {
         let mut detector = UrlDetector::new(true);
@@ -361,8 +349,6 @@ mod tests {
         assert_eq!(urls_from("http://a.com"), vec!["http://a.com"]);
         assert_eq!(urls_from("https://a.com"), vec!["https://a.com"]);
     }
-
-    // ==================== URLs with paths, query strings, fragments ==
 
     #[test]
     fn detect_url_with_path_and_query() {
@@ -409,8 +395,6 @@ mod tests {
         assert_eq!(found, vec!["https://my-site.example.com/some_page"]);
     }
 
-    // ==================== Multiple URLs ==============================
-
     #[test]
     fn detect_multiple_urls() {
         let found = urls_from("First: http://a.com Second: https://b.com");
@@ -425,8 +409,6 @@ mod tests {
         assert_eq!(found[1], "http://b.com");
         assert_eq!(found[2], "http://c.com");
     }
-
-    // ==================== Multi-row detection ========================
 
     #[test]
     fn detect_url_across_rows() {
@@ -456,13 +438,10 @@ mod tests {
         assert_eq!(detector.urls[0].row, 3);
     }
 
-    // ==================== Column positions ===========================
-
     #[test]
     fn url_at_position() {
         let mut detector = UrlDetector::new(true);
         detector.detect(1, |_| "Visit https://example.com now".to_string());
-        // "Visit " is 6 chars, URL starts at col 6
         assert!(detector.has_url_at(6, 0));
         assert!(detector.has_url_at(10, 0));
         assert!(!detector.has_url_at(5, 0)); // Before URL
@@ -473,9 +452,7 @@ mod tests {
     fn column_positions_basic() {
         let urls = detect_line("AB https://x.co CD");
         assert_eq!(urls.len(), 1);
-        // "AB " = 3 chars -> start_col = 3
         assert_eq!(urls[0].start_col, 3);
-        // "https://x.co" = 12 chars -> end_col = 3 + 12 = 15
         assert_eq!(urls[0].end_col, 15);
     }
 
@@ -497,7 +474,6 @@ mod tests {
     fn url_at_returns_correct_url() {
         let mut detector = UrlDetector::new(true);
         detector.detect(1, |_| "http://a.co http://b.co".to_string());
-        // "http://a.co" is at cols 0..11, " http://b.co" starts at 12
         let first = detector.url_at(0, 0);
         assert!(first.is_some());
         assert_eq!(first.unwrap().url, "http://a.co");
@@ -507,8 +483,6 @@ mod tests {
         assert_eq!(second.unwrap().url, "http://b.co");
     }
 
-    // ==================== Unicode / multibyte =======================
-
     #[test]
     fn unicode_prefix_column_offset() {
         // Each CJK character is one char but occupies 2 cells in terminal.
@@ -516,12 +490,9 @@ mod tests {
         // char-based.
         let urls = detect_line("\u{4e16}\u{754c} https://example.com");
         assert_eq!(urls.len(), 1);
-        // Two CJK chars + space = 3 chars -> start_col = 3
         assert_eq!(urls[0].start_col, 3);
         assert_eq!(urls[0].url, "https://example.com");
     }
-
-    // ==================== Trailing punctuation stripping =============
 
     #[test]
     fn url_excludes_trailing_period() {
@@ -578,7 +549,6 @@ mod tests {
         // both in the excluded-final-char class.
         let found = urls_from("(see http://example.com).");
         assert_eq!(found.len(), 1);
-        // The URL should not include ')' or '.'
         assert!(!found[0].ends_with('.'));
         assert!(!found[0].ends_with(')'));
     }
@@ -590,18 +560,14 @@ mod tests {
         // followed by nothing or punctuation.
         let found = urls_from("https://en.wikipedia.org/wiki/Rust_(programming_language)");
         assert_eq!(found.len(), 1);
-        // The trailing ')' is stripped by the regex
         assert!(found[0].starts_with("https://en.wikipedia.org/wiki/Rust_(programming_language"));
     }
 
     #[test]
     fn url_keeps_query_params_with_question_mark() {
-        // '?' followed by more chars is kept
         let found = urls_from("https://example.com/search?q=hello");
         assert_eq!(found, vec!["https://example.com/search?q=hello"]);
     }
-
-    // ==================== Excluded characters ========================
 
     #[test]
     fn url_stops_at_angle_brackets() {
@@ -651,8 +617,6 @@ mod tests {
         assert_eq!(found[0], "https://example.com");
     }
 
-    // ==================== Non-URLs that should NOT match =============
-
     #[test]
     fn no_match_ftp() {
         assert!(urls_from("ftp://files.example.com").is_empty());
@@ -694,8 +658,6 @@ mod tests {
         assert!(urls_from("http://").is_empty());
     }
 
-    // ==================== DetectedUrl::contains ======================
-
     #[test]
     fn detected_url_contains() {
         let url = DetectedUrl {
@@ -714,7 +676,6 @@ mod tests {
 
     #[test]
     fn detected_url_contains_single_width() {
-        // Edge case: URL occupying a single column
         let url = DetectedUrl {
             url: "http://x".to_string(),
             start_col: 0,
@@ -724,8 +685,6 @@ mod tests {
         assert!(url.contains(0, 0));
         assert!(!url.contains(1, 0));
     }
-
-    // ==================== Enabled / disabled toggle ==================
 
     #[test]
     fn disabled_detector() {
@@ -744,7 +703,6 @@ mod tests {
 
         detector.set_enabled(false);
         assert!(!detector.is_enabled());
-        // Disabling clears cached URLs
         assert!(detector.urls.is_empty());
     }
 
@@ -770,8 +728,6 @@ mod tests {
         assert_eq!(detector.urls[0].url, "http://second.com");
     }
 
-    // ==================== Default trait ==============================
-
     #[test]
     fn default_detector_is_disabled() {
         let detector = UrlDetector::default();
@@ -779,12 +735,9 @@ mod tests {
         assert!(detector.urls().is_empty());
     }
 
-    // ==================== OSC 8 hyperlink detection ==================
-
     #[test]
     fn detect_hyperlinks_basic() {
         let mut detector = UrlDetector::new(true);
-        // Simulate a 1x10 grid where cols 2..5 have hyperlink id 1
         detector.detect_hyperlinks(
             1,
             10,
@@ -807,7 +760,6 @@ mod tests {
     #[test]
     fn detect_hyperlinks_multiple_on_same_row() {
         let mut detector = UrlDetector::new(true);
-        // id=1 at cols 0..3, id=2 at cols 5..8
         detector.detect_hyperlinks(
             1,
             10,
@@ -867,12 +819,9 @@ mod tests {
     #[test]
     fn detect_hyperlinks_unknown_id() {
         let mut detector = UrlDetector::new(true);
-        // hyperlink id 99 has no URI mapping
         detector.detect_hyperlinks(1, 5, |_, col| if col < 3 { 99 } else { 0 }, |_| None);
         assert!(detector.urls.is_empty());
     }
-
-    // ==================== UrlError display ===========================
 
     #[test]
     fn url_error_display() {
@@ -885,11 +834,8 @@ mod tests {
     #[test]
     fn url_error_is_error_trait() {
         let err = UrlError::OpenFailed("test".to_string());
-        // Confirm it implements std::error::Error (this compiles = passes)
         let _: &dyn std::error::Error = &err;
     }
-
-    // ==================== Real-world URL patterns ====================
 
     #[test]
     fn github_url_with_path() {
@@ -924,10 +870,8 @@ mod tests {
 
     #[test]
     fn url_surrounded_by_markdown_parens() {
-        // Markdown: [link](https://example.com)
         let found = urls_from("[link](https://example.com)");
         assert_eq!(found.len(), 1);
-        // The trailing ')' is stripped
         assert_eq!(found[0], "https://example.com");
     }
 

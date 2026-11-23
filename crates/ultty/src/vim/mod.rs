@@ -163,14 +163,11 @@ impl CopyMode {
         self.total_rows = total_rows;
         self.viewport_rows = viewport_rows;
         self.viewport_cols = viewport_cols;
-        // Clamp cursor to valid range
         self.cursor_row = self.cursor_row.min(total_rows.saturating_sub(1));
         self.cursor_col = self.cursor_col.min(viewport_cols.saturating_sub(1));
-        // Clamp scroll offset
         self.scroll_offset = self
             .scroll_offset
             .min(total_rows.saturating_sub(viewport_rows));
-        // Ensure cursor is visible within viewport
         if self.cursor_row < self.scroll_offset {
             self.scroll_offset = self.cursor_row;
         } else if self.cursor_row >= self.scroll_offset + viewport_rows {
@@ -178,7 +175,6 @@ impl CopyMode {
                 .cursor_row
                 .saturating_sub(viewport_rows.saturating_sub(1));
         }
-        // Clamp selection anchor if set
         if let Some((ref mut row, ref mut col)) = self.selection_anchor {
             *row = (*row).min(total_rows.saturating_sub(1));
             *col = (*col).min(viewport_cols.saturating_sub(1));
@@ -316,7 +312,6 @@ impl CopyMode {
         match key {
             Key::Escape | Key::Char('q') => {
                 if count.is_some() {
-                    // Cancel a pending count only
                     return CopyModeResult::Handled;
                 }
                 if self.mode.is_visual() {
@@ -886,11 +881,6 @@ fn word_end(chars: &[char], col: usize) -> usize {
 mod tests {
     use super::*;
 
-    // ---------------------------------------------------------------
-    // Helper to create a CopyMode with standard dimensions and enter it.
-    // total_rows=100, viewport_rows=24, viewport_cols=80
-    // cursor starts at row 76 (= 100 - 24), col 0.
-    // ---------------------------------------------------------------
     fn pts(points: &[(usize, usize)]) -> Vec<SearchMatch> {
         points.iter().map(|&(r, c)| SearchMatch::at(r, c)).collect()
     }
@@ -900,10 +890,6 @@ mod tests {
         m.enter(100, 24, 80);
         m
     }
-
-    // ---------------------------------------------------------------
-    // 1. Lifecycle: new / enter / exit / is_active
-    // ---------------------------------------------------------------
 
     #[test]
     fn new_is_inactive() {
@@ -923,7 +909,6 @@ mod tests {
         let mut m = CopyMode::new();
         m.enter(100, 24, 80);
         assert!(m.is_active());
-        // cursor_row = scroll_offset = total_rows - viewport_rows = 76
         assert_eq!(m.cursor_position(), (76, 0));
         assert_eq!(m.scroll_offset(), 76);
         assert_eq!(m.vim_mode(), VimMode::Normal);
@@ -932,7 +917,6 @@ mod tests {
 
     #[test]
     fn enter_small_buffer() {
-        // total_rows < viewport_rows
         let mut m = CopyMode::new();
         m.enter(10, 24, 80);
         assert_eq!(m.cursor_position(), (0, 0));
@@ -965,20 +949,12 @@ mod tests {
         assert_eq!(m.search_query(), "");
     }
 
-    // ---------------------------------------------------------------
-    // 2. Inactive mode ignores keys
-    // ---------------------------------------------------------------
-
     #[test]
     fn inactive_returns_not_handled() {
         let mut m = CopyMode::new();
         let r = m.handle_key(&Key::Char('j'), Modifiers::NONE);
         assert!(matches!(r, CopyModeResult::NotHandled));
     }
-
-    // ---------------------------------------------------------------
-    // 3. Basic cursor movement: h / j / k / l and arrow keys
-    // ---------------------------------------------------------------
 
     #[test]
     fn move_j_k() {
@@ -1014,10 +990,6 @@ mod tests {
         assert_eq!(m.cursor_col, 0);
     }
 
-    // ---------------------------------------------------------------
-    // 4. Cursor boundary clamping
-    // ---------------------------------------------------------------
-
     #[test]
     fn h_at_col_zero_stays() {
         let mut m = active_mode();
@@ -1037,7 +1009,6 @@ mod tests {
     #[test]
     fn j_at_last_row_stays() {
         let mut m = active_mode();
-        // Move to last row
         m.handle_key(&Key::Char('G'), Modifiers::NONE);
         assert_eq!(m.cursor_row, 99);
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
@@ -1052,10 +1023,6 @@ mod tests {
         m.handle_key(&Key::Char('l'), Modifiers::NONE);
         assert_eq!(m.cursor_col, 79);
     }
-
-    // ---------------------------------------------------------------
-    // 5. Line-start / line-end: 0, ^, $, Home, End
-    // ---------------------------------------------------------------
 
     #[test]
     fn zero_moves_to_col_zero() {
@@ -1089,10 +1056,6 @@ mod tests {
         m.handle_key(&Key::Home, Modifiers::NONE);
         assert_eq!(m.cursor_col, 0);
     }
-
-    // ---------------------------------------------------------------
-    // 6. Word motions: w, b, e
-    // ---------------------------------------------------------------
 
     const ROW: &str = "hello world, foo_bar";
 
@@ -1207,10 +1170,6 @@ mod tests {
         assert_eq!(m.cursor_col, 0);
     }
 
-    // ---------------------------------------------------------------
-    // 7. Document motions: G, g (noop), H, M, L
-    // ---------------------------------------------------------------
-
     #[test]
     fn g_upper_goes_to_last_row() {
         let mut m = active_mode();
@@ -1256,7 +1215,6 @@ mod tests {
     #[test]
     fn h_upper_screen_top() {
         let mut m = active_mode();
-        // scroll_offset = 76, so H -> row 76
         m.handle_key(&Key::Char('j'), Modifiers::NONE); // row 77
         m.handle_key(&Key::Char('H'), Modifiers::NONE);
         assert_eq!(m.cursor_row, m.scroll_offset());
@@ -1266,7 +1224,6 @@ mod tests {
     fn m_upper_screen_middle() {
         let mut m = active_mode();
         m.handle_key(&Key::Char('M'), Modifiers::NONE);
-        // scroll_offset=76, viewport=24, mid=76+12=88
         assert_eq!(m.cursor_row, 88);
     }
 
@@ -1274,13 +1231,8 @@ mod tests {
     fn l_upper_screen_bottom() {
         let mut m = active_mode();
         m.handle_key(&Key::Char('L'), Modifiers::NONE);
-        // scroll_offset=76, viewport=24 -> 76+23=99
         assert_eq!(m.cursor_row, 99);
     }
-
-    // ---------------------------------------------------------------
-    // 8. Scrolling: Ctrl-d/u (half page), Ctrl-f/b (full page), PageUp/Down
-    // ---------------------------------------------------------------
 
     #[test]
     fn ctrl_d_half_page_down() {
@@ -1302,7 +1254,6 @@ mod tests {
     #[test]
     fn ctrl_f_full_page_down() {
         let mut m = active_mode();
-        // cursor_row starts at 76; 76 + 24 = 100 -> clamped to 99
         m.handle_key(&Key::Char('f'), Modifiers::CTRL);
         assert_eq!(m.cursor_row, 99);
     }
@@ -1312,7 +1263,6 @@ mod tests {
         let mut m = active_mode();
         m.handle_key(&Key::Char('G'), Modifiers::NONE); // row 99
         m.handle_key(&Key::Char('b'), Modifiers::CTRL);
-        // 99 - 24 = 75
         assert_eq!(m.cursor_row, 75);
     }
 
@@ -1348,19 +1298,12 @@ mod tests {
         assert_eq!(m.cursor_row, 0);
     }
 
-    // ---------------------------------------------------------------
-    // 9. Scroll offset tracking (ensure_cursor_visible)
-    // ---------------------------------------------------------------
-
     #[test]
     fn scroll_offset_follows_cursor_down() {
         let mut m = active_mode();
-        // cursor starts at row 76, scroll_offset 76, viewport 24
-        // Move cursor to row 100 (beyond viewport bottom at 76+24=100)
         for _ in 0..24 {
             m.handle_key(&Key::Char('j'), Modifiers::NONE);
         }
-        // cursor at 99 (clamped), scroll_offset adjusted
         assert!(m.cursor_row < m.scroll_offset() + m.viewport_rows);
         assert!(m.cursor_row >= m.scroll_offset());
     }
@@ -1368,16 +1311,11 @@ mod tests {
     #[test]
     fn scroll_offset_follows_cursor_up() {
         let mut m = active_mode();
-        // Jump to bottom, then page up
         m.handle_key(&Key::Char('G'), Modifiers::NONE);
         m.handle_key(&Key::Char('b'), Modifiers::CTRL); // full page up
         assert!(m.cursor_row >= m.scroll_offset());
         assert!(m.cursor_row < m.scroll_offset() + m.viewport_rows);
     }
-
-    // ---------------------------------------------------------------
-    // 10. Visual mode (v) - character selection
-    // ---------------------------------------------------------------
 
     #[test]
     fn v_enters_visual_mode() {
@@ -1401,11 +1339,9 @@ mod tests {
     fn visual_char_selection_range() {
         let mut m = active_mode();
         m.handle_key(&Key::Char('v'), Modifiers::NONE);
-        // anchor at (76, 0)
         m.handle_key(&Key::Char('l'), Modifiers::NONE);
         m.handle_key(&Key::Char('l'), Modifiers::NONE);
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
-        // cursor now at (77, 2)
         let sel = m.selection().unwrap();
         assert_eq!(
             sel,
@@ -1421,17 +1357,12 @@ mod tests {
     #[test]
     fn visual_char_selection_backwards() {
         let mut m = active_mode();
-        // Move cursor to (78, 5) first
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
         m.cursor_col = 5;
-        // Enter visual
         m.handle_key(&Key::Char('v'), Modifiers::NONE);
-        // anchor at (78, 5)
-        // Move backwards
         m.handle_key(&Key::Char('k'), Modifiers::NONE);
         m.handle_key(&Key::Char('h'), Modifiers::NONE);
-        // cursor at (77, 4)
         let sel = m.selection().unwrap();
         assert_eq!(
             sel,
@@ -1443,10 +1374,6 @@ mod tests {
             }
         );
     }
-
-    // ---------------------------------------------------------------
-    // 11. Visual Line mode (V)
-    // ---------------------------------------------------------------
 
     #[test]
     fn v_upper_enters_visual_line() {
@@ -1480,10 +1407,6 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------
-    // 12. Visual Block mode (Ctrl-v)
-    // ---------------------------------------------------------------
-
     #[test]
     fn ctrl_v_enters_visual_block() {
         let mut m = active_mode();
@@ -1505,13 +1428,11 @@ mod tests {
         let mut m = active_mode();
         m.cursor_col = 3;
         m.handle_key(&Key::Char('v'), Modifiers::CTRL);
-        // anchor at (76, 3)
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
         m.handle_key(&Key::Char('l'), Modifiers::NONE);
         m.handle_key(&Key::Char('l'), Modifiers::NONE);
         m.handle_key(&Key::Char('l'), Modifiers::NONE);
-        // cursor at (78, 6)
         let sel = m.selection().unwrap();
         assert_eq!(
             sel,
@@ -1529,13 +1450,9 @@ mod tests {
         let mut m = active_mode();
         m.cursor_col = 10;
         m.handle_key(&Key::Char('v'), Modifiers::CTRL);
-        // anchor at (76, 10)
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
-        // Move cursor left of anchor
         m.cursor_col = 3;
-        // cursor at (77, 3), anchor col=10
         let sel = m.selection().unwrap();
-        // Block selection should use min/max of cursor_col and start_col
         assert_eq!(
             sel,
             Selection::Block {
@@ -1546,10 +1463,6 @@ mod tests {
             }
         );
     }
-
-    // ---------------------------------------------------------------
-    // 13. Escape / q from visual returns to normal; from normal exits
-    // ---------------------------------------------------------------
 
     #[test]
     fn escape_in_visual_returns_to_normal() {
@@ -1587,10 +1500,6 @@ mod tests {
         assert!(m.is_active());
     }
 
-    // ---------------------------------------------------------------
-    // 14. Enter key: copy+exit with selection, plain exit without
-    // ---------------------------------------------------------------
-
     #[test]
     fn enter_without_selection_exits() {
         let mut m = active_mode();
@@ -1612,16 +1521,11 @@ mod tests {
         assert!(!m.is_active());
     }
 
-    // ---------------------------------------------------------------
-    // 15. Yank (y)
-    // ---------------------------------------------------------------
-
     #[test]
     fn y_without_selection_is_noop() {
         let mut m = active_mode();
         let r = m.handle_key(&Key::Char('y'), Modifiers::NONE);
         assert!(matches!(r, CopyModeResult::Handled));
-        // Still active, still normal
         assert!(m.is_active());
     }
 
@@ -1724,10 +1628,6 @@ mod tests {
         ));
     }
 
-    // ---------------------------------------------------------------
-    // 16. Search: /, ?, typing, Enter, Escape, n, N
-    // ---------------------------------------------------------------
-
     #[test]
     fn slash_enters_search_forward() {
         let mut m = active_mode();
@@ -1804,10 +1704,6 @@ mod tests {
         assert_eq!(m.search_query(), ""); // cleared on escape
     }
 
-    // ---------------------------------------------------------------
-    // 17. Search match navigation: n, N with set_search_matches
-    // ---------------------------------------------------------------
-
     #[test]
     fn n_without_matches_is_noop() {
         let mut m = active_mode();
@@ -1819,18 +1715,14 @@ mod tests {
     #[test]
     fn n_forward_cycles_through_matches() {
         let mut m = active_mode();
-        // Set up search direction as forward
         m.handle_key(&Key::Char('/'), Modifiers::NONE);
         m.handle_key(&Key::Char('x'), Modifiers::NONE);
         m.handle_key(&Key::Enter, Modifiers::NONE);
-        // Provide matches
         m.set_search_matches(pts(&[(10, 5), (20, 3), (30, 7)]));
-        // current_match starts at 0, n goes forward -> index 1
         m.handle_key(&Key::Char('n'), Modifiers::NONE);
         assert_eq!(m.cursor_position(), (20, 3));
         m.handle_key(&Key::Char('n'), Modifiers::NONE);
         assert_eq!(m.cursor_position(), (30, 7));
-        // Wrap around
         m.handle_key(&Key::Char('n'), Modifiers::NONE);
         assert_eq!(m.cursor_position(), (10, 5));
     }
@@ -1842,7 +1734,6 @@ mod tests {
         m.handle_key(&Key::Char('x'), Modifiers::NONE);
         m.handle_key(&Key::Enter, Modifiers::NONE);
         m.set_search_matches(pts(&[(10, 5), (20, 3), (30, 7)]));
-        // current_match=0, N goes backward -> wraps to 2
         m.handle_key(&Key::Char('N'), Modifiers::NONE);
         assert_eq!(m.cursor_position(), (30, 7));
         m.handle_key(&Key::Char('N'), Modifiers::NONE);
@@ -1856,11 +1747,8 @@ mod tests {
         m.handle_key(&Key::Char('x'), Modifiers::NONE);
         m.handle_key(&Key::Enter, Modifiers::NONE);
         m.set_search_matches(pts(&[(10, 5), (20, 3), (30, 7)]));
-        // In backward search, n goes backward (decrements), N goes forward (increments)
-        // current_match=0, n in backward search -> wraps to 2
         m.handle_key(&Key::Char('n'), Modifiers::NONE);
         assert_eq!(m.cursor_position(), (30, 7));
-        // N in backward search -> increments -> index 0
         m.handle_key(&Key::Char('N'), Modifiers::NONE);
         assert_eq!(m.cursor_position(), (10, 5));
     }
@@ -1882,15 +1770,10 @@ mod tests {
         m.handle_key(&Key::Enter, Modifiers::NONE);
         m.set_search_matches(pts(&[(42, 10)]));
         m.handle_key(&Key::Char('n'), Modifiers::NONE);
-        // wraps: (0+1)%1 = 0
         assert_eq!(m.cursor_position(), (42, 10));
         m.handle_key(&Key::Char('n'), Modifiers::NONE);
         assert_eq!(m.cursor_position(), (42, 10));
     }
-
-    // ---------------------------------------------------------------
-    // 18. Mode transitions: switching between visual modes
-    // ---------------------------------------------------------------
 
     #[test]
     fn visual_to_visual_line_switches() {
@@ -1911,21 +1794,15 @@ mod tests {
         assert_eq!(m.vim_mode(), VimMode::VisualBlock);
     }
 
-    // ---------------------------------------------------------------
-    // 19. Edge case: empty / minimal buffers
-    // ---------------------------------------------------------------
-
     #[test]
     fn empty_buffer_movements() {
         let mut m = CopyMode::new();
         m.enter(0, 24, 80);
-        // All movements should be safe with 0 total_rows
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
         m.handle_key(&Key::Char('k'), Modifiers::NONE);
         m.handle_key(&Key::Char('G'), Modifiers::NONE);
         m.handle_key(&Key::Char('d'), Modifiers::CTRL);
         m.handle_key(&Key::Char('u'), Modifiers::CTRL);
-        // Should not panic, cursor stays at 0
         assert_eq!(m.cursor_row, 0);
     }
 
@@ -1949,19 +1826,11 @@ mod tests {
         assert_eq!(m.cursor_col, 0);
     }
 
-    // ---------------------------------------------------------------
-    // 20. Selection with no anchor returns None
-    // ---------------------------------------------------------------
-
     #[test]
     fn no_selection_in_normal_mode() {
         let m = active_mode();
         assert!(m.selection().is_none());
     }
-
-    // ---------------------------------------------------------------
-    // 21. Unrecognised key returns Handled (swallowed)
-    // ---------------------------------------------------------------
 
     #[test]
     fn unknown_key_is_handled() {
@@ -1977,10 +1846,6 @@ mod tests {
         assert!(matches!(r, CopyModeResult::Handled));
     }
 
-    // ---------------------------------------------------------------
-    // 22. Search key in search mode for unhandled keys
-    // ---------------------------------------------------------------
-
     #[test]
     fn search_mode_ignores_function_keys() {
         let mut m = active_mode();
@@ -1990,16 +1855,11 @@ mod tests {
         assert_eq!(m.vim_mode(), VimMode::Search);
     }
 
-    // ---------------------------------------------------------------
-    // 23. Re-entering copy mode resets state
-    // ---------------------------------------------------------------
-
     #[test]
     fn re_enter_resets_state() {
         let mut m = active_mode();
         m.handle_key(&Key::Char('v'), Modifiers::NONE);
         m.handle_key(&Key::Char('j'), Modifiers::NONE);
-        // Now re-enter
         m.enter(200, 30, 100);
         assert_eq!(m.vim_mode(), VimMode::Normal);
         assert!(m.selection().is_none());
@@ -2008,14 +1868,9 @@ mod tests {
         assert_eq!(m.scroll_offset(), 170);
     }
 
-    // ---------------------------------------------------------------
-    // 24. Combined sequences
-    // ---------------------------------------------------------------
-
     #[test]
     fn visual_select_move_yank_sequence() {
         let mut m = active_mode();
-        // v -> move right 3 -> move down 1 -> y
         m.handle_key(&Key::Char('v'), Modifiers::NONE);
         for _ in 0..3 {
             m.handle_key(&Key::Char('l'), Modifiers::NONE);
@@ -2036,7 +1891,6 @@ mod tests {
             }
             _ => panic!("Expected Copy with Char selection"),
         }
-        // Back to normal, still active
         assert_eq!(m.vim_mode(), VimMode::Normal);
         assert!(m.is_active());
     }
@@ -2061,7 +1915,6 @@ mod tests {
     #[test]
     fn search_then_navigate_matches() {
         let mut m = active_mode();
-        // Start search
         m.handle_key(&Key::Char('/'), Modifiers::NONE);
         m.handle_key(&Key::Char('t'), Modifiers::NONE);
         m.handle_key(&Key::Char('e'), Modifiers::NONE);
@@ -2069,16 +1922,12 @@ mod tests {
         m.handle_key(&Key::Char('t'), Modifiers::NONE);
         let r = m.handle_key(&Key::Enter, Modifiers::NONE);
         assert!(matches!(r, CopyModeResult::Search(ref s) if s == "test"));
-        // Simulate external match setting
         m.set_search_matches(pts(&[(5, 0), (15, 10), (25, 20)]));
-        // Navigate forward
         m.handle_key(&Key::Char('n'), Modifiers::NONE);
         assert_eq!(m.cursor_position(), (15, 10));
-        // Select from here
         m.handle_key(&Key::Char('v'), Modifiers::NONE);
         m.handle_key(&Key::Char('n'), Modifiers::NONE);
         assert_eq!(m.cursor_position(), (25, 20));
-        // Yank the selection
         let r = m.handle_key(&Key::Char('y'), Modifiers::NONE);
         match r {
             CopyModeResult::Copy(Some(Selection::Char {
@@ -2096,26 +1945,17 @@ mod tests {
         }
     }
 
-    // ---------------------------------------------------------------
-    // Resize clamps cursor and scroll
-    // ---------------------------------------------------------------
-
     #[test]
     fn resize_clamps_cursor() {
         let mut m = CopyMode::new();
         m.enter(100, 24, 80);
-        // Move cursor to a high position
         m.cursor_row = 90;
         m.cursor_col = 70;
 
-        // Shrink viewport
         m.resize(50, 10, 40);
 
-        // cursor_row should be clamped to 49 (total_rows - 1)
         assert_eq!(m.cursor_row, 49);
-        // cursor_col should be clamped to 39 (viewport_cols - 1)
         assert_eq!(m.cursor_col, 39);
-        // scroll_offset should keep cursor visible
         assert!(m.cursor_row >= m.scroll_offset);
         assert!(m.cursor_row < m.scroll_offset + 10);
     }
@@ -2132,10 +1972,6 @@ mod tests {
         assert_eq!(row, 49);
         assert_eq!(col, 39);
     }
-
-    // ---------------------------------------------------------------
-    // Search results: selection, eviction, status
-    // ---------------------------------------------------------------
 
     #[test]
     fn finishing_a_forward_search_selects_the_match_after_the_cursor() {
