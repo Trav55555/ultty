@@ -76,7 +76,14 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - run: scripts/ci-runner-step.sh cargo test --locked --workspace
+      - name: Workspace tests
+        run: |
+          if command -v cargo-nextest >/dev/null 2>&1; then
+            scripts/ci-runner-step.sh cargo nextest run --locked --profile ci --workspace
+            scripts/ci-runner-step.sh cargo test --locked --workspace --doc
+          else
+            scripts/ci-runner-step.sh cargo test --locked --workspace
+          fi
         env:
           CI_SCCACHE_STATS: "1"
 

@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
 # Write docs/compat-scorecard.md from the workspace's `scorecard_` tests.
 #
-#   scripts/compat-scorecard.sh           # regenerate the page
-#   scripts/compat-scorecard.sh --check   # fail if the page is out of date
+#   scripts/compat-scorecard.sh                     # regenerate the page
+#   scripts/compat-scorecard.sh --check             # fail if the page is out of date
+#   scripts/compat-scorecard.sh --check --workspace # reuse a --workspace test build
 #
 # Each row names a test prefix. The row reads "Yes" while every test with
 # that prefix passes, "Broken" when one fails, and "No" when there is none.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 page=docs/compat-scorecard.md
+
+check_mode=0
+cargo_scope=(-p ultty-vt -p ultty)
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --check) check_mode=1; shift ;;
+        --workspace) cargo_scope=(--workspace); shift ;;
+        *) echo "usage: $0 [--check] [--workspace]" >&2; exit 2 ;;
+    esac
+done
 
 # slug | feature | what programs use it for | notes
 rows=$(cat <<'EOF'
@@ -35,7 +46,7 @@ kitty_text_sizing|Kitty text sizing (OSC 66)|Keeping emoji, symbols and box glyp
 EOF
 )
 
-results=$(cargo test --locked -p ultty-vt -p ultty --no-fail-fast -- scorecard_ 2>&1 || true)
+results=$(cargo test --locked "${cargo_scope[@]}" --no-fail-fast -- scorecard_ 2>&1 || true)
 grep -q '^test result' <<<"$results" || { echo "$results" >&2; exit 1; }
 
 status_of() {
@@ -69,7 +80,7 @@ EOF
     done <<<"$rows"
 }
 
-if [ "${1-}" = "--check" ]; then
+if [ "$check_mode" -eq 1 ]; then
     if ! diff -u "$page" <(render); then
         echo "$page is out of date: run scripts/compat-scorecard.sh" >&2
         exit 1
