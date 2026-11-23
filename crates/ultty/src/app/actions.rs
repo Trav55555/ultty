@@ -249,16 +249,16 @@ impl App {
         tracing::info!("Configuration reloaded");
     }
 
-    /// Switch to the fonts of `font` without a restart. A size left as it
-    /// was in the config keeps any zoom set with the font-size keys; a
-    /// changed one resets the zoom to the new size.
+    /// Switch fonts without restarting. Keep keyboard zoom while the
+    /// configured size and its units stay the same.
     fn apply_font_config(&mut self, font: &ultty::config::FontConfig) {
         let mut scaled = font.clone();
-        scaled.size = if font.size == self.config.font.size {
-            self.renderer.font_size()
-        } else {
-            font.size * self.scale_factor
-        };
+        scaled.size =
+            if font.size == self.config.font.size && font.metrics == self.config.font.metrics {
+                self.renderer.font_size()
+            } else {
+                font.size * self.scale_factor
+            };
         if self.renderer.apply_font_config(&scaled) {
             // Cell size changed: re-size every pane's grid.
             self.relayout_terminals();
@@ -269,7 +269,11 @@ impl App {
     pub(super) fn change_font_size(&mut self, increase: bool) {
         let new_size = self.renderer.step_font_size(increase);
 
-        tracing::info!("Font size: {:.1}pt", new_size / self.scale_factor);
+        tracing::info!(
+            "Font size: {:.1}{}",
+            new_size / self.scale_factor,
+            self.config.font.metrics.size_unit()
+        );
 
         // Cell size changed: re-size every pane's grid.
         self.relayout_terminals();
@@ -282,7 +286,11 @@ impl App {
         let default_size = self.config.font.size * self.scale_factor;
         let new_size = self.renderer.set_font_size(default_size);
 
-        tracing::info!("Font size reset to: {:.1}pt", new_size / self.scale_factor);
+        tracing::info!(
+            "Font size reset to: {:.1}{}",
+            new_size / self.scale_factor,
+            self.config.font.metrics.size_unit()
+        );
 
         // Cell size changed: re-size every pane's grid.
         self.relayout_terminals();

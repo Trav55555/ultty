@@ -439,6 +439,24 @@ touch; larger values add space between lines. Font settings apply when the
 config is reloaded; see
 [Changing fonts without a restart](#changing-fonts-without-a-restart).
 
+### Restore the previous cell dimensions
+
+Add `metrics = "legacy"` to the existing `[font]` section to use the
+pixel-based sizing from before PR #208.
+
+```toml
+[font]
+metrics = "legacy"
+size = 14.0
+line_height = 1.0
+```
+
+Keep your saved `size` and `line_height` values. Ultty scales the size with
+the display and computes the cell height as `size * line_height` after
+scaling, rounded up to whole pixels. Legacy mode defaults to 14 logical
+pixels when `size` is omitted. Use `metrics = "points"` for typographic
+points and natural line height. Points is the default.
+
 ## Bold and italic families
 
 ```toml
