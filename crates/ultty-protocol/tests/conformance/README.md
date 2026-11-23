@@ -1,22 +1,35 @@
-# Ultty protocol v1 conformance vectors
+# Ultty Native Protocol v1 Wire Conformance Suite
 
-The vectors cover the binary frame format, hello and session messages, the
-two message namespaces, text and legacy widgets, and three rejection cases.
-Each row gives a direction, a complete frame in hex or a deliberately invalid
-frame, and the expected message or error. Use the selected direction even
-when the bytes are identical in both namespaces.
+`v1.json` is the language-independent binary wire conformance corpus for
+Ultty Native Protocol v1 (see [docs/PROTOCOL_SPEC.md](../../../../docs/PROTOCOL_SPEC.md)).
 
-For a valid vector, decode from the hex and compare each field in
-`expected`. Encode that message and compare the full frame byte for byte.
-The `text` vector uses word wrapping, left alignment, and clip overflow.
-Read `session_id` as an unsigned 64-bit integer from its decimal string.
-For a rejection vector, require the specified error category. Error strings
-may differ between implementations.
+## Vector Format
 
-These cases run in workspace CI through the Rust integration test.
+Each entry in `v1.json` is a JSON object:
 
-```sh
-cargo test -p ultty-protocol --test wire_conformance
+- `name`: human-readable test case description.
+- `direction`: `"app"` (App → Terminal) or `"terminal"` (Terminal → App).
+- `hex`: lowercase hexadecimal wire bytes for a single framed message
+  (`magic[2] | type_u16_le | payload_len_u32_le | payload`).
+- `expected`: either a decoded message expectation (`type != "reject"`) or a
+  normative decode rejection (`{"type": "reject", "error": "<class>"}`).
+
+Conforming codecs must:
+
+1. Decode every non-reject vector into the expected message fields, consuming all bytes.
+2. Re-encode every non-reject vector back to the exact same `hex` byte sequence.
+3. Reject every `"reject"` vector with the matching error class:
+   `unexpected_eof`, `invalid_magic`, `invalid_utf8`, `unknown_message_type`,
+   `invalid_float`, or `invalid_data`.
+
+## Running the Reference Implementations
+
+Both the Rust and TypeScript implementations validate against `v1.json`:
+
+```bash
+# Rust reference codec (ultty-protocol)
+cargo test -p ultty-protocol --test integration wire_conformance
+
+# TypeScript client codec (@ultty/client, Node >= 22.6 or Bun)
+scripts/ci-ts-conformance.sh
 ```
-
-The format is defined in [the wire specification](../../../../docs/PROTOCOL_SPEC.md).

@@ -30,6 +30,7 @@ import {
   TextAlign,
   TextOverflow,
   TextWrap,
+  SurfaceEventKind,
   UlttyClient,
   borderAll,
   color,
@@ -79,7 +80,7 @@ const vectors: ConformanceVector[] = JSON.parse(
 
 describe("v1 wire conformance suite", () => {
   it("loads all v1 conformance vectors", () => {
-    assert.ok(vectors.length >= 11, `expected >= 11 vectors, got ${vectors.length}`);
+    assert.ok(vectors.length >= 32, `expected >= 32 vectors, got ${vectors.length}`);
   });
 
   for (const vec of vectors) {
@@ -116,11 +117,62 @@ describe("v1 wire conformance suite", () => {
             version: expected.version,
             requestedCapabilities: expected.requested_capabilities,
           });
+        } else if (expected.type === "begin_frame") {
+          assert.deepEqual(message, {
+            type: "begin_frame",
+            frameId: expected.frame_id,
+          });
+        } else if (expected.type === "end_frame") {
+          assert.deepEqual(message, {
+            type: "end_frame",
+            frameId: expected.frame_id,
+          });
+        } else if (expected.type === "create_region") {
+          assert.equal(message.type, "create_region");
+          assert.equal(message.id, expected.id);
+          assert.equal(message.parent, expected.parent);
+          assert.equal(message.insertIndex, expected.insert_index);
+          assert.equal(message.constraints.display, Display.Flex);
+          assert.equal(message.constraints.flexDirection, FlexDirection.Row);
+          assert.equal(message.constraints.flexGrow, expected.flex_grow);
+          assert.deepEqual(message.constraints.width, {
+            kind: "percent",
+            value: expected.width_percent,
+          });
+          assert.equal(message.constraints.overflow.y, OverflowAxis.Scroll);
+          const rgb = expected.fg_rgb as [number, number, number];
+          assert.deepEqual(message.style.fg, color.rgb(rgb[0], rgb[1], rgb[2]));
+          assert.equal(message.style.bold, expected.bold);
+        } else if (expected.type === "delete_region") {
+          assert.deepEqual(message, {
+            type: "delete_region",
+            id: expected.region,
+          });
         } else if (expected.type === "text") {
           assert.equal(message.type, "set_content");
           assert.equal(message.id, expected.region);
           assert.equal(message.content.kind, "text");
           assert.equal(message.content.content.text, expected.text);
+        } else if (expected.type === "rich_text") {
+          assert.equal(message.type, "set_content");
+          assert.equal(message.id, expected.region);
+          assert.equal(message.content.kind, "rich_text");
+          assert.deepEqual(
+            message.content.content.spans.map((s) => s.text),
+            expected.spans,
+          );
+        } else if (expected.type === "append_content") {
+          assert.deepEqual(message, {
+            type: "append_content",
+            id: expected.region,
+            text: expected.text,
+          });
+        } else if (expected.type === "set_region_metadata") {
+          assert.deepEqual(message, {
+            type: "set_region_metadata",
+            id: expected.region,
+            metadata: expected.metadata,
+          });
         } else if (expected.type === "markdown") {
           assert.equal(message.type, "set_content");
           assert.equal(message.id, expected.region);
@@ -135,6 +187,32 @@ describe("v1 wire conformance suite", () => {
           assert.equal(message.content.widget.source, expected.source);
           assert.equal(message.content.widget.language, expected.language);
           assert.equal(message.content.widget.lineNumbers, expected.line_numbers);
+        } else if (expected.type === "create_surface") {
+          assert.equal(message.type, "create_surface");
+          assert.equal(message.id, expected.region);
+          assert.equal(message.rows, expected.rows);
+        } else if (expected.type === "close_surface") {
+          assert.deepEqual(message, {
+            type: "close_surface",
+            id: expected.region,
+          });
+        } else if (expected.type === "set_semantics") {
+          assert.equal(message.type, "set_semantics");
+          assert.equal(message.id, expected.region);
+          assert.equal(message.semantics.role, Role.Log);
+          assert.equal(message.semantics.label, expected.label);
+          assert.equal(message.semantics.live, Live.Polite);
+          assert.equal(message.semantics.busy, expected.busy);
+        } else if (expected.type === "scroll") {
+          assert.deepEqual(message, {
+            type: "scroll",
+            id: expected.region,
+            x: expected.x,
+            y: expected.y,
+            animate: expected.animate,
+          });
+        } else if (expected.type === "disconnect") {
+          assert.deepEqual(message, { type: "disconnect" });
         } else if (expected.type === "pong") {
           assert.deepEqual(message, { type: "pong" });
         } else {
@@ -158,6 +236,43 @@ describe("v1 wire conformance suite", () => {
             rootRegion: expected.root_region,
             width: expected.width,
             height: expected.height,
+          });
+        } else if (expected.type === "surface_event") {
+          assert.deepEqual(message, {
+            type: "surface_event",
+            id: expected.region,
+            kind: SurfaceEventKind.Placed,
+          });
+        } else if (expected.type === "layout_computed") {
+          assert.equal(message.type, "layout_computed");
+          assert.equal(message.frameId, expected.frame_id);
+          assert.equal(message.trigger, LayoutTrigger.TreeChange);
+          assert.equal(message.regions.length, 1);
+          assert.equal(message.regions[0].id, expected.region);
+          assert.equal(message.regions[0].width, expected.width);
+          assert.equal(message.regions[0].height, expected.height);
+          assert.equal(message.regions[0].contentWidth, expected.content_width);
+          assert.equal(message.regions[0].contentHeight, expected.content_height);
+          assert.equal(message.regions[0].visible, expected.visible);
+        } else if (expected.type === "input_key_down") {
+          assert.equal(message.type, "input");
+          assert.equal(message.event.regionId, expected.region);
+          assert.deepEqual(message.event.eventType, {
+            kind: "key_down",
+            key: { kind: "char", char: expected.char },
+            modifiers: expected.modifiers,
+          });
+          assert.equal(message.event.modifiers, expected.modifiers);
+        } else if (expected.type === "resize") {
+          assert.deepEqual(message, {
+            type: "resize",
+            event: { width: expected.width, height: expected.height },
+          });
+        } else if (expected.type === "error") {
+          assert.deepEqual(message, {
+            type: "error",
+            code: expected.code,
+            message: expected.message,
           });
         } else if (expected.type === "ping") {
           assert.deepEqual(message, { type: "ping" });

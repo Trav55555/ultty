@@ -112,7 +112,7 @@ a protocol, schema or public contract and needs sign-off first.
 | # | Slice | Done when | Gate |
 |---|---|---|---|
 | C1 | `ratatui-ultty` bridge crate: an existing ratatui app opts specific areas (transcript, log) into native regions, keeping ratatui for the rest. | A small ratatui app gets native scroll and copy in its log pane with a diff under ~50 lines. | — (done 2026-11-22, PR #217: `crates/ratatui-ultty`, `examples/log-viewer.rs`) |
-| C2 | Versioned public spec with a conformance test suite that a second implementation can run. | Suite runs against Ultty in CI; spec tagged. | gate (spec freeze) |
+| C2 | Versioned public spec with a conformance test suite that a second implementation can run. | Suite runs against Ultty in CI; spec tagged. | gate (spec freeze; 32-vector `v1.json` suite verified in both Rust `ultty-protocol` and TypeScript `@ultty/client` in CI, ready for v1 freeze tag) |
 | C3 | TypeScript client (Ink and OpenTUI already build flex trees). | An Ink-style example renders natively in Ultty and falls back elsewhere. | — (done 2026-11-22, PR #216: `clients/typescript/`, 11/11 `v1.json` wire conformance vectors + `examples/ink-console.ts`) |
 | C4 | Verify how Tern runs under tmux (`tmux list-clients -F '#{client_control_mode}'` during a session), then scope tmux control-mode client support as its own project. | A written scope with risks; no build yet. | — (done 2026-11-23: [tmux control-mode scope](research/tmux-control-mode-scope.md), verified live on tmux 3.6; deferred as standalone project) |
 | C5 | Spike a TSP receiver to price being its second open implementation. | A go/no-go note with effort estimate. | — (done 2026-11-23: [TSP receiver go/no-go](research/tsp-receiver-gonogo.md); decision: No-Go / defer) |

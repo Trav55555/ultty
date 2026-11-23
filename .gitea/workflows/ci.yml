@@ -95,6 +95,8 @@ jobs:
         run: scripts/install-sh-test.sh
       - name: Runner step wrapper
         run: scripts/ci-runner-step-test.sh
+      - name: TypeScript protocol v1 conformance
+        run: scripts/ci-ts-conformance.sh
       - name: Workspace tests
         run: |
           if command -v cargo-nextest >/dev/null 2>&1; then
