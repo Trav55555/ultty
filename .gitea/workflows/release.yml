@@ -142,6 +142,26 @@ jobs:
           cat SHA256SUMS
           sha256sum --check SHA256SUMS
 
+      - name: Sign SHA256SUMS (when MINISIGN_SECRET_KEY is configured)
+        run: |
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::notice::MINISIGN_SECRET_KEY not set; publishing unsigned SHA256SUMS"
+            exit 0
+          fi
+          command -v minisign >/dev/null 2>&1 || { echo "minisign is not installed in the runner image" >&2; exit 1; }
+          keyfile="$(mktemp)"
+          trap 'rm -f "$keyfile"' EXIT
+          chmod 600 "$keyfile"
+          printf '%s\n' "$MINISIGN_SECRET_KEY" >"$keyfile"
+          if [ -n "${MINISIGN_PASSWORD:-}" ]; then
+            printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -s "$keyfile" -m artifacts/SHA256SUMS -x artifacts/SHA256SUMS.minisig
+          else
+            minisign -S -s "$keyfile" -m artifacts/SHA256SUMS -x artifacts/SHA256SUMS.minisig </dev/null
+          fi
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+
       - name: Extract release notes
         run: |
           version="${GITHUB_REF_NAME#v}"
