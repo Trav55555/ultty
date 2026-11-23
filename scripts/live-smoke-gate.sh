@@ -43,7 +43,18 @@ run_health_check() {
     exit 1
   fi
 
-  if ! "$ULTTYCTL" screenshot "$health_dir/screenshot.png" >"$health_dir/screenshot.txt" 2>"$health_dir/screenshot.err"; then
+  local shot_ok=0
+  for _ in $(seq 1 120); do
+    if "$ULTTYCTL" screenshot "$health_dir/screenshot.png" >"$health_dir/screenshot.txt" 2>"$health_dir/screenshot.err"; then
+      shot_ok=1
+      break
+    fi
+    if ! grep -qi "GPU is still starting" "$health_dir/screenshot.txt" "$health_dir/screenshot.err" 2>/dev/null; then
+      break
+    fi
+    sleep 0.25
+  done
+  if [[ "$shot_ok" -ne 1 ]]; then
     echo "live smoke gate failed: $smoke $phase screenshot failed; see $health_dir" >&2
     exit 1
   fi
