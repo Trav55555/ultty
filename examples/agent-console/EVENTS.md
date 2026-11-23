@@ -34,6 +34,27 @@ A failed turn, missing terminal turn event, or malformed input makes the
 adapter exit with an error. The tests replay a recorded stream with its
 thread identifier replaced.
 
+## Live Claude Code
+
+`agent-console live claude` reads Claude Code **2.1.330** stream JSON from
+stdin. The partial-message flag enables text updates during generation.
+
+```bash
+set -o pipefail
+version=$(claude --version)
+prompt='Read README.md and describe this project in one sentence.'
+claude -p "$prompt" --output-format stream-json --verbose \
+    --include-partial-messages --tools Read --allowedTools Read </dev/null |
+    agent-console live claude --cli-version "$version" --prompt "$prompt"
+```
+
+The adapter renders main-session text, completed tool calls and their
+results, and turn status and token counts. It also accepts complete
+assistant records when partial messages are disabled. Claude Code manages
+tool permissions. A failed or missing result makes the adapter exit with
+an error. Tests use a recorded provider rejection and a synthetic stream
+covering successful partial text and tool output.
+
 ## `prompt`
 
 The user's prompt; it opens the next turn.

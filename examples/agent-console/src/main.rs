@@ -1,6 +1,6 @@
 //! `agent-console replay <file>|- [--fast | --speed <f>] [--auto-approve <choice>]`
 //! `agent-console events <file>|- [--fast | --speed <f>]`
-//! `agent-console live codex --cli-version <version> [--prompt <text>]`
+//! `agent-console live <codex|claude> --cli-version <version> [--prompt <text>]`
 //!
 //! `replay` renders an agent event stream as the console: natively with
 //! inline cards inside Ultty, as ANSI text anywhere else (and with
@@ -31,7 +31,7 @@ use agent_console::reader::EventReader;
 use agent_console::replay::{Pace, Replay};
 use agent_console::screen::Screen;
 
-const USAGE: &str = "usage: agent-console replay <file>|- [--fast | --speed <f>] [--auto-approve <choice>]\n       agent-console events <file>|- [--fast | --speed <f>]\n       agent-console live codex --cli-version <version> [--prompt <text>]";
+const USAGE: &str = "usage: agent-console replay <file>|- [--fast | --speed <f>] [--auto-approve <choice>]\n       agent-console events <file>|- [--fast | --speed <f>]\n       agent-console live <codex|claude> --cli-version <version> [--prompt <text>]";
 
 /// How long an approval answered by `--auto-approve` stays on screen at
 /// recorded pace (divided by the speed; none with `--fast`).
