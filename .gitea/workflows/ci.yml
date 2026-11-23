@@ -97,6 +97,8 @@ jobs:
         run: scripts/ci-runner-step-test.sh
       - name: TypeScript protocol v1 conformance
         run: scripts/ci-ts-conformance.sh
+        env:
+          CI_REQUIRE_TS_CONFORMANCE: "1"
       - name: Workspace tests
         run: |
           if command -v cargo-nextest >/dev/null 2>&1; then
