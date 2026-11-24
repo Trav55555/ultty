@@ -64,20 +64,24 @@ Ranked by how much a typical user would notice:
    and can switch between a light and a dark theme with the system
    appearance, which Ultty does not read. Themes whose licence is unknown or
    restrictive upstream are left out.
-9. **Multi-window (fixed), and no quick terminal.** *Fixed for multi-window.*
-   "New window" opens an in-process window sharing the GPU device, font
-   database, and ref-counted per-size glyph atlases with per-window zoom;
-   `ulttyctl` supports window-scoped automation (`windows`, `new-window`,
-   `close-window`, `move-tab`, `--window`, and `window_opened`/`window_closed`
-   events); tabs can move between windows or detach via drag-out, context menu,
-   and command palette while keeping live PTYs; `SessionData` v2 saves and
-   restores multiple windows and their logical sizes with v1 backward
-   compatibility; and opt-in `behavior.single_instance = true` hands off new
-   `ultty` launches (working directory and `-e` command) to the running
-   instance with `ultty --new-process` as an override
+9. **Multi-window and quick terminal.** *Fixed for multi-window; Slice 1
+   shipped for quick terminal.* "New window" opens an in-process window sharing
+   the GPU device, font database, and ref-counted per-size glyph atlases with
+   per-window zoom; `ulttyctl` supports window-scoped automation (`windows`,
+   `new-window`, `close-window`, `move-tab`, `toggle-quick`, `show-quick`,
+   `hide-quick`, `--window`, and `window_opened`/`window_closed` events); tabs
+   can move between windows or detach via drag-out, context menu, and command
+   palette while keeping live PTYs; `SessionData` v2 saves and restores
+   multiple windows and their logical sizes with v1 backward compatibility;
+   opt-in `behavior.single_instance = true` hands off new `ultty` launches to
+   the running instance with `ultty --new-process` as an override
    ([ADR 0027](adr/0027-multiple-windows-per-process.md) slices 1–6; opt-in
-   `behavior.window_per_process = true` keeps process isolation). Still
-   missing: a quick terminal ([ADR 0028](adr/0028-quick-terminal.md)).
+   `behavior.window_per_process = true` keeps process isolation); and
+   `ultty --quick` / `[quick_terminal]` provides a toggleable quick terminal on
+   X11 and Wayland ([ADR 0028](adr/0028-quick-terminal.md) slice 1,
+   [docs/quick-terminal.md](quick-terminal.md)). Still missing for quick
+   terminal: Wayland `wlr-layer-shell` anchoring (slice 2), built-in global
+   hotkeys on X11/Wayland portal/macOS (slices 3–5).
 10. **Linux x86_64 only in practice.** Release builds and CI cover Linux
     x86_64 only. macOS code exists but is not built or tested by CI. There
     is no Windows or BSD support. Alacritty runs on Linux, BSD, macOS and
