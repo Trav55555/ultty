@@ -284,6 +284,20 @@ normally. Pass `ultty --new-process` to force a new process even when
 `single_instance = true` (`--profile` and `--workspace` always start a new
 process).
 
+## Quick terminal
+
+```toml
+[quick_terminal]
+position = "top"     # top, bottom, left, right, center
+size = "40%"         # percentage (10%-100%) or pixels (e.g. "420px")
+autohide = true      # hide when the quick terminal loses focus
+```
+
+Toggle the quick terminal from a desktop or compositor shortcut bound to
+`ultty --quick` (or via `ulttyctl toggle-quick` / `show-quick` / `hide-quick`).
+See [docs/quick-terminal.md](quick-terminal.md) for sway, Hyprland, niri, KDE,
+GNOME, and X11 setup snippets.
+
 ## Restoring the last session
 
 ```toml

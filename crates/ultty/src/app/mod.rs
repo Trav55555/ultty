@@ -35,7 +35,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
-use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
+use winit::window::{CursorIcon, ResizeDirection, Window, WindowId, WindowLevel};
 
 /// The window's title until the focused pane sets one.
 const WINDOW_TITLE: &str = "Ultty";
@@ -262,12 +262,65 @@ struct WindowCtx<'a> {
     win: &'a mut WindowState,
 }
 
+/// Role of an open window inside the process (ADR 0028).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowRole {
+    Normal,
+    Quick,
+}
+
+/// Optional placement and startup attributes for [`WindowState::create`].
+#[derive(Default)]
+struct WindowCreateOptions {
+    role: Option<WindowRole>,
+    logical_size: Option<LogicalSize<f64>>,
+    physical_size: Option<PhysicalSize<u32>>,
+    position: Option<PhysicalPosition<i32>>,
+    activation_token: Option<String>,
+}
+
+impl WindowCreateOptions {
+    fn normal(logical_size: Option<LogicalSize<f64>>) -> Self {
+        Self {
+            role: Some(WindowRole::Normal),
+            logical_size,
+            ..Self::default()
+        }
+    }
+
+    fn quick(
+        position: PhysicalPosition<i32>,
+        physical_size: PhysicalSize<u32>,
+        activation_token: Option<String>,
+    ) -> Self {
+        Self {
+            role: Some(WindowRole::Quick),
+            physical_size: Some(physical_size),
+            position: Some(position),
+            activation_token,
+            ..Self::default()
+        }
+    }
+
+    fn is_quick(&self) -> bool {
+        self.role == Some(WindowRole::Quick)
+    }
+}
+
 /// Terminal application owning one shared runtime and any number of windows.
 pub struct App {
     shared: ProcessState,
     windows: BTreeMap<WindowKey, WindowState>,
     window_ids: HashMap<WindowId, WindowKey>,
     focused_window: Option<WindowKey>,
+    /// The single quick terminal window in this process, if created (ADR 0028).
+    quick_window: Option<WindowKey>,
+    /// Whether `quick_window` is currently shown/mapped.
+    quick_visible: bool,
+    /// Whether `quick_window` has received `Focused(true)` since it was last shown.
+    quick_had_focus: bool,
+    /// True when the active winit event loop is running on Wayland.
+    is_wayland: bool,
 }
 
 impl WindowState {
@@ -278,28 +331,51 @@ impl WindowState {
         config: &Config,
         font_system: &ultty::renderer::SharedFontSystem,
         shared_gpu: Option<&gpu::SharedGpu>,
-        initial_size: Option<LogicalSize<f64>>,
+        options: WindowCreateOptions,
     ) -> Result<Self> {
         let create_start = Instant::now();
-        let inner_size = initial_size.unwrap_or(LogicalSize::new(
-            f64::from(DEFAULT_WIDTH),
-            f64::from(DEFAULT_HEIGHT),
-        ));
-        let attributes = Window::default_attributes()
+        let is_quick = options.is_quick();
+        let mut attributes = Window::default_attributes()
             .with_title(WINDOW_TITLE)
-            .with_inner_size(inner_size)
             .with_min_inner_size(LogicalSize::new(200.0, 100.0))
             .with_transparent(true)
             .with_decorations(false)
             .with_visible(!config.behavior.accessibility);
+        if let Some(size) = options.physical_size {
+            attributes = attributes.with_inner_size(size);
+        } else {
+            let inner_size = options.logical_size.unwrap_or(LogicalSize::new(
+                f64::from(DEFAULT_WIDTH),
+                f64::from(DEFAULT_HEIGHT),
+            ));
+            attributes = attributes.with_inner_size(inner_size);
+        }
+        if is_quick {
+            attributes = attributes.with_window_level(WindowLevel::AlwaysOnTop);
+        }
+        if let Some(pos) = options.position {
+            attributes = attributes.with_position(pos);
+        }
         #[cfg(all(unix, not(target_os = "macos")))]
-        let attributes = winit::platform::wayland::WindowAttributesExtWayland::with_name(
-            attributes, "ultty", "ultty",
-        );
+        let attributes = {
+            let app_id = if is_quick { "ultty-quick" } else { "ultty" };
+            let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(
+                attributes, app_id, app_id,
+            );
+            if let Some(token) = options.activation_token.as_deref() {
+                winit::platform::startup_notify::WindowAttributesExtStartupNotify::with_activation_token(
+                    attrs,
+                    winit::window::ActivationToken::from_raw(token.to_owned()),
+                )
+            } else {
+                attrs
+            }
+        };
         let window = Arc::new(event_loop.create_window(attributes)?);
         tracing::debug!(
             target: "ultty::startup",
             window = key.raw(),
+            quick = is_quick,
             "window created"
         );
         let size = window.inner_size();
@@ -398,6 +474,15 @@ impl WindowState {
             );
             adapter
         });
+        if is_quick && !paced_by_frame_callbacks {
+            if let Some(pos) = options.position {
+                window.set_outer_position(pos);
+            }
+            if let Some(size) = options.physical_size {
+                let _ = window.request_inner_size(size);
+            }
+            window.set_window_level(WindowLevel::AlwaysOnTop);
+        }
         window.set_ime_allowed(true);
 
         Ok(Self {
@@ -569,10 +654,21 @@ impl App {
         event_proxy: EventLoopProxy<AppEvent>,
         startup_command: Option<&StartupCommand>,
         config: Config,
+        start_quick: bool,
     ) -> Result<Self> {
         tracing::info!("Loaded configuration");
 
-        let restored_session = Self::load_startup_session(&config, startup_command)?;
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let is_wayland =
+            winit::platform::wayland::ActiveEventLoopExtWayland::is_wayland(event_loop);
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        let is_wayland = false;
+
+        let restored_session = if start_quick {
+            None
+        } else {
+            Self::load_startup_session(&config, startup_command)?
+        };
         let restored_sizes: Vec<Option<LogicalSize<f64>>> = restored_session
             .as_ref()
             .map(|session| {
@@ -591,6 +687,17 @@ impl App {
 
         let primary_key = WindowKey::PRIMARY;
         let font_system = ultty::renderer::SharedFontSystem::new();
+        let first_options = if start_quick {
+            let (pos, size) = quick_geometry_for_loop(event_loop, None, &config.quick_terminal);
+            let token = ultty::control::single_instance::current_activation_token();
+            #[cfg(all(unix, not(target_os = "macos")))]
+            if token.is_some() {
+                winit::platform::startup_notify::reset_activation_token_env();
+            }
+            WindowCreateOptions::quick(pos, size, token)
+        } else {
+            WindowCreateOptions::normal(restored_sizes.first().copied().flatten())
+        };
         let first_window = WindowState::create(
             primary_key,
             event_loop,
@@ -598,7 +705,7 @@ impl App {
             &config,
             &font_system,
             None,
-            restored_sizes.first().copied().flatten(),
+            first_options,
         )?;
         let (cols, rows) = first_window.renderer.terminal_dimensions();
         tracing::info!("Terminal size: {}x{}", cols, rows);
@@ -670,10 +777,14 @@ impl App {
             font_system,
             shared_gpu: None,
             runtime,
-            session_file: session_file(
-                startup_command,
-                ultty::session::SessionData::last_session_path(),
-            ),
+            session_file: if start_quick {
+                None
+            } else {
+                session_file(
+                    startup_command,
+                    ultty::session::SessionData::last_session_path(),
+                )
+            },
             config,
             config_watcher,
             clipboard,
@@ -707,6 +818,10 @@ impl App {
             windows,
             window_ids,
             focused_window: Some(primary_key),
+            quick_window: start_quick.then_some(primary_key),
+            quick_visible: start_quick,
+            quick_had_focus: false,
+            is_wayland,
         };
 
         app.with_window(primary_key, |ctx| {
@@ -759,7 +874,7 @@ impl App {
         self.shared
             .runtime
             .manager
-            .to_session_data_with_sizes(&sizes)
+            .to_session_data_with_sizes_excluding(&sizes, self.quick_window)
     }
 
     /// Save all open windows to `session_file`, unless this process keeps none.
@@ -788,7 +903,7 @@ impl App {
                 &self.shared.config,
                 &self.shared.font_system,
                 self.shared.shared_gpu.as_ref(),
-                initial_size,
+                WindowCreateOptions::normal(initial_size),
             ) {
                 Ok(win) => {
                     let winit_id = win.window.id();
@@ -814,11 +929,224 @@ impl App {
         }
     }
 
+    /// Whether `key` is currently mapped/visible on screen.
+    pub(super) fn is_window_visible(&self, key: WindowKey) -> bool {
+        if !self.windows.contains_key(&key) {
+            return false;
+        }
+        self.quick_window != Some(key) || self.quick_visible
+    }
+
+    fn normal_window_count(&self) -> usize {
+        self.windows
+            .keys()
+            .filter(|&&key| self.quick_window != Some(key))
+            .count()
+    }
+
     /// The window targeted by window-unqualified control commands.
+    /// Hidden quick terminals are excluded from the default target (ADR 0028).
     pub(super) fn target_window_key(&self) -> Option<WindowKey> {
         self.focused_window
-            .filter(|key| self.windows.contains_key(key))
-            .or_else(|| self.windows.keys().next().copied())
+            .filter(|&key| self.is_window_visible(key))
+            .or_else(|| {
+                self.windows
+                    .keys()
+                    .copied()
+                    .find(|&key| self.is_window_visible(key))
+            })
+    }
+
+    /// Toggle the quick terminal: hide if currently visible, otherwise show
+    /// (creating it if it does not yet exist).
+    pub(super) fn toggle_quick_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        activation_token: Option<&str>,
+    ) -> Result<(Option<WindowKey>, bool)> {
+        if self.quick_window.is_some() && self.quick_visible {
+            self.hide_quick_window();
+            Ok((self.quick_window, false))
+        } else {
+            let key = self.show_quick_window(event_loop, activation_token)?;
+            Ok((Some(key), true))
+        }
+    }
+
+    /// Show the quick terminal, creating it on first use or recreating its
+    /// Wayland toplevel after a hide (ADR 0028).
+    pub(super) fn show_quick_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        activation_token: Option<&str>,
+    ) -> Result<WindowKey> {
+        let start = Instant::now();
+        let reference_monitor = self
+            .target_window_key()
+            .and_then(|key| self.windows.get(&key))
+            .and_then(|win| win.window.current_monitor());
+        let (pos, size) = quick_geometry_for_loop(
+            event_loop,
+            reference_monitor.as_ref(),
+            &self.shared.config.quick_terminal,
+        );
+
+        if let Some(quick_key) = self.quick_window {
+            if let Some(win) = self.windows.get_mut(&quick_key) {
+                win.window.set_visible(true);
+                if !self.is_wayland {
+                    win.window.set_outer_position(pos);
+                    let _ = win.window.request_inner_size(size);
+                    win.window.set_window_level(WindowLevel::AlwaysOnTop);
+                    win.window.focus_window();
+                }
+                win.needs_redraw = true;
+                self.quick_visible = true;
+                self.quick_had_focus = false;
+                self.focused_window = Some(quick_key);
+                self.shared.runtime.manager.set_focused_window(quick_key);
+                self.shared.runtime.set_viewer_present(true);
+                self.with_window(quick_key, |ctx| {
+                    ctx.update_tab_bar();
+                    ctx.relayout_terminals();
+                    ctx.win.needs_redraw = true;
+                });
+                tracing::info!(
+                    target: "ultty::startup",
+                    window = quick_key.raw(),
+                    recreated = false,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "shown quick terminal"
+                );
+                return Ok(quick_key);
+            }
+
+            let win = WindowState::create(
+                quick_key,
+                event_loop,
+                self.shared.proxy.clone(),
+                &self.shared.config,
+                &self.shared.font_system,
+                self.shared.shared_gpu.as_ref(),
+                WindowCreateOptions::quick(pos, size, activation_token.map(str::to_owned)),
+            )?;
+            let winit_id = win.window.id();
+            self.windows.insert(quick_key, win);
+            self.window_ids.insert(winit_id, quick_key);
+            self.quick_visible = true;
+            self.quick_had_focus = false;
+            self.focused_window = Some(quick_key);
+            self.shared.runtime.manager.set_focused_window(quick_key);
+            self.shared.runtime.set_viewer_present(true);
+            self.with_window(quick_key, |ctx| {
+                ctx.update_tab_bar();
+                ctx.relayout_terminals();
+                ctx.win.needs_redraw = true;
+            });
+            tracing::info!(
+                target: "ultty::startup",
+                window = quick_key.raw(),
+                recreated = true,
+                elapsed_ms = start.elapsed().as_millis(),
+                "shown quick terminal"
+            );
+            return Ok(quick_key);
+        }
+
+        let (cols, rows) = self
+            .target_window_key()
+            .and_then(|key| self.windows.get(&key))
+            .map(|win| win.renderer.terminal_dimensions())
+            .unwrap_or((80, 24));
+        let (key, _tab_id) =
+            self.shared
+                .runtime
+                .manager
+                .create_window(cols, rows, &mut |tab_id| {
+                    tab_shell_env(
+                        &mut self.shared.runtime.protocol,
+                        &self.shared.config.terminal,
+                        tab_id,
+                    )
+                })?;
+        let win = match WindowState::create(
+            key,
+            event_loop,
+            self.shared.proxy.clone(),
+            &self.shared.config,
+            &self.shared.font_system,
+            self.shared.shared_gpu.as_ref(),
+            WindowCreateOptions::quick(pos, size, activation_token.map(str::to_owned)),
+        ) {
+            Ok(win) => win,
+            Err(error) => {
+                self.shared.runtime.manager.close_window(key);
+                self.shared.sync_protocol_tabs();
+                return Err(error);
+            }
+        };
+        let winit_id = win.window.id();
+        self.windows.insert(key, win);
+        self.window_ids.insert(winit_id, key);
+        self.quick_window = Some(key);
+        self.quick_visible = true;
+        self.quick_had_focus = false;
+        self.focused_window = Some(key);
+        self.shared.runtime.manager.set_focused_window(key);
+        self.shared.runtime.set_viewer_present(true);
+        self.with_window(key, |ctx| {
+            ctx.update_tab_bar();
+            ctx.relayout_terminals();
+            ctx.win.needs_redraw = true;
+        });
+        if let Some(server) = self.shared.control_server.as_mut() {
+            server.publish(&ultty_protocol::control::ControlEvent::WindowOpened {
+                window: key.raw() as u64,
+            });
+        }
+        tracing::info!(
+            target: "ultty::startup",
+            window = key.raw(),
+            recreated = false,
+            elapsed_ms = start.elapsed().as_millis(),
+            "created quick terminal"
+        );
+        Ok(key)
+    }
+
+    /// Hide the quick terminal without closing its tabs or child processes.
+    /// On Wayland the winit window and surface are dropped and recreated on
+    /// show; on X11 and macOS the window is hidden via `set_visible(false)`.
+    pub(super) fn hide_quick_window(&mut self) {
+        let Some(quick_key) = self.quick_window else {
+            return;
+        };
+        self.quick_visible = false;
+        self.quick_had_focus = false;
+        if self.is_wayland {
+            if let Some(win) = self.windows.remove(&quick_key) {
+                self.window_ids.remove(&win.window.id());
+            }
+            self.shared
+                .pending_resizes
+                .retain(|(window_key, _)| *window_key != quick_key);
+        } else if let Some(win) = self.windows.get_mut(&quick_key) {
+            win.window.set_visible(false);
+            win.needs_redraw = false;
+        }
+        if self.focused_window == Some(quick_key) {
+            self.focused_window = self
+                .windows
+                .keys()
+                .copied()
+                .find(|&key| self.is_window_visible(key));
+            if let Some(next) = self.focused_window {
+                self.shared.runtime.manager.set_focused_window(next);
+            }
+        }
+        self.shared
+            .runtime
+            .set_viewer_present(self.target_window_key().is_some());
     }
 
     /// Open a new window in the running process, sharing the GPU device when
@@ -885,7 +1213,7 @@ impl App {
             &self.shared.config,
             &self.shared.font_system,
             self.shared.shared_gpu.as_ref(),
-            None,
+            WindowCreateOptions::normal(None),
         ) {
             Ok(win) => win,
             Err(error) => {
@@ -921,15 +1249,27 @@ impl App {
     }
 
     /// Close one window. Returns `true` when the application event loop should
-    /// exit (last window closed on Linux; macOS stays alive with zero windows).
+    /// exit (last window closed on Linux, unless a quick terminal still exists;
+    /// macOS stays alive with zero windows).
     pub(super) fn close_window(&mut self, key: WindowKey) -> bool {
-        let is_last = self.windows.len() <= 1;
-        if is_last {
+        let closing_quick = self.quick_window == Some(key);
+        if !closing_quick && self.normal_window_count() <= 1 {
             self.save_session();
+        }
+        if closing_quick {
+            self.quick_window = None;
+            self.quick_visible = false;
+            self.quick_had_focus = false;
         }
         let removed = self.windows.remove(&key);
         if let Some(win) = removed {
             self.window_ids.remove(&win.window.id());
+            if let Some(server) = self.shared.control_server.as_mut() {
+                server.publish(&ultty_protocol::control::ControlEvent::WindowClosed {
+                    window: key.raw() as u64,
+                });
+            }
+        } else if closing_quick {
             if let Some(server) = self.shared.control_server.as_mut() {
                 server.publish(&ultty_protocol::control::ControlEvent::WindowClosed {
                     window: key.raw() as u64,
@@ -942,18 +1282,22 @@ impl App {
         self.shared.runtime.manager.close_window(key);
 
         if self.focused_window == Some(key) {
-            self.focused_window = self.windows.keys().next().copied();
+            self.focused_window = self
+                .windows
+                .keys()
+                .copied()
+                .find(|&k| self.is_window_visible(k));
             if let Some(next) = self.focused_window {
                 self.shared.runtime.manager.set_focused_window(next);
             }
         }
-        if self.windows.is_empty() {
+        if self.target_window_key().is_none() {
             self.shared.runtime.set_viewer_present(false);
         }
         self.shared.sync_protocol_tabs();
         self.shared.refresh_runtime_wakeup_fds();
 
-        self.windows.is_empty() && cfg!(not(target_os = "macos"))
+        self.windows.is_empty() && self.quick_window.is_none() && cfg!(not(target_os = "macos"))
     }
 
     /// Move `tab_id` to another existing window or detach it into a new window,
@@ -1033,7 +1377,7 @@ impl App {
                     &self.shared.config,
                     &self.shared.font_system,
                     self.shared.shared_gpu.as_ref(),
-                    None,
+                    WindowCreateOptions::normal(None),
                 ) {
                     Ok(win) => win,
                     Err(error) => {
@@ -1120,10 +1464,27 @@ impl App {
         key: WindowKey,
         event: WindowEvent,
     ) -> bool {
-        if matches!(event, WindowEvent::Focused(true)) {
-            self.focused_window = Some(key);
-            self.shared.runtime.manager.set_focused_window(key);
-            self.shared.sync_protocol_tabs();
+        match event {
+            WindowEvent::Focused(true) => {
+                if self.quick_window == Some(key) && self.quick_visible {
+                    self.quick_had_focus = true;
+                }
+                if self.is_window_visible(key) {
+                    self.focused_window = Some(key);
+                    self.shared.runtime.manager.set_focused_window(key);
+                    self.shared.sync_protocol_tabs();
+                }
+            }
+            WindowEvent::Focused(false)
+                if self.quick_window == Some(key)
+                    && self.quick_visible
+                    && self.quick_had_focus
+                    && self.shared.config.quick_terminal.autohide =>
+            {
+                self.hide_quick_window();
+                return false;
+            }
+            _ => {}
         }
         let close = self
             .with_window(key, |ctx| ctx.handle_window_event(event))
@@ -1436,7 +1797,12 @@ impl App {
 
     /// Run the application. The first tab runs `startup_command`, or the
     /// configured shell, profile or restored session when there is none.
-    pub fn run(startup_command: Option<StartupCommand>, config: Config) -> Result<()> {
+    /// When `start_quick` is `true`, only the quick terminal window is opened.
+    pub fn run(
+        startup_command: Option<StartupCommand>,
+        config: Config,
+        start_quick: bool,
+    ) -> Result<()> {
         let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
         let signal_proxy = event_loop.create_proxy();
         if let Err(e) = ultty::platform::shutdown::on_shutdown_signal(move || {
@@ -1451,6 +1817,7 @@ impl App {
             proxy: event_loop.create_proxy(),
             startup_command,
             config: Some(config),
+            start_quick,
             app: None,
             init_error: None,
         };
@@ -2346,6 +2713,35 @@ fn save_session(manager: &TerminalManager, file: Option<&std::path::Path>) {
     }
 }
 
+/// Compute the quick terminal's physical `(position, size)` for the best
+/// available monitor (falling back to 1280x800 when no monitor is reported).
+fn quick_geometry_for_loop(
+    event_loop: &ActiveEventLoop,
+    preferred: Option<&winit::monitor::MonitorHandle>,
+    config: &ultty::config::QuickTerminalConfig,
+) -> (PhysicalPosition<i32>, PhysicalSize<u32>) {
+    let fallback;
+    let monitor = match preferred {
+        Some(m) => Some(m),
+        None => {
+            fallback = event_loop
+                .primary_monitor()
+                .or_else(|| event_loop.available_monitors().next());
+            fallback.as_ref()
+        }
+    };
+    let (mon_pos, mon_size, scale) = match monitor {
+        Some(m) => {
+            let p = m.position();
+            let s = m.size();
+            ((p.x, p.y), (s.width, s.height), m.scale_factor())
+        }
+        None => ((0, 0), (1280, 800), 1.0),
+    };
+    let ((x, y), (w, h)) = config.compute_geometry(mon_pos, mon_size, scale);
+    (PhysicalPosition::new(x, y), PhysicalSize::new(w, h))
+}
+
 /// Drives [`App`] from winit. The window, and so the app, is created on the
 /// first `resumed`, as winit 0.30 requires.
 struct AppHandler {
@@ -2355,6 +2751,8 @@ struct AppHandler {
     /// Configuration loaded in `main` before the event loop and any threads
     /// start; taken once on the first `resumed`.
     config: Option<Config>,
+    /// Start with only the quick terminal window open (`ultty --quick`).
+    start_quick: bool,
     app: Option<App>,
     /// A startup failure, returned from [`App::run`] after the loop exits.
     init_error: Option<anyhow::Error>,
@@ -2363,7 +2761,7 @@ struct AppHandler {
 impl ApplicationHandler<AppEvent> for AppHandler {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(app) = self.app.as_mut() {
-            if cfg!(target_os = "macos") && app.windows.is_empty() {
+            if cfg!(target_os = "macos") && app.windows.is_empty() && app.quick_window.is_none() {
                 if let Err(error) = app.open_new_window(event_loop) {
                     tracing::warn!("Failed to reopen window: {error:#}");
                 }
@@ -2376,6 +2774,7 @@ impl ApplicationHandler<AppEvent> for AppHandler {
             self.proxy.clone(),
             self.startup_command.as_ref(),
             config,
+            self.start_quick,
         ) {
             Ok(mut app) => {
                 let primary = WindowKey::PRIMARY;

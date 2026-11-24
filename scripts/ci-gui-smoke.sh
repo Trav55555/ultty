@@ -256,8 +256,11 @@ if [ "$SHARD" = all ] || [ "$SHARD" = core ]; then
   if command -v xdotool >/dev/null 2>&1; then
     queue_check multi-window env ULTTY="$ULTTY_BIN" ULTTYCTL="$ULTTYCTL_BIN" \
       scripts/e2e/multi-window.sh "$OUT/multi-window"
+    queue_check quick-terminal env ULTTY="$ULTTY_BIN" ULTTYCTL="$ULTTYCTL_BIN" \
+      scripts/e2e/quick-terminal.sh "$OUT/quick-terminal"
   else
     record_skip multi-window "needs xdotool"
+    record_skip quick-terminal "needs xdotool"
   fi
 fi
 

@@ -20,7 +20,7 @@ const DEFAULT_LOG_FILTER: &str = "ultty=info,wgpu=warn";
 static GLOBAL: ultty::heap_stats::Counting = ultty::heap_stats::Counting;
 
 fn main() -> Result<ExitCode> {
-    let (command, new_process) = match invocation(std::env::args().skip(1)) {
+    let (command, new_process, quick) = match invocation(std::env::args().skip(1)) {
         Ok(Invocation::Attach { args }) => {
             initialize_logging();
             ultty::viewer::cli::run(args)?;
@@ -29,7 +29,8 @@ fn main() -> Result<ExitCode> {
         Ok(Invocation::Run {
             command,
             new_process,
-        }) => (command, new_process),
+            quick,
+        }) => (command, new_process, quick),
         Ok(Invocation::Version) => {
             println!("{}", version_output());
             return Ok(ExitCode::SUCCESS);
@@ -62,7 +63,25 @@ fn main() -> Result<ExitCode> {
     initialize_logging();
 
     let config = ultty::config::Config::load();
-    if config.behavior.single_instance && !new_process {
+    if quick {
+        if !new_process && command.is_none() {
+            let token = ultty::control::single_instance::current_activation_token();
+            if let ultty::control::single_instance::QuickHandoffOutcome::Toggled {
+                pid,
+                window,
+                visible,
+            } = ultty::control::single_instance::try_toggle_quick_in_existing_instance(token)
+            {
+                tracing::info!(
+                    pid,
+                    ?window,
+                    visible,
+                    "Toggled quick terminal in running Ultty instance"
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+        }
+    } else if config.behavior.single_instance && !new_process {
         if let Some(launch) = single_instance_launch(&command) {
             if let ultty::control::single_instance::HandoffOutcome::Opened { pid, window } =
                 ultty::control::single_instance::try_open_in_existing_instance(&launch)
@@ -79,7 +98,7 @@ fn main() -> Result<ExitCode> {
         ultty::platform::vulkan_icd::narrow_to_detected_gpu();
     }
 
-    app::App::run(command, config)?;
+    app::App::run(command, config, quick)?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -128,6 +147,7 @@ enum Invocation {
     Run {
         command: Option<StartupCommand>,
         new_process: bool,
+        quick: bool,
     },
     Version,
     /// Print the theme names (with colour swatches on a terminal).
@@ -146,6 +166,7 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
     let mut version = false;
     let mut list_themes = false;
     let mut new_process = false;
+    let mut quick = false;
     let mut unknown = None;
     let mut command = None;
     let mut selection_error = None;
@@ -160,6 +181,7 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
             "--version" | "-V" => version = true,
             "--list-themes" => list_themes = true,
             "--new-process" => new_process = true,
+            "--quick" => quick = true,
             "--profile" | "--workspace" => {
                 if command.is_some() {
                     selection_error =
@@ -215,9 +237,19 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
     if let Some(error) = selection_error {
         return Err(error);
     }
+    let command = command.transpose()?;
+    if quick
+        && matches!(
+            command,
+            Some(StartupCommand::Profile(_) | StartupCommand::Workspace(_))
+        )
+    {
+        return Err("'--quick' cannot be combined with '--profile' or '--workspace'".to_owned());
+    }
     Ok(Invocation::Run {
-        command: command.transpose()?,
+        command,
         new_process,
+        quick,
     })
 }
 
@@ -237,6 +269,7 @@ Options:
   -V, --version         Print the version and exit
   --list-themes         Print the available colour themes and exit
   --new-process         Always start a new process even with behavior.single_instance.
+  --quick               Toggle the running instance's quick terminal, or start one.
   --profile NAME        Launch configured tabs and panes instead of restoring.
   --workspace NAME      Open a saved layout in fresh shells; does not resume jobs.
   --attach NAME         Attach to a live session host; close the window to detach.
@@ -273,6 +306,7 @@ mod tests {
                 args: args(command_args),
             }),
             new_process: false,
+            quick: false,
         })
     }
 
@@ -283,6 +317,7 @@ mod tests {
             Ok(Invocation::Run {
                 command: None,
                 new_process: false,
+                quick: false,
             })
         );
     }
@@ -294,6 +329,7 @@ mod tests {
             Ok(Invocation::Run {
                 command: None,
                 new_process: true,
+                quick: false,
             })
         );
         assert_eq!(
@@ -304,12 +340,35 @@ mod tests {
                     args: args(&["-c", "true"]),
                 }),
                 new_process: true,
+                quick: false,
             })
         );
         assert_eq!(
             invocation(args(&["-e", "echo", "--new-process"])),
             run_command("echo", &["--new-process"])
         );
+    }
+
+    #[test]
+    fn test_quick_flag_parses_and_rejects_profile_or_workspace() {
+        assert_eq!(
+            invocation(args(&["--quick"])),
+            Ok(Invocation::Run {
+                command: None,
+                new_process: false,
+                quick: true,
+            })
+        );
+        assert_eq!(
+            invocation(args(&["--quick", "--new-process"])),
+            Ok(Invocation::Run {
+                command: None,
+                new_process: true,
+                quick: true,
+            })
+        );
+        assert!(invocation(args(&["--quick", "--profile", "dev"])).is_err());
+        assert!(invocation(args(&["--quick", "--workspace", "work"])).is_err());
     }
 
     #[test]
@@ -342,6 +401,7 @@ mod tests {
             Ok(Invocation::Run {
                 command: Some(StartupCommand::Profile("remote".to_owned())),
                 new_process: false,
+                quick: false,
             })
         );
         assert!(invocation(args(&["--profile"])).is_err());
@@ -464,6 +524,7 @@ mod tests {
             "-V, --version",
             "--list-themes",
             "--new-process",
+            "--quick",
         ] {
             assert!(usage.contains(flag), "{usage}");
         }
