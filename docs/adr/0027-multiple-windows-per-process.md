@@ -2,9 +2,13 @@
 
 ## Status
 
-**Proposed** 2026-11-17. Nothing here is scheduled. Code references are to
-`main` at 252c082. The open questions were settled on 2026-11-17; see
-"Decisions (2026-11-17)".
+**In progress** — Slice 1 landed 2026-11-23 (`App` split into process state and
+`WindowState`, shared GPU device/adapter/instance/queue, per-window tab lists
+and relayout in `TerminalManager`, in-process "New window" with opt-in
+`behavior.window_per_process = true`, and Linux last-window exit / macOS
+zero-window keep-alive). Slices 2–6 are not yet implemented. Original proposal
+and decisions are from 2026-11-17 (code references in "What Ultty has today"
+were to `main` at 252c082).
 
 ## Context
 
@@ -349,7 +353,7 @@ Each slice also needs `cargo test --workspace`, clippy with
 
 | Slice | Contents | Effort | Check |
 |---|---|---|---|
-| 1 | Split `App` into process state and `WindowState`; shared GPU; route events by window id; per-window tab list, active tab and pane area in `TerminalManager`; "New window" opens in-process; last window closing exits on Linux (unless a quick terminal exists), process stays running on macOS | 6–9 days | New `TerminalManager` tests for per-window relayout; GUI smoke opens two windows and types into both; RSS and startup of the second window measured and recorded under `docs/perf/` |
+| 1 (**Done**, 2026-11-23) | Split `App` into process state and `WindowState`; shared GPU; route events by window id; per-window tab list, active tab and pane area in `TerminalManager`; "New window" opens in-process (opt-in `behavior.window_per_process = true`); last window closing exits on Linux (unless a quick terminal exists), process stays running on macOS | 6–9 days | New `TerminalManager` tests for per-window relayout; `scripts/e2e/multi-window.sh` opens two windows in one process and types into both; second-window RSS and startup measured in [2026-11-23-multi-window-slice-1.md](../perf/2026-11-23-multi-window-slice-1.md) (+7.6 MiB PSS, 29 ms `open_new_window`) |
 | 2 | Font grids shared by key; one `FontSystem`; per-window zoom | 3–5 days | Atlas count stays 1 for two same-scale windows (`cache_stats`); render bench unchanged |
 | 3 | Control: `--window`, `windows`, `new-window`, `close-window`, window field in events; target rules | 3–4 days | `ulttyctl` tests; `describe` lists the operations; existing control tests pass unchanged |
 | 4 | Session v2 with windows; restore opens N windows; v1 compatibility | 2–3 days | Round-trip tests for v1 and v2 files |
