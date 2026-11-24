@@ -72,8 +72,8 @@ Ultty is 6.5 MiB below Alacritty after the feed. On RSS it is 21.6 MiB above,
 and about 13 MiB of that is NVIDIA's Vulkan driver, which no Vulkan terminal
 on this driver avoids.
 
-Proposed: restate D3's criterion as private dirty memory after the feed at or
-under Alacritty's on the T4, measured from `smaps_rollup`. That is met. RSS
+D3's criterion is restated (2026-11-24) as private dirty memory after the feed
+at or under Alacritty's on the T4, measured from `smaps_rollup`. That is met. RSS
 should stay in the reports, labelled as including clean driver and binary
 pages. Shrinking the binary (dropping `naga` by shipping SPIR-V, or making the
 accessibility stack optional) would cut RSS by a few MiB, but would not change
