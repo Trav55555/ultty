@@ -261,6 +261,19 @@ pane whose program exited stays open with its last output and a
 tab, or the window's close button). This is useful for launch-profile tabs
 that run a command rather than a shell.
 
+## Multiple windows
+
+```toml
+[behavior]
+window_per_process = false
+```
+
+By default (`false`), "New window" opens another window inside the running
+Ultty process, sharing the GPU device and avoiding a second driver startup.
+Set `window_per_process = true` to spawn a separate OS process per window for
+process-level crash isolation (at the cost of a separate GPU context per
+window). A config reload applies this to the next "New window" action.
+
 ## Restoring the last session
 
 ```toml

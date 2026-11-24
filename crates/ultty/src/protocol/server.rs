@@ -83,8 +83,10 @@ pub struct ProtocolServer {
     /// Tab whose sessions receive keyboard input and may read the clipboard.
     ///
     /// `None` withholds input from every session. The app layer keeps this
-    /// in sync with the visible tab via `set_active_tab`.
+    /// in sync with the focused window's active tab via `set_active_tab`.
     active_tab: Option<TabId>,
+    /// Active tabs currently visible across open windows.
+    visible_tabs: Vec<TabId>,
     /// In-band bytes per pane that may be the start of a `ClientHello`.
     in_band_openers: HashMap<TerminalId, (TabId, Vec<u8>)>,
     /// Inline surface anchors of each terminal that has had any (ADR 0020).
@@ -152,6 +154,7 @@ impl ProtocolServer {
             viewport_width: 80.0,
             viewport_height: 24.0,
             active_tab: None,
+            visible_tabs: Vec::new(),
             in_band_openers: HashMap::new(),
             pairings: HashMap::new(),
             live_announcements: false,
@@ -256,12 +259,79 @@ impl ProtocolServer {
     /// instead of reusing buffers cached for the previous tab.
     pub fn set_active_tab(&mut self, tab_id: Option<TabId>) {
         if self.active_tab == tab_id {
+            if let Some(id) = tab_id {
+                if !self.visible_tabs.contains(&id) {
+                    self.visible_tabs.push(id);
+                }
+            } else {
+                self.visible_tabs.clear();
+            }
             return;
         }
         self.active_tab = tab_id;
+        self.visible_tabs = tab_id.into_iter().collect();
         for session in self.active_tab_sessions_mut() {
             session.mark_render_dirty();
         }
+    }
+
+    /// Set every tab currently displayed across open windows.
+    ///
+    /// Newly visible tabs have their sessions marked render-dirty so their
+    /// renderer rebuilds buffers cleanly.
+    pub fn set_visible_tabs(&mut self, tabs: Vec<TabId>) {
+        let newly_visible: Vec<TabId> = tabs
+            .iter()
+            .copied()
+            .filter(|id| !self.visible_tabs.contains(id))
+            .collect();
+        self.visible_tabs = tabs;
+        for tab in newly_visible {
+            for session in self.tab_sessions_mut(tab) {
+                session.mark_render_dirty();
+            }
+        }
+    }
+
+    /// Confirmed sessions belonging to `tab`.
+    pub fn tab_sessions(&self, tab: TabId) -> impl Iterator<Item = &NativeSession> {
+        self.sessions
+            .values()
+            .filter(move |session| session.tab_id() == tab && session.is_confirmed())
+    }
+
+    /// Confirmed sessions belonging to `tab` (mutable).
+    pub fn tab_sessions_mut(&mut self, tab: TabId) -> impl Iterator<Item = &mut NativeSession> {
+        self.sessions
+            .values_mut()
+            .filter(move |session| session.tab_id() == tab && session.is_confirmed())
+    }
+
+    /// Confirmed sessions currently shown in any open window's active tab.
+    pub fn visible_tab_sessions(&self) -> impl Iterator<Item = &NativeSession> {
+        self.sessions.values().filter(|session| {
+            session.is_confirmed() && self.visible_tabs.contains(&session.tab_id())
+        })
+    }
+
+    /// Confirmed sessions of `tab` bound to `pane`.
+    pub fn pane_sessions_in_tab(
+        &self,
+        tab: TabId,
+        pane: TerminalId,
+    ) -> impl Iterator<Item = &NativeSession> {
+        self.tab_sessions(tab)
+            .filter(move |session| session.pane() == Some(pane))
+    }
+
+    /// Confirmed sessions of `tab` bound to `pane` or still unbound.
+    pub fn pane_or_unbound_sessions_in_tab(
+        &self,
+        tab: TabId,
+        pane: TerminalId,
+    ) -> impl Iterator<Item = &NativeSession> {
+        self.tab_sessions(tab)
+            .filter(move |session| session.pane().is_none_or(|bound| bound == pane))
     }
 
     /// Sessions that belong to the active tab and are shown there: an
@@ -794,6 +864,25 @@ impl ProtocolServer {
         }
     }
 
+    /// Drain live-region appends across every session, keeping changes for
+    /// tabs currently shown in open windows (`visible_tabs`) and passing
+    /// `(tab_id, session_id, change)` to `changed`.
+    pub fn take_visible_live_appends(&mut self, mut changed: impl FnMut(TabId, u64, LiveChange)) {
+        if !self.live_announcements {
+            return;
+        }
+        let visible = self.visible_tabs.clone();
+        for session in self.sessions.values_mut() {
+            let tab = session.tab_id();
+            let shown = visible.contains(&tab) && session.is_confirmed();
+            for change in session.take_live_appends() {
+                if shown {
+                    changed(tab, session.session_id(), change);
+                }
+            }
+        }
+    }
+
     /// Hand `changed` what happened to the live regions of the active
     /// tab's shown sessions since the last call, as (session id, change).
     /// Other sessions' changes are dropped: they are not on screen, and
@@ -1026,6 +1115,48 @@ impl ProtocolServer {
                     session.session_id(),
                     e
                 );
+            }
+        }
+        self.flush();
+    }
+
+    /// Forward a mouse event at `(cell_x, cell_y)`, in `pane`'s cells, to
+    /// the shown sessions of `tab` bound to `pane`.
+    pub fn send_mouse_to_tab_pane(
+        &mut self,
+        tab: TabId,
+        pane: TerminalId,
+        event_type: ultty_protocol::InputType,
+        cell_x: f32,
+        cell_y: f32,
+        modifiers: ultty_protocol::Modifiers,
+    ) {
+        let event_mask = match &event_type {
+            ultty_protocol::InputType::MouseScroll { .. } => ultty_protocol::EVENT_SCROLL,
+            _ => ultty_protocol::EVENT_MOUSE,
+        };
+        for session in self
+            .tab_sessions_mut(tab)
+            .filter(|session| session.pane() == Some(pane))
+        {
+            let (region_id, local_x, local_y) = session.hit_test(cell_x, cell_y);
+            if session.is_subscribed(region_id, event_mask)
+                || session.is_subscribed(ultty_protocol::RegionId::ROOT, event_mask)
+            {
+                let input = ultty_protocol::InputEvent {
+                    region_id,
+                    event_type: event_type.clone(),
+                    x: local_x,
+                    y: local_y,
+                    modifiers,
+                };
+                if let Err(e) = session.send_input(input) {
+                    tracing::warn!(
+                        "Failed to send mouse to session {}: {}",
+                        session.session_id(),
+                        e
+                    );
+                }
             }
         }
         self.flush();

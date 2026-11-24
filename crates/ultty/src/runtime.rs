@@ -167,6 +167,12 @@ impl SessionRuntime {
             None
         };
         server.set_active_tab(active);
+        let visible = if self.viewer_present {
+            self.manager.active_tab_ids()
+        } else {
+            Vec::new()
+        };
+        server.set_visible_tabs(visible);
     }
 
     /// Poll native apps and drive their transport, layout, and keepalives.
@@ -190,7 +196,7 @@ impl SessionRuntime {
                     .pane_for_process_group(tab, peer.and_then(process_group))
             });
             redraw |= server
-                .active_tab_sessions()
+                .visible_tab_sessions()
                 .any(|session| session.is_render_dirty());
         }
         if bound > 0 || Some(self.manager.layout_generation()) != self.native_layout_generation {
@@ -231,7 +237,7 @@ impl SessionRuntime {
             || (self.viewer_present
                 && self.protocol.as_ref().is_some_and(|server| {
                     server
-                        .active_tab_sessions()
+                        .visible_tab_sessions()
                         .any(|session| session.is_render_dirty())
                 }));
         Ok(RuntimeStep {
@@ -308,7 +314,7 @@ impl SessionRuntime {
             return false;
         };
         let focused = self.manager.focused_terminal_id();
-        let active = self.manager.active_tab().map(|tab| tab.id);
+        let visible_tabs = self.manager.active_tab_ids();
         let mut focused_changed = false;
         for tab in self.manager.tabs() {
             for &pane in &tab.terminals {
@@ -316,9 +322,9 @@ impl SessionRuntime {
                     continue;
                 };
                 let on_screen = self.viewer_present
-                    && Some(tab.id) == active
+                    && visible_tabs.contains(&tab.id)
                     && !server
-                        .pane_sessions(pane)
+                        .pane_sessions_in_tab(tab.id, pane)
                         .any(|session| session.is_full_scene());
                 let revision = terminal.event_loop.snapshot_generation();
                 let mut sessions: Vec<_> = server
