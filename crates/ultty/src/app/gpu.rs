@@ -21,7 +21,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use ultty::config::{clamp_font_size, ColorConfig, FontConfig};
-use ultty::renderer::{grid_dimensions_for, stepped_font_size, ColorScheme, Fonts, Renderer};
+use ultty::renderer::{
+    grid_dimensions_for, stepped_font_size, ColorScheme, FontGridSet, Fonts, Renderer,
+};
 use ultty::terminal_manager::WindowKey;
 use winit::dpi::PhysicalSize;
 use winit::event_loop::{EventLoopProxy, OwnedDisplayHandle};
@@ -36,6 +38,7 @@ pub(super) struct SharedGpu {
     pub(super) adapter: Arc<wgpu::Adapter>,
     pub(super) device: Arc<wgpu::Device>,
     pub(super) queue: Arc<wgpu::Queue>,
+    pub(super) font_grids: FontGridSet,
 }
 
 /// A renderer and the window surface it draws to.
@@ -294,21 +297,21 @@ impl WindowCtx<'_> {
 pub(super) enum SharedGpuSetup {
     /// Surface is compatible and the renderer is ready.
     Ready(Box<Gpu>),
-    /// Surface is incompatible with the shared adapter; returns the measured
-    /// [`Fonts`] so the caller can fall back to a dedicated adapter and device.
-    Incompatible(Box<Fonts>),
+    /// Surface is incompatible with the shared adapter; the caller should fall
+    /// back to creating a dedicated adapter, device, and font grid pool.
+    Incompatible,
     /// Surface or renderer creation failed.
     Failed(anyhow::Error),
 }
 
 /// Create a surface and renderer for an additional window on the shared GPU
-/// device (ADR 0027).
+/// device and [`FontGridSet`] (ADR 0027 slices 1–2).
 pub(super) fn setup_with_shared(
     shared: &SharedGpu,
     window: Arc<Window>,
     size: PhysicalSize<u32>,
     colors: &ColorConfig,
-    fonts: Fonts,
+    scaled_font: &FontConfig,
     paced_by_frame_callbacks: bool,
 ) -> SharedGpuSetup {
     let surface = match shared.instance.create_surface(window) {
@@ -317,17 +320,18 @@ pub(super) fn setup_with_shared(
     };
     let caps = surface.get_capabilities(&shared.adapter);
     if caps.formats.is_empty() || caps.alpha_modes.is_empty() {
-        return SharedGpuSetup::Incompatible(Box::new(fonts));
+        return SharedGpuSetup::Incompatible;
     }
-    let renderer = match Renderer::with_shared_device(
+    let renderer = match Renderer::with_shared_device_and_font_grids(
         &surface,
         &shared.adapter,
         Arc::clone(&shared.device),
         Arc::clone(&shared.queue),
+        shared.font_grids.clone(),
         size.width,
         size.height,
         colors,
-        fonts,
+        scaled_font,
         paced_by_frame_callbacks,
     ) {
         Ok(renderer) => renderer,
@@ -426,6 +430,7 @@ fn setup(
         adapter: Arc::new(adapter),
         device: Arc::clone(renderer.device()),
         queue: Arc::clone(renderer.queue()),
+        font_grids: renderer.font_grids().clone(),
     };
     tracing::debug!(target: "ultty::startup", "renderer ready");
     Ok(Box::new(Gpu {
