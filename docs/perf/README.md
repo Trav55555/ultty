@@ -60,6 +60,9 @@ The current dated evidence set is:
   B1's four numbers for the agent console in native and ANSI mode, against
   Alacritty and Ghostty: copy clean everywhere; Ultty does not hold the
   scroll position, and native resize corrupts frozen cards.
+- [`2026-11-24-t4-d3-memory-breakdown.md`](./2026-11-24-t4-d3-memory-breakdown.md)
+  for where Ultty's extra RSS on the T4 goes: clean driver and binary pages;
+  private dirty memory is below Alacritty's.
 - [`2026-11-19-t4-rerun.md`](./2026-11-19-t4-rerun.md) for the T4 rerun on
   `main`: D6 control latency met on a real display; D3 memory and D4 startup
   still behind Alacritty.
