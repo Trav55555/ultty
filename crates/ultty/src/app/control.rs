@@ -443,11 +443,17 @@ impl App {
 
             ControlRequest::ListWindows => {
                 let manager = &self.shared.runtime.manager;
-                let windows: Vec<WindowInfo> = self
+                let mut windows: Vec<WindowInfo> = self
                     .windows
                     .iter()
                     .map(|(&key, win)| {
-                        let size = win.window.inner_size();
+                        let visible = self.is_window_visible(key);
+                        let (width, height) = if visible {
+                            let size = win.window.inner_size();
+                            (size.width, size.height)
+                        } else {
+                            win.renderer.surface_size()
+                        };
                         let tabs: Vec<usize> = manager
                             .tabs()
                             .iter()
@@ -463,13 +469,42 @@ impl App {
                         WindowInfo {
                             id: key.raw() as u64,
                             title,
-                            width: size.width,
-                            height: size.height,
+                            width,
+                            height,
                             tabs,
-                            focused: self.focused_window == Some(key),
+                            focused: visible && self.focused_window == Some(key),
+                            quick: self.quick_window == Some(key),
+                            visible,
                         }
                     })
                     .collect();
+                if let Some(quick_key) = self.quick_window {
+                    if !self.windows.contains_key(&quick_key) {
+                        let tabs: Vec<usize> = manager
+                            .tabs()
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, tab)| tab.window_id == quick_key)
+                            .map(|(idx, _)| idx)
+                            .collect();
+                        let title = manager
+                            .window_active_tab(quick_key)
+                            .map(|tab| manager.tab_display_title(tab.id))
+                            .filter(|title| !title.is_empty())
+                            .unwrap_or_else(|| "Ultty".to_string());
+                        windows.push(WindowInfo {
+                            id: quick_key.raw() as u64,
+                            title,
+                            width: 0,
+                            height: 0,
+                            tabs,
+                            focused: false,
+                            quick: true,
+                            visible: false,
+                        });
+                    }
+                }
+                windows.sort_by_key(|w| w.id);
                 ControlResponse::Data(ControlData::Windows { windows })
             }
 
@@ -558,6 +593,40 @@ impl App {
                     }
                     Err(message) => ControlResponse::Error { code: 4, message },
                 }
+            }
+
+            ControlRequest::ToggleQuick { activation_token } => {
+                match self.toggle_quick_window(event_loop, activation_token.as_deref()) {
+                    Ok((window, visible)) => ControlResponse::Data(ControlData::QuickToggled {
+                        window: window.map(|key| key.raw() as u64),
+                        visible,
+                    }),
+                    Err(e) => ControlResponse::Error {
+                        code: 2,
+                        message: format!("Failed to toggle quick terminal: {e}"),
+                    },
+                }
+            }
+
+            ControlRequest::ShowQuick { activation_token } => {
+                match self.show_quick_window(event_loop, activation_token.as_deref()) {
+                    Ok(window) => ControlResponse::Data(ControlData::QuickToggled {
+                        window: Some(window.raw() as u64),
+                        visible: true,
+                    }),
+                    Err(e) => ControlResponse::Error {
+                        code: 2,
+                        message: format!("Failed to show quick terminal: {e}"),
+                    },
+                }
+            }
+
+            ControlRequest::HideQuick => {
+                self.hide_quick_window();
+                ControlResponse::Data(ControlData::QuickToggled {
+                    window: self.quick_window.map(|key| key.raw() as u64),
+                    visible: false,
+                })
             }
 
             ControlRequest::ListTabs => {
@@ -2628,6 +2697,15 @@ mod tests {
             window: Some(1),
             new_window: false,
         }));
+        assert!(control_request_requires_auth(
+            &ControlRequest::ToggleQuick {
+                activation_token: None,
+            }
+        ));
+        assert!(control_request_requires_auth(&ControlRequest::ShowQuick {
+            activation_token: None,
+        }));
+        assert!(control_request_requires_auth(&ControlRequest::HideQuick));
         assert!(control_request_requires_auth(&ControlRequest::RunCommand {
             command: "make".to_string(),
             args: vec!["test".to_string()],

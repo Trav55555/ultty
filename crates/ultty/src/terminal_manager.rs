@@ -2223,11 +2223,22 @@ impl TerminalManager {
         &self,
         sizes: &std::collections::HashMap<WindowKey, crate::session::WindowSize>,
     ) -> crate::session::SessionData {
+        self.to_session_data_with_sizes_excluding(sizes, None)
+    }
+
+    /// Extract v2 session data, skipping `excluded_window` (used to keep the
+    /// quick terminal out of saved sessions per ADR 0028).
+    pub fn to_session_data_with_sizes_excluding(
+        &self,
+        sizes: &std::collections::HashMap<WindowKey, crate::session::WindowSize>,
+        excluded_window: Option<WindowKey>,
+    ) -> crate::session::SessionData {
         use crate::session::{SessionData, TabData, TerminalData, WindowData, SESSION_VERSION};
 
         let windows = self
             .windows
             .iter()
+            .filter(|record| Some(record.id) != excluded_window)
             .filter_map(|record| {
                 let mut tabs = Vec::new();
                 let mut active_tab_index = 0;

@@ -154,8 +154,9 @@ impl App {
         .next_wake(now);
 
         self.windows
-            .values()
-            .filter_map(|win| win.next_window_wake(&self.shared.runtime.manager, now))
+            .iter()
+            .filter(|(&key, _)| self.is_window_visible(key))
+            .filter_map(|(_, win)| win.next_window_wake(&self.shared.runtime.manager, now))
             .chain(process_wake)
             .min()
     }
@@ -414,10 +415,14 @@ impl App {
                 }
                 self.mark_dirty_native_windows();
 
-                let empty_windows: Vec<WindowKey> = self
-                    .windows
-                    .keys()
-                    .copied()
+                let mut tracked_windows: Vec<WindowKey> = self.windows.keys().copied().collect();
+                if let Some(quick_key) = self.quick_window {
+                    if !tracked_windows.contains(&quick_key) {
+                        tracked_windows.push(quick_key);
+                    }
+                }
+                let empty_windows: Vec<WindowKey> = tracked_windows
+                    .into_iter()
                     .filter(|&w| self.shared.runtime.manager.window_is_empty(w))
                     .collect();
                 for w in empty_windows {
@@ -427,7 +432,10 @@ impl App {
                     }
                 }
 
-                if self.windows.is_empty() && cfg!(not(target_os = "macos")) {
+                if self.windows.is_empty()
+                    && self.quick_window.is_none()
+                    && cfg!(not(target_os = "macos"))
+                {
                     tracing::info!("All windows closed");
                     return true;
                 }
@@ -500,7 +508,12 @@ impl App {
         self.expire_pending_resizes();
 
         let now = Instant::now();
-        for win in self.windows.values_mut() {
+        let quick_window = self.quick_window;
+        let quick_visible = self.quick_visible;
+        for (&key, win) in self.windows.iter_mut() {
+            if quick_window == Some(key) && !quick_visible {
+                continue;
+            }
             if let Some(until) = win.bell_active_until {
                 if now < until {
                     win.needs_redraw = true;
