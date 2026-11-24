@@ -660,6 +660,11 @@ fn exit_child(code: i32) -> ! {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    const TRUE_BIN: &str = "/usr/bin/true";
+    #[cfg(not(target_os = "macos"))]
+    const TRUE_BIN: &str = "/bin/true";
+
     #[test]
     fn test_checked_spawn_reports_exec_and_directory_failure() {
         let dir = tempfile::tempdir().unwrap();
@@ -675,7 +680,7 @@ mod tests {
             result,
             Err(PtyError::StartupFailed { stage: "exec", .. })
         ));
-        let result = Child::spawn_checked("/bin/true", &[], &missing, PtySize::default(), &[]);
+        let result = Child::spawn_checked(TRUE_BIN, &[], &missing, PtySize::default(), &[]);
         assert!(matches!(
             result,
             Err(PtyError::StartupFailed {
@@ -684,13 +689,14 @@ mod tests {
             })
         ));
         let mut child =
-            Child::spawn_checked("/bin/true", &[], dir.path(), PtySize::default(), &[]).unwrap();
+            Child::spawn_checked(TRUE_BIN, &[], dir.path(), PtySize::default(), &[]).unwrap();
         assert_eq!(child.wait().unwrap(), 0);
     }
 
     #[test]
     fn test_checked_spawn_preserves_exact_argv_and_cwd() {
         let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
         let output = dir.path().join("receipt");
         let args = [
             "sh",
@@ -707,7 +713,7 @@ mod tests {
             std::fs::read_to_string(output).unwrap(),
             format!(
                 "{}\nspace ; $HOME 'quote'\nsecond line\n",
-                dir.path().display()
+                canonical.display()
             )
         );
     }
@@ -973,12 +979,12 @@ mod tests {
     #[test]
     fn child_remembers_the_term_it_was_started_with() {
         let env = [(OsString::from("TERM"), OsString::from("xterm-ultty"))];
-        let mut child = Child::spawn("/bin/true", &[], &current_dir(), PtySize::default(), &env)
+        let mut child = Child::spawn(TRUE_BIN, &[], &current_dir(), PtySize::default(), &env)
             .expect("Failed to spawn true");
         assert_eq!(child.term(), "xterm-ultty");
         let _ = child.wait();
 
-        let mut child = Child::spawn("/bin/true", &[], &current_dir(), PtySize::default(), &[])
+        let mut child = Child::spawn(TRUE_BIN, &[], &current_dir(), PtySize::default(), &[])
             .expect("Failed to spawn true");
         assert_eq!(child.term(), DEFAULT_TERMINAL_NAME);
         let _ = child.wait();

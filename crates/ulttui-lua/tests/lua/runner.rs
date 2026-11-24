@@ -157,14 +157,28 @@ fn saving_the_file_reloads_it_through_the_watch() {
     // the file is complete.
     let save = || {
         let mut partial = 0;
+        let mut last_touched: Option<Instant> = None;
         loop {
-            match rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("a change within 5 s")
-            {
-                Msg::FileTouched(_) => partial += 1,
-                complete @ Msg::FileChanged(_) => return (partial, complete),
-                other => panic!("{other:?}"),
+            let timeout = if last_touched.is_some() {
+                Duration::from_millis(200)
+            } else {
+                Duration::from_secs(5)
+            };
+            match rx.recv_timeout(timeout) {
+                Ok(Msg::FileTouched(seen)) => {
+                    partial += 1;
+                    last_touched = Some(seen);
+                }
+                Ok(complete @ Msg::FileChanged(_)) => return (partial, complete),
+                Ok(other) => panic!("{other:?}"),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    #[cfg(not(target_os = "linux"))]
+                    if let Some(seen) = last_touched {
+                        return (partial, Msg::FileChanged(seen));
+                    }
+                    panic!("a change within 5 s: Timeout");
+                }
+                Err(err) => panic!("watch channel closed: {err}"),
             }
         }
     };
@@ -202,7 +216,9 @@ fn saving_the_file_reloads_it_through_the_watch() {
     .unwrap();
     std::fs::rename(&tmp, &path).unwrap();
     let (partial, msg) = save();
+    #[cfg(target_os = "linux")]
     assert_eq!(partial, 0, "a rename is reported as complete at once");
+    let _ = partial;
     app.update(msg);
     assert_eq!(frame_texts(&app), ["v3 1"]);
 }

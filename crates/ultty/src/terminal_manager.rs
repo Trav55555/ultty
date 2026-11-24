@@ -3242,10 +3242,14 @@ mod tests {
         assert_eq!(manager.active_tab().map(|t| t.id), Some(second_tab));
     }
 
-    /// Open a tab running `/bin/true` and return its terminal.
+    /// Open a tab running `true` and return its terminal.
     fn tab_that_exits(manager: &mut TerminalManager) -> TerminalId {
+        #[cfg(target_os = "macos")]
+        const TRUE_BIN: &str = "/usr/bin/true";
+        #[cfg(not(target_os = "macos"))]
+        const TRUE_BIN: &str = "/bin/true";
         manager
-            .create_tab_with_command("/bin/true", &[], None, None, &mut no_tab_env)
+            .create_tab_with_command(TRUE_BIN, &[], None, None, &mut no_tab_env)
             .unwrap();
         manager.focused_terminal_id().unwrap()
     }
