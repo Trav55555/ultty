@@ -861,17 +861,18 @@ impl App {
                 },
             )?
         } else {
-            let created = self
-                .shared
-                .runtime
-                .manager
-                .create_window(cols, rows, &mut |tab_id| {
+            let created = self.shared.runtime.manager.create_window_in_dir(
+                cols,
+                rows,
+                working_dir,
+                &mut |tab_id| {
                     tab_shell_env(
                         &mut self.shared.runtime.protocol,
                         &self.shared.config.terminal,
                         tab_id,
                     )
-                })?;
+                },
+            )?;
             if let Some(title) = title {
                 self.shared.runtime.manager.set_tab_title(created.1, title);
             }
