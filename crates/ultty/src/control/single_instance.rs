@@ -46,6 +46,96 @@ pub enum HandoffOutcome {
     StartNewProcess,
 }
 
+/// Result of attempting to toggle the quick terminal in an existing Ultty process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickHandoffOutcome {
+    /// The existing process `pid` toggled its quick terminal.
+    Toggled {
+        pid: u32,
+        window: Option<u64>,
+        visible: bool,
+    },
+    /// No responsive instance accepted the toggle; start a quick-only process.
+    StartNewProcess,
+}
+
+/// Read the caller's activation token from `XDG_ACTIVATION_TOKEN` (Wayland) or
+/// `DESKTOP_STARTUP_ID` (X11), if non-empty.
+pub fn current_activation_token() -> Option<String> {
+    for var in ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"] {
+        if let Ok(token) = std::env::var(var) {
+            let trimmed = token.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Try to toggle the quick terminal in the newest running Ultty instance in the
+/// default control directory.
+pub fn try_toggle_quick_in_existing_instance(
+    activation_token: Option<String>,
+) -> QuickHandoffOutcome {
+    let Ok(dir) = control_dir() else {
+        return QuickHandoffOutcome::StartNewProcess;
+    };
+    try_toggle_quick_in_existing_instance_in(&dir, activation_token, DEFAULT_HANDOFF_TIMEOUT)
+}
+
+/// Try to toggle the quick terminal in the newest running Ultty instance in
+/// `dir`, giving up after `timeout` per candidate.
+pub fn try_toggle_quick_in_existing_instance_in(
+    dir: &Path,
+    activation_token: Option<String>,
+    timeout: Duration,
+) -> QuickHandoffOutcome {
+    let self_pid = std::process::id();
+    let request = ControlRequest::ToggleQuick { activation_token };
+    for endpoint in running_instance_candidates(dir) {
+        let Some(pid) = endpoint.pid() else {
+            continue;
+        };
+        if pid == self_pid {
+            continue;
+        }
+        match send_authenticated_request(&endpoint, &request, timeout) {
+            Ok(ControlResponse::Data(ControlData::QuickToggled { window, visible })) => {
+                return QuickHandoffOutcome::Toggled {
+                    pid,
+                    window,
+                    visible,
+                };
+            }
+            Ok(ControlResponse::Error { code, message }) => {
+                tracing::debug!(
+                    pid,
+                    code,
+                    %message,
+                    "quick-terminal handoff rejected by candidate"
+                );
+            }
+            Ok(other) => {
+                tracing::debug!(
+                    pid,
+                    ?other,
+                    "quick-terminal handoff received unexpected response"
+                );
+            }
+            Err(error) => {
+                tracing::debug!(
+                    pid,
+                    socket = %endpoint.socket.display(),
+                    %error,
+                    "quick-terminal handoff skipped candidate"
+                );
+            }
+        }
+    }
+    QuickHandoffOutcome::StartNewProcess
+}
+
 /// Try to open a window in the newest running Ultty instance in the default
 /// control directory.
 pub fn try_open_in_existing_instance(launch: &NewWindowLaunch) -> HandoffOutcome {
@@ -90,6 +180,26 @@ fn handoff_to_endpoint(
     launch: &NewWindowLaunch,
     timeout: Duration,
 ) -> Result<u64, String> {
+    let inner = ControlRequest::NewWindow {
+        title: None,
+        command: launch.command.clone(),
+        args: launch.args.clone(),
+        working_dir: launch.working_dir.clone(),
+    };
+    match send_authenticated_request(endpoint, &inner, timeout)? {
+        ControlResponse::Data(ControlData::WindowOpened { window, .. }) => Ok(window),
+        ControlResponse::Error { code, message } => {
+            Err(format!("instance rejected new-window ({code}): {message}"))
+        }
+        other => Err(format!("unexpected response: {other:?}")),
+    }
+}
+
+fn send_authenticated_request(
+    endpoint: &ControlEndpoint,
+    inner: &ControlRequest,
+    timeout: Duration,
+) -> Result<ControlResponse, String> {
     let mut stream =
         UnixStream::connect(&endpoint.socket).map_err(|e| format!("connect failed: {e}"))?;
     let token =
@@ -102,17 +212,11 @@ fn handoff_to_endpoint(
         .set_read_timeout(Some(timeout))
         .map_err(|e| format!("set read timeout failed: {e}"))?;
 
-    let inner = ControlRequest::NewWindow {
-        title: None,
-        command: launch.command.clone(),
-        args: launch.args.clone(),
-        working_dir: launch.working_dir.clone(),
-    };
     let envelope = ControlEnvelope {
         output_format: OutputFormat::Json,
         request: ControlRequest::WithToken {
             token,
-            request: Box::new(inner),
+            request: Box::new(inner.clone()),
         },
     };
     let mut payload =
@@ -128,15 +232,7 @@ fn handoff_to_endpoint(
     if raw.trim().is_empty() {
         return Err("empty reply".to_string());
     }
-    let response: ControlResponse =
-        serde_json::from_str(raw.trim()).map_err(|e| format!("invalid response: {e}"))?;
-    match response {
-        ControlResponse::Data(ControlData::WindowOpened { window, .. }) => Ok(window),
-        ControlResponse::Error { code, message } => {
-            Err(format!("instance rejected new-window ({code}): {message}"))
-        }
-        other => Err(format!("unexpected response: {other:?}")),
-    }
+    serde_json::from_str(raw.trim()).map_err(|e| format!("invalid response: {e}"))
 }
 
 fn read_reply(stream: &mut UnixStream, timeout: Duration) -> Result<String, String> {
@@ -342,5 +438,50 @@ mod tests {
         );
         server.join().unwrap();
         assert_eq!(outcome, HandoffOutcome::StartNewProcess);
+    }
+
+    #[test]
+    fn quick_handoff_forwards_activation_token_and_reports_visibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let (token, rx, server) = spawn_mock_instance(
+            dir.path(),
+            6001,
+            ControlResponse::Data(ControlData::QuickToggled {
+                window: Some(2),
+                visible: true,
+            }),
+        );
+
+        let outcome = try_toggle_quick_in_existing_instance_in(
+            dir.path(),
+            Some("xdg-tok-42".to_string()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            outcome,
+            QuickHandoffOutcome::Toggled {
+                pid: 6001,
+                window: Some(2),
+                visible: true,
+            }
+        );
+
+        let envelope = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        server.join().unwrap();
+        match envelope.request {
+            ControlRequest::WithToken {
+                token: sent_token,
+                request,
+            } => {
+                assert_eq!(sent_token, token);
+                assert_eq!(
+                    *request,
+                    ControlRequest::ToggleQuick {
+                        activation_token: Some("xdg-tok-42".to_string()),
+                    }
+                );
+            }
+            other => panic!("expected authenticated ToggleQuick, got {other:?}"),
+        }
     }
 }

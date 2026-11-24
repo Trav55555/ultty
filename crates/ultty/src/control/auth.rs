@@ -94,6 +94,9 @@ pub fn control_request_requires_auth(request: &ultty_protocol::control::ControlR
         | ControlRequest::NewWindow { .. }
         | ControlRequest::CloseWindow { .. }
         | ControlRequest::MoveTab { .. }
+        | ControlRequest::ToggleQuick { .. }
+        | ControlRequest::ShowQuick { .. }
+        | ControlRequest::HideQuick
         | ControlRequest::ListTabs
         | ControlRequest::ListPanes
         | ControlRequest::WorkspaceList

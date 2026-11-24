@@ -427,6 +427,16 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             _ => Err("usage: close-window <window>".to_string()),
         },
         "move-tab" => parse_move_tab(rest),
+        "toggle-quick" if rest.is_empty() => Ok(ControlRequest::ToggleQuick {
+            activation_token: ultty::control::single_instance::current_activation_token(),
+        }),
+        "toggle-quick" => Err("usage: toggle-quick".to_string()),
+        "show-quick" if rest.is_empty() => Ok(ControlRequest::ShowQuick {
+            activation_token: ultty::control::single_instance::current_activation_token(),
+        }),
+        "show-quick" => Err("usage: show-quick".to_string()),
+        "hide-quick" if rest.is_empty() => Ok(ControlRequest::HideQuick),
+        "hide-quick" => Err("usage: hide-quick".to_string()),
         "tabs" => Ok(ControlRequest::ListTabs),
         "panes" => Ok(ControlRequest::ListPanes),
         "text" => Ok(ControlRequest::GetText {
@@ -1490,6 +1500,9 @@ WINDOW COMMANDS:
     move-tab <n> --window <id> | --new-window
                             Move tab n (1-indexed) to window <id> or detach it
                             into a new window (prints the destination window id)
+    toggle-quick            Toggle the quick terminal (show or hide)
+    show-quick              Show the quick terminal (creating it if needed)
+    hide-quick              Hide the quick terminal, keeping its tabs alive
     focus                   Focus the target ultty window
     fullscreen              Toggle fullscreen on the target window
     opacity <0.0-1.0>       Set target window opacity
@@ -2599,9 +2612,26 @@ mod tests {
             "move-tab 2 --window 1 --new-window",
             "--window 1 move-tab 2 --new-window",
             "--window 1 move-tab 2 --window 2",
+            "toggle-quick extra",
+            "show-quick extra",
+            "hide-quick extra",
+            "--window 1 toggle-quick",
+            "--pane 1 hide-quick",
         ] {
             assert!(parse_cli_request(&args(bad)).is_err(), "{bad}");
         }
+        assert!(matches!(
+            parse_cli_request(&args("toggle-quick")).unwrap(),
+            ControlRequest::ToggleQuick { .. }
+        ));
+        assert!(matches!(
+            parse_cli_request(&args("show-quick")).unwrap(),
+            ControlRequest::ShowQuick { .. }
+        ));
+        assert_eq!(
+            parse_cli_request(&args("hide-quick")).unwrap(),
+            ControlRequest::HideQuick
+        );
 
         assert_eq!(
             parse_cli_request(&args("--window 3 focus")).unwrap(),

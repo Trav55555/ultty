@@ -256,6 +256,9 @@ impl ControlServer {
                 "new_window",
                 "close_window",
                 "move_tab",
+                "toggle_quick",
+                "show_quick",
+                "hide_quick",
                 "run_command",
                 "run_command_and_wait",
                 "split_pane",
@@ -1069,6 +1072,13 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
                 _ => None,
             }
         }
+        "toggle-quick" if parts.next().is_none() => Some(ControlRequest::ToggleQuick {
+            activation_token: None,
+        }),
+        "show-quick" if parts.next().is_none() => Some(ControlRequest::ShowQuick {
+            activation_token: None,
+        }),
+        "hide-quick" if parts.next().is_none() => Some(ControlRequest::HideQuick),
         "switch-tab" => {
             let index = parse_display_tab_index(parts.next()?)?;
             Some(ControlRequest::SwitchTab { index })
@@ -1281,15 +1291,28 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                         .map(|index| (index + 1).to_string())
                         .collect::<Vec<_>>()
                         .join(",");
+                    let role = match (window.quick, window.visible) {
+                        (true, true) => " [quick]",
+                        (true, false) => " [quick,hidden]",
+                        (false, false) => " [hidden]",
+                        (false, true) => "",
+                    };
                     out.push_str(&format!(
-                        "{}{} {}x{} tabs:[{}] {}\n",
-                        marker, window.id, window.width, window.height, tabs, window.title
+                        "{}{} {}x{} tabs:[{}]{} {}\n",
+                        marker, window.id, window.width, window.height, tabs, role, window.title
                     ));
                 }
                 out
             }
             ControlData::WindowOpened { window, .. } | ControlData::TabMoved { window, .. } => {
                 format!("{window}\n")
+            }
+            ControlData::QuickToggled { visible, .. } => {
+                if *visible {
+                    "shown\n".to_string()
+                } else {
+                    "hidden\n".to_string()
+                }
             }
             ControlData::Tabs { tabs } => {
                 let mut out = String::new();
@@ -1790,6 +1813,23 @@ mod tests {
         );
         assert_eq!(parse_request_only(b"move-tab 0 --new-window"), None);
         assert_eq!(parse_request_only(b"move-tab 2"), None);
+        assert_eq!(
+            parse_request_only(b"toggle-quick"),
+            Some(ControlRequest::ToggleQuick {
+                activation_token: None,
+            })
+        );
+        assert_eq!(
+            parse_request_only(b"show-quick"),
+            Some(ControlRequest::ShowQuick {
+                activation_token: None,
+            })
+        );
+        assert_eq!(
+            parse_request_only(b"hide-quick"),
+            Some(ControlRequest::HideQuick)
+        );
+        assert_eq!(parse_request_only(b"toggle-quick extra"), None);
     }
 
     #[test]
