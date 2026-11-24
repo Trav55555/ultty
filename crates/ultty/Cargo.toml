@@ -107,6 +107,10 @@ libc = "0.2"
 signal-hook = "0.3"
 polling = "3.4"
 
+# X11 global hotkey support (ADR 0028 Slice 3); already in Cargo.lock via winit.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = { version = "0.13.2", default-features = false }
+
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = { workspace = true }
