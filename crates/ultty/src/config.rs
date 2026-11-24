@@ -1112,6 +1112,11 @@ pub struct BehaviorConfig {
     /// `ULTTY_CPU_FIRST_FRAMES=1` forces it on and `ULTTY_CPU_FIRST_FRAMES=0`
     /// forces it off for a single launch. Read at start only.
     pub cpu_first_frames: bool,
+    /// Open "New window" in a separate OS process instead of inside the
+    /// running process (ADR 0027). Defaults to `false` (multiple windows share
+    /// one process and GPU device). Set to `true` for per-window crash
+    /// isolation.
+    pub window_per_process: bool,
 }
 
 impl Default for BehaviorConfig {
@@ -1131,6 +1136,7 @@ impl Default for BehaviorConfig {
             accessibility: true,
             narrow_vulkan_icd: true,
             cpu_first_frames: cfg!(target_os = "linux"),
+            window_per_process: false,
         }
     }
 }
@@ -1978,5 +1984,12 @@ copy = "ctrl+c"
         assert_eq!(duplicates[0].0, "ctrl+shift+c");
         assert!(duplicates[0].1.contains(&"copy".to_string()));
         assert!(duplicates[0].1.contains(&"paste".to_string()));
+    }
+
+    #[test]
+    fn test_window_per_process_defaults_false_and_parses() {
+        assert!(!BehaviorConfig::default().window_per_process);
+        let config: Config = toml::from_str("[behavior]\nwindow_per_process = true\n").unwrap();
+        assert!(config.behavior.window_per_process);
     }
 }

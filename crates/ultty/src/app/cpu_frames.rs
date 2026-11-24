@@ -23,7 +23,7 @@ use ultty::renderer::{CpuFrame, Fonts};
 use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
-use super::App;
+use super::{WindowCtx, WindowState};
 
 /// Whether to draw the first frames on the CPU: `ULTTY_CPU_FIRST_FRAMES=1`
 /// forces on, `ULTTY_CPU_FIRST_FRAMES=0` forces off, otherwise uses
@@ -67,23 +67,38 @@ impl CpuFrames {
     }
 }
 
-impl App {
+impl WindowState {
     /// Whether a frame can be drawn: by the GPU renderer, or on the CPU
     /// until it arrives.
     pub(super) fn can_draw(&self) -> bool {
         self.renderer.is_ready() || self.cpu_frames.is_some()
     }
 
+    /// Log the first frame, drawn by `by`, that shows the shell's output:
+    /// startup's end as a user sees it.
+    pub(super) fn note_output_shown(&mut self, shows_output: bool, by: &str) {
+        if shows_output && !self.output_shown {
+            self.output_shown = true;
+            tracing::debug!(
+                target: "ultty::startup",
+                window = self.key.raw(),
+                "first frame showing shell output ({by})"
+            );
+        }
+    }
+}
+
+impl WindowCtx<'_> {
     /// Draw and present a frame on the CPU, if the CPU frames are on and the
     /// GPU renderer has not arrived. Returns whether they are on.
     pub(super) fn render_cpu_frame(&mut self) -> bool {
-        let Some(cpu) = self.cpu_frames.as_mut() else {
+        let Some(cpu) = self.win.cpu_frames.as_mut() else {
             return false;
         };
         let Some(frame) = cpu.frame.as_mut() else {
             return true;
         };
-        let size = self.window.inner_size();
+        let size = self.win.window.inner_size();
         let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         else {
@@ -92,8 +107,8 @@ impl App {
         if cpu.frames == 0 {
             tracing::debug!(target: "ultty::startup", "drawing the first CPU frame");
         }
-        let top = self.renderer.tab_bar_height();
-        let tab_bar = self.tab_bar.visible.then_some(&self.tab_bar);
+        let top = self.win.renderer.tab_bar_height();
+        let tab_bar = self.win.tab_bar.visible.then_some(&self.win.tab_bar);
         if let Err(error) = cpu.surface.resize(width, height) {
             tracing::warn!("CPU frame: resize failed: {error}");
             return true;
@@ -105,7 +120,12 @@ impl App {
                 return true;
             }
         };
-        let shows_output = match self.runtime.manager.focused_terminal() {
+        let shows_output = match self
+            .app
+            .runtime
+            .manager
+            .window_focused_terminal(self.win.key)
+        {
             Some(terminal) => frame.draw(
                 &mut buffer,
                 width.get(),
@@ -115,7 +135,7 @@ impl App {
             ),
             None => false,
         };
-        self.window.pre_present_notify();
+        self.win.window.pre_present_notify();
         if let Err(error) = buffer.present() {
             tracing::warn!("CPU frame: present failed: {error}");
             return true;
@@ -124,17 +144,11 @@ impl App {
             tracing::debug!(target: "ultty::startup", "first CPU frame presented");
         }
         cpu.frames = cpu.frames.saturating_add(1);
-        self.note_output_shown(shows_output, "CPU");
-        self.runtime.manager.clear_dirty();
+        self.win.note_output_shown(shows_output, "CPU");
+        self.app
+            .runtime
+            .manager
+            .clear_window_active_dirty(self.win.key);
         true
-    }
-
-    /// Log the first frame, drawn by `by`, that shows the shell's output:
-    /// startup's end as a user sees it.
-    pub(super) fn note_output_shown(&mut self, shows_output: bool, by: &str) {
-        if shows_output && !self.output_shown {
-            self.output_shown = true;
-            tracing::debug!(target: "ultty::startup", "first frame showing shell output ({by})");
-        }
     }
 }

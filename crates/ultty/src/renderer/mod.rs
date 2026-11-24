@@ -480,6 +480,44 @@ impl Renderer {
         Ok(renderer)
     }
 
+    /// Create a renderer drawing with `fonts` on an existing shared GPU device
+    /// and queue (ADR 0027).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_shared_device(
+        surface: &wgpu::Surface<'_>,
+        adapter: &wgpu::Adapter,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        width: u32,
+        height: u32,
+        color_config: &ColorConfig,
+        fonts: Fonts,
+        paced_by_frame_callbacks: bool,
+    ) -> anyhow::Result<Self> {
+        let mut renderer = Self::from_device(
+            surface,
+            adapter,
+            device,
+            queue,
+            width,
+            height,
+            fonts,
+            paced_by_frame_callbacks,
+        )?;
+        renderer.color_scheme = ColorScheme::from_config(color_config);
+        Ok(renderer)
+    }
+
+    /// The shared wgpu device this renderer draws with.
+    pub fn device(&self) -> &Arc<wgpu::Device> {
+        &self.device
+    }
+
+    /// The shared wgpu queue this renderer submits to.
+    pub fn queue(&self) -> &Arc<wgpu::Queue> {
+        &self.queue
+    }
+
     /// Create a new renderer drawing with `fonts`.
     pub async fn new(
         surface: &wgpu::Surface<'_>,
@@ -503,13 +541,36 @@ impl Renderer {
             })
             .await?;
         tracing::debug!(target: "ultty::startup", "GPU device ready");
+        Self::from_device(
+            surface,
+            adapter,
+            Arc::new(device),
+            Arc::new(queue),
+            width,
+            height,
+            fonts,
+            paced_by_frame_callbacks,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_device(
+        surface: &wgpu::Surface<'_>,
+        adapter: &wgpu::Adapter,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        width: u32,
+        height: u32,
+        fonts: Fonts,
+        paced_by_frame_callbacks: bool,
+    ) -> anyhow::Result<Self> {
         let (width, height) =
             clamp_surface_size(width, height, device.limits().max_texture_dimension_2d);
 
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
         let surface_caps = surface.get_capabilities(adapter);
+        if surface_caps.formats.is_empty() || surface_caps.alpha_modes.is_empty() {
+            anyhow::bail!("surface is not compatible with GPU adapter");
+        }
         let surface_format = surface_caps
             .formats
             .iter()

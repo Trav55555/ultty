@@ -334,6 +334,26 @@ impl TabBarState {
         total_width: f32,
         tab_width_override: Option<f32>,
     ) {
+        let refs: Vec<&Tab> = tabs.iter().collect();
+        self.update_with_tab_refs_and_width_override(
+            &refs,
+            titles,
+            active_tab,
+            total_width,
+            tab_width_override,
+        );
+    }
+
+    /// Update the tab bar state from a window's tab references, display titles,
+    /// and optional fixed tab width.
+    pub fn update_with_tab_refs_and_width_override(
+        &mut self,
+        tabs: &[&Tab],
+        titles: &[String],
+        active_tab: TabId,
+        total_width: f32,
+        tab_width_override: Option<f32>,
+    ) {
         self.total_width = total_width;
         self.tabs.clear();
 

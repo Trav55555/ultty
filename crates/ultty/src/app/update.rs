@@ -1,45 +1,78 @@
 //! Main update loop: process terminal events, poll servers, and schedule renders.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use super::App;
+use super::{App, WindowCtx, WindowState};
 use ultty::config::{BehaviorConfig, ClipboardWrite};
 use ultty::event_loop::TerminalEvent;
-use ultty::terminal_manager::progress_status;
+use ultty::terminal_manager::{progress_status, WindowKey};
 
-impl App {
-    /// When the loop next has timed work to do, or `None` to sleep until
-    /// input, PTY output, a socket or the config watcher wakes it.
-    pub(super) fn next_update_deadline(&self, now: Instant) -> Option<Instant> {
+impl WindowState {
+    fn sync_update_active(&self, manager: &ultty::terminal_manager::TerminalManager) -> bool {
+        manager
+            .window_focused_terminal(self.key)
+            .map(|t| t.event_loop.terminal().modes().synchronized_update)
+            .unwrap_or(false)
+    }
+
+    fn cursor_blinks(
+        &self,
+        config: &ultty::config::Config,
+        manager: &ultty::terminal_manager::TerminalManager,
+    ) -> bool {
+        config.behavior.cursor_blink
+            && self.window.has_focus()
+            && manager.window_focused_terminal(self.key).is_some_and(|t| {
+                let term = t.event_loop.terminal();
+                let cursor = term.buffer().grid().cursor();
+                cursor.visible && cursor.blinking
+            })
+    }
+
+    pub(super) fn set_occluded(&mut self, occluded: bool) {
+        if self.frame_pacing.set_occluded(occluded) {
+            self.needs_redraw = true;
+        }
+    }
+
+    pub(super) fn frame_due(
+        &self,
+        manager: &ultty::terminal_manager::TerminalManager,
+        now: Instant,
+    ) -> Option<(Duration, bool)> {
+        let sync_active = self.sync_update_active(manager);
+        let frame_elapsed = now.duration_since(self.last_render);
+        let echo_after = self
+            .input_sent_at
+            .filter(|_| self.output_since_input)
+            .map(|sent| now.saturating_duration_since(sent));
+        let needs_redraw = self.needs_redraw && self.can_draw();
+        should_render(needs_redraw, frame_elapsed, sync_active, echo_after)
+            .then_some((frame_elapsed, sync_active))
+    }
+
+    fn next_window_wake(
+        &self,
+        manager: &ultty::terminal_manager::TerminalManager,
+        now: Instant,
+    ) -> Option<Instant> {
         WakeState {
             needs_redraw: self.needs_redraw,
-            // Without a renderer, or CPU frames, there is no frame to time;
-            // the handoff wakes the loop (see `gpu`).
             frame_timer: self.frame_pacing.frame_timer_applies() && self.can_draw(),
             last_render: self.last_render,
-            sync_active: self.needs_redraw && self.sync_update_active(),
+            sync_active: self.needs_redraw && self.sync_update_active(manager),
             cursor_blink: self.cursor_blink.next_toggle(),
             tab_width_freeze: self.tab_width_freeze.map(|freeze| freeze.until),
             bell: self.bell_active_until,
             launched_at: self.launched_at,
             tab_title_activity: self.tab_title_activity,
             last_tab_title_refresh: self.last_tab_title_refresh,
-            config_reload: self
-                .config_watcher
-                .as_ref()
-                .and_then(|watcher| watcher.next_deadline()),
-            native_sessions: self
-                .runtime
-                .protocol
-                .as_ref()
-                .map_or(0, |server| server.session_count()),
-            control_wait: self.next_control_wait_deadline(),
+            config_reload: None,
+            native_sessions: 0,
+            control_wait: None,
+            anchor_release: None,
             search_pending: self.search_job.is_some(),
-            anchor_release: self
-                .runtime
-                .protocol
-                .as_ref()
-                .and_then(|server| server.next_pairing_deadline()),
             accessibility: self
                 .accessibility
                 .as_ref()
@@ -47,55 +80,126 @@ impl App {
         }
         .next_wake(now)
     }
+}
 
-    /// Whether the focused pane's cursor should blink: the config allows
-    /// it, the window has focus, and the cursor is shown in a blinking
-    /// style. Anything else draws a steady cursor and runs no blink timer.
-    fn cursor_blinks(&self) -> bool {
-        self.config.behavior.cursor_blink
-            && self.window.has_focus()
-            && self.terminal().is_some_and(|terminal| {
-                let cursor = terminal.buffer().grid().cursor();
-                cursor.visible && cursor.blinking
-            })
-    }
-
-    fn sync_update_active(&self) -> bool {
-        self.runtime
-            .manager
-            .focused_terminal()
-            .map(|t| t.event_loop.terminal().modes().synchronized_update)
-            .unwrap_or(false)
-    }
-
-    /// Process terminal events and render. Returns true if should exit.
-    pub(super) fn update(&mut self) -> bool {
-        let letters = ultty::tabs::title_letters_at(self.launched_at.elapsed());
-        if letters != self.tab_bar.title_letters {
-            self.tab_bar.title_letters = letters;
-            self.needs_redraw = true;
+impl WindowCtx<'_> {
+    /// Draw a frame for `WindowEvent::RedrawRequested`, if one is due.
+    pub(super) fn redraw(&mut self) {
+        self.reconcile_copy_mode_pane();
+        let now = Instant::now();
+        let due = self.win.frame_due(&self.app.runtime.manager, now);
+        if !self.win.frame_pacing.should_draw(due.is_some()) {
+            return;
         }
-        self.refresh_runtime_wakeup_fds();
+        if let (true, Some((frame_elapsed, sync_active))) = (pipeline_trace_enabled(), due) {
+            tracing::info!(
+                target: "ultty::perf",
+                frame_elapsed_us = frame_elapsed.as_micros(),
+                sync_active,
+                "pipeline_render_scheduled"
+            );
+        }
+        self.render();
+        self.win.last_render = now;
+        if self.win.output_since_input {
+            self.win.input_sent_at = None;
+            self.win.output_since_input = false;
+        }
+        self.win.needs_redraw = self
+            .win
+            .renderer
+            .ready()
+            .is_some_and(|renderer| renderer.frame_incomplete());
+    }
+}
 
-        // Check for config file changes (hot-reload)
-        if let Some(ref mut watcher) = self.config_watcher {
-            if watcher.poll(Instant::now()) {
-                tracing::info!("Config file changed, reloading...");
-                self.reload_config();
+impl App {
+    /// When the loop next has timed work to do across every open window and
+    /// the shared runtime, or `None` to sleep until input, PTY output, a
+    /// socket or the config watcher wakes it.
+    pub(super) fn next_update_deadline(&self, now: Instant) -> Option<Instant> {
+        let process_wake = WakeState {
+            needs_redraw: false,
+            frame_timer: false,
+            last_render: now,
+            sync_active: false,
+            cursor_blink: None,
+            tab_width_freeze: None,
+            bell: None,
+            launched_at: now.checked_sub(Duration::from_secs(60)).unwrap_or(now),
+            tab_title_activity: None,
+            last_tab_title_refresh: now,
+            config_reload: self
+                .shared
+                .config_watcher
+                .as_ref()
+                .and_then(|watcher| watcher.next_deadline()),
+            native_sessions: self
+                .shared
+                .runtime
+                .protocol
+                .as_ref()
+                .map_or(0, |server| server.session_count()),
+            control_wait: self.next_control_wait_deadline(),
+            anchor_release: self
+                .shared
+                .runtime
+                .protocol
+                .as_ref()
+                .and_then(|server| server.next_pairing_deadline()),
+            search_pending: false,
+            accessibility: None,
+        }
+        .next_wake(now);
+
+        self.windows
+            .values()
+            .filter_map(|win| win.next_window_wake(&self.shared.runtime.manager, now))
+            .chain(process_wake)
+            .min()
+    }
+
+    /// Process terminal events across all windows and schedule redraws.
+    /// Returns `true` if the application should exit.
+    pub(super) fn update(&mut self) -> bool {
+        for win in self.windows.values_mut() {
+            let letters = ultty::tabs::title_letters_at(win.launched_at.elapsed());
+            if letters != win.tab_bar.title_letters {
+                win.tab_bar.title_letters = letters;
+                win.needs_redraw = true;
             }
         }
+        self.shared.refresh_runtime_wakeup_fds();
 
-        match self.runtime.poll_native() {
-            Ok(redraw) => self.needs_redraw |= redraw,
+        let reload_due = self
+            .shared
+            .config_watcher
+            .as_mut()
+            .is_some_and(|watcher| watcher.poll(Instant::now()));
+        if reload_due {
+            tracing::info!("Config file changed, reloading...");
+            self.reload_config();
+        }
+
+        match self.shared.runtime.poll_native() {
+            Ok(redraw) => {
+                if redraw {
+                    self.mark_dirty_native_windows();
+                }
+            }
             Err(error) => tracing::warn!(%error, "Protocol server poll error"),
         }
-        if let Some(server) = self.runtime.protocol.as_mut() {
+        if let Some(server) = self.shared.runtime.protocol.as_mut() {
             for key in server.pending_clipboard_gets() {
-                let text = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok());
+                let text = self
+                    .shared
+                    .clipboard
+                    .as_mut()
+                    .and_then(|cb| cb.get_text().ok());
                 server.send_clipboard_content(key, text);
             }
             for (_key, text) in server.pending_clipboard_sets() {
-                if let Some(ref mut cb) = self.clipboard {
+                if let Some(ref mut cb) = self.shared.clipboard {
                     if let Err(error) = cb.set_text(text) {
                         tracing::warn!(%error, "Failed to set clipboard from native session");
                     }
@@ -103,43 +207,70 @@ impl App {
             }
         }
 
-        if let Some(ref mut server) = self.control_server {
+        if let Some(ref mut server) = self.shared.control_server {
             if let Err(e) = server.poll(Some(Duration::ZERO)) {
                 tracing::warn!("Control server poll error: {}", e);
             }
             self.handle_control_requests();
         }
 
-        self.refresh_runtime_wakeup_fds();
+        self.shared.refresh_runtime_wakeup_fds();
 
-        // Update cursor blink state
         let now = Instant::now();
-        self.expire_tab_width_freeze(now);
-
-        if self.cursor_blink.update(self.cursor_blinks(), now) {
-            self.needs_redraw = true;
+        for win in self.windows.values_mut() {
+            let mut ctx = WindowCtx {
+                app: &mut self.shared,
+                win,
+            };
+            ctx.expire_tab_width_freeze(now);
+            let blinks = ctx
+                .win
+                .cursor_blinks(&ctx.app.config, &ctx.app.runtime.manager);
+            if ctx.win.cursor_blink.update(blinks, now) {
+                ctx.win.needs_redraw = true;
+            }
         }
 
-        // Get the focused terminal ID for title updates
-        let focused_id = self.runtime.manager.focused_terminal().map(|t| t.id);
-        let tab_state_before_cleanup = (
-            self.runtime.manager.tab_count(),
-            self.runtime.manager.active_tab().map(|tab| tab.id),
-        );
+        let tab_state_before: Vec<(WindowKey, usize, Option<ultty::terminal_manager::TabId>)> =
+            self.windows
+                .keys()
+                .copied()
+                .map(|key| {
+                    (
+                        key,
+                        self.shared.runtime.manager.window_tab_count(key),
+                        self.shared
+                            .runtime
+                            .manager
+                            .window_active_tab(key)
+                            .map(|tab| tab.id),
+                    )
+                })
+                .collect();
 
-        // Process all terminals
-        match self.runtime.manager.process_all() {
+        match self.shared.runtime.manager.process_all() {
             Ok(all_events) => {
-                let mut content_changed = false;
-                let mut tab_titles_changed = false;
+                let mut content_changed_windows: HashSet<WindowKey> = HashSet::new();
+                let mut tab_titles_changed_windows: HashSet<WindowKey> = HashSet::new();
+                let mut shown_changed_windows: HashSet<WindowKey> = HashSet::new();
                 let mut with_output = Vec::new();
-                // What a screen reader is shown changed (ADR 0021 §3).
-                let mut shown_changed = false;
+
                 for (terminal_id, events) in all_events {
+                    let owner_window = self.shared.runtime.manager.window_for_pane(terminal_id);
+                    let is_window_focused_pane = owner_window.is_some_and(|w| {
+                        self.shared.runtime.manager.window_focused_terminal_id(w)
+                            == Some(terminal_id)
+                    });
+                    let is_global_focused_pane = self.focused_window.is_some_and(|w| {
+                        owner_window == Some(w)
+                            && self.shared.runtime.manager.window_focused_terminal_id(w)
+                                == Some(terminal_id)
+                    });
+
                     for event in events {
-                        self.observe_control_wait_event(terminal_id, &event);
+                        self.shared.observe_control_wait_event(terminal_id, &event);
                         if let (Some(server), Some(control_event)) = (
-                            self.control_server.as_mut(),
+                            self.shared.control_server.as_mut(),
                             super::control_events::control_event(terminal_id, &event),
                         ) {
                             server.publish(&control_event);
@@ -147,19 +278,23 @@ impl App {
                         match event {
                             TerminalEvent::Redraw => {
                                 with_output.push(terminal_id);
-                                // A background tab's output is drawn when
-                                // the tab is shown.
-                                if self.runtime.manager.is_on_screen(terminal_id) {
-                                    self.needs_redraw = true;
-                                }
-                                // Output may come with a new foreground
-                                // program or directory; see the tab titles.
-                                self.tab_title_activity = Some(now);
-                                // Only update URL detection for focused terminal
-                                if Some(terminal_id) == focused_id {
-                                    content_changed = true;
-                                    shown_changed = true;
-                                    self.output_since_input = self.input_sent_at.is_some();
+                                if let Some(w) = owner_window {
+                                    if let Some(win) = self.windows.get_mut(&w) {
+                                        if self
+                                            .shared
+                                            .runtime
+                                            .manager
+                                            .is_on_screen_in_window(w, terminal_id)
+                                        {
+                                            win.needs_redraw = true;
+                                        }
+                                        win.tab_title_activity = Some(now);
+                                        if is_window_focused_pane {
+                                            content_changed_windows.insert(w);
+                                            shown_changed_windows.insert(w);
+                                            win.output_since_input = win.input_sent_at.is_some();
+                                        }
+                                    }
                                 }
                             }
                             TerminalEvent::ChildExited { status } => {
@@ -170,48 +305,50 @@ impl App {
                                 );
                             }
                             TerminalEvent::Bell => {
-                                let bell = bell_response(
-                                    &self.config.behavior,
-                                    Some(terminal_id) == focused_id,
-                                    self.window.has_focus(),
-                                );
-                                if bell.flash {
-                                    // Flash the border for 100ms
-                                    self.bell_active_until =
-                                        Some(Instant::now() + Duration::from_millis(100));
-                                    self.needs_redraw = true;
-                                }
-                                if bell.urgent {
-                                    // Cleared when the window gains focus.
-                                    self.window.request_user_attention(Some(
-                                        winit::window::UserAttentionType::Informational,
-                                    ));
+                                if let Some(w) = owner_window {
+                                    if let Some(win) = self.windows.get_mut(&w) {
+                                        let bell = bell_response(
+                                            &self.shared.config.behavior,
+                                            is_window_focused_pane,
+                                            win.window.has_focus(),
+                                        );
+                                        if bell.flash {
+                                            win.bell_active_until =
+                                                Some(Instant::now() + Duration::from_millis(100));
+                                            win.needs_redraw = true;
+                                        }
+                                        if bell.urgent {
+                                            win.window.request_user_attention(Some(
+                                                winit::window::UserAttentionType::Informational,
+                                            ));
+                                        }
+                                    }
                                 }
                                 tracing::debug!("Bell");
                             }
                             TerminalEvent::TitleChanged(title) => {
-                                tab_titles_changed = true;
-                                shown_changed = true;
-                                // Only set window title from focused terminal
-                                if Some(terminal_id) == focused_id {
-                                    self.window.set_title(&title);
-                                    if let Some(adapter) = self.accessibility.as_mut() {
-                                        adapter.set_window_title(&title);
+                                if let Some(w) = owner_window {
+                                    tab_titles_changed_windows.insert(w);
+                                    shown_changed_windows.insert(w);
+                                    if is_window_focused_pane {
+                                        if let Some(win) = self.windows.get_mut(&w) {
+                                            win.window.set_title(&title);
+                                            if let Some(adapter) = win.accessibility.as_mut() {
+                                                adapter.set_window_title(&title);
+                                            }
+                                        }
                                     }
                                 }
                             }
                             TerminalEvent::SetClipboard { clipboard: _, data } => {
-                                // Set clipboard content (OSC 52), if the config allows
-                                // it, and only from the focused terminal
-                                if self.config.behavior.clipboard_write == ClipboardWrite::Deny {
+                                if self.shared.config.behavior.clipboard_write
+                                    == ClipboardWrite::Deny
+                                {
                                     tracing::debug!(
                                         "Ignored OSC 52 clipboard write: behavior.clipboard_write = \"deny\""
                                     );
-                                } else if Some(terminal_id) == focused_id {
-                                    // Ultty owns a window and talks to the system clipboard
-                                    // directly. It never forwards OSC 52 to its own stdout,
-                                    // even when it was started from inside tmux.
-                                    if let Some(ref mut cb) = self.clipboard {
+                                } else if is_global_focused_pane {
+                                    if let Some(ref mut cb) = self.shared.clipboard {
                                         if let Err(e) = cb.set_text(&data) {
                                             tracing::warn!("Failed to set clipboard: {}", e);
                                         } else {
@@ -224,32 +361,35 @@ impl App {
                                 }
                             }
                             TerminalEvent::Notification { title, body } => {
-                                // Desktop notification (OSC 9/777)
-                                // Only show from focused terminal
-                                if Some(terminal_id) == focused_id {
+                                if is_window_focused_pane {
                                     Self::show_notification(&title, &body);
                                 }
                             }
                             TerminalEvent::Progress(progress) => {
                                 if let Some(terminal) =
-                                    self.runtime.manager.terminal_mut(terminal_id)
+                                    self.shared.runtime.manager.terminal_mut(terminal_id)
                                 {
                                     terminal.progress = progress_status(progress);
-                                    tab_titles_changed = true;
+                                    if let Some(w) = owner_window {
+                                        tab_titles_changed_windows.insert(w);
+                                    }
                                 }
                             }
                             TerminalEvent::CommandFinished { .. } => {
-                                // A program that died mid-way leaves its
-                                // progress behind; the prompt clears it.
                                 if let Some(terminal) =
-                                    self.runtime.manager.terminal_mut(terminal_id)
+                                    self.shared.runtime.manager.terminal_mut(terminal_id)
                                 {
-                                    tab_titles_changed |= terminal.progress.take().is_some();
+                                    if terminal.progress.take().is_some() {
+                                        if let Some(w) = owner_window {
+                                            tab_titles_changed_windows.insert(w);
+                                        }
+                                    }
                                 }
                             }
-                            // Only subscribers hear of this (above).
                             TerminalEvent::ProgramStatusChanged { .. } => {
-                                tab_titles_changed = true;
+                                if let Some(w) = owner_window {
+                                    tab_titles_changed_windows.insert(w);
+                                }
                             }
                             TerminalEvent::ShellCommandFinished { .. } => {}
                             TerminalEvent::CommandStarted => {}
@@ -257,45 +397,80 @@ impl App {
                     }
                 }
 
-                // Clean up exited terminals
-                self.runtime.cleanup_exited();
-                shown_changed |= self.runtime.pair_inline_surfaces(&with_output, now);
-                if self.runtime.protocol.as_ref().is_some_and(|server| {
-                    server
-                        .active_tab_sessions()
-                        .any(|session| session.is_render_dirty())
-                }) {
-                    self.needs_redraw = true;
+                self.shared.runtime.cleanup_exited();
+                let inline_changed = self.shared.runtime.pair_inline_surfaces(&with_output, now);
+                if inline_changed {
+                    if let Some(w) = self.focused_window {
+                        shown_changed_windows.insert(w);
+                    }
                 }
-                let tab_state_after_cleanup = (
-                    self.runtime.manager.tab_count(),
-                    self.runtime.manager.active_tab().map(|tab| tab.id),
-                );
-                let tab_structure_changed = tab_state_before_cleanup != tab_state_after_cleanup;
-                if tab_title_refresh_due(
-                    now,
-                    self.last_tab_title_refresh,
-                    self.tab_title_activity.is_some(),
-                    tab_titles_changed || tab_structure_changed,
-                ) {
-                    self.update_tab_bar();
+                self.mark_dirty_native_windows();
+
+                let empty_windows: Vec<WindowKey> = self
+                    .windows
+                    .keys()
+                    .copied()
+                    .filter(|&w| self.shared.runtime.manager.window_is_empty(w))
+                    .collect();
+                for w in empty_windows {
+                    tracing::info!("All terminals exited in window {}", w.raw());
+                    if self.close_window(w) {
+                        return true;
+                    }
                 }
 
-                // Check if all terminals have exited
-                if self.runtime.manager.all_exited() {
-                    tracing::info!("All terminals exited");
+                if self.windows.is_empty() && cfg!(not(target_os = "macos")) {
+                    tracing::info!("All windows closed");
                     return true;
                 }
 
-                // Update URL detection when content changes
-                if content_changed {
-                    self.update_url_detection();
+                for (key, before_count, before_active) in tab_state_before {
+                    let Some(win) = self.windows.get_mut(&key) else {
+                        continue;
+                    };
+                    let after_count = self.shared.runtime.manager.window_tab_count(key);
+                    let after_active = self
+                        .shared
+                        .runtime
+                        .manager
+                        .window_active_tab(key)
+                        .map(|tab| tab.id);
+                    let structure_changed =
+                        before_count != after_count || before_active != after_active;
+                    let force = tab_titles_changed_windows.contains(&key) || structure_changed;
+                    if tab_title_refresh_due(
+                        now,
+                        win.last_tab_title_refresh,
+                        win.tab_title_activity.is_some(),
+                        force,
+                    ) {
+                        let mut ctx = WindowCtx {
+                            app: &mut self.shared,
+                            win,
+                        };
+                        ctx.update_tab_bar();
+                    }
                 }
 
-                // Check for column mode resize requests (DECCOLM - 132/80 column mode)
-                self.handle_column_resize_requests();
+                for key in content_changed_windows {
+                    if let Some(win) = self.windows.get_mut(&key) {
+                        let mut ctx = WindowCtx {
+                            app: &mut self.shared,
+                            win,
+                        };
+                        ctx.update_url_detection();
+                    }
+                }
 
-                self.update_accessibility(shown_changed, Instant::now());
+                for win in self.windows.values_mut() {
+                    let mut ctx = WindowCtx {
+                        app: &mut self.shared,
+                        win,
+                    };
+                    ctx.handle_column_resize_requests();
+                }
+
+                self.update_all_accessibility(&shown_changed_windows, Instant::now());
             }
             Err(e) => {
                 tracing::error!("Terminal error: {}", e);
@@ -303,87 +478,59 @@ impl App {
             }
         }
 
-        self.advance_search();
-        self.publish_pane_changes();
-        self.complete_pending_control_waits();
-        self.complete_pending_override_pushes();
-        self.complete_pending_semantic_actions();
+        for win in self.windows.values_mut() {
+            let mut ctx = WindowCtx {
+                app: &mut self.shared,
+                win,
+            };
+            ctx.advance_search();
+        }
+        self.shared.publish_pane_changes();
+        self.shared.complete_pending_control_waits();
+        self.shared.complete_pending_override_pushes();
+        self.shared.complete_pending_semantic_actions();
         self.expire_pending_resizes();
 
-        // Check if bell animation needs to continue
-        if let Some(until) = self.bell_active_until {
-            if Instant::now() < until {
-                self.needs_redraw = true;
-            } else {
-                // Bell expired, clear it and redraw to remove border
-                self.bell_active_until = None;
-                self.needs_redraw = true;
+        let now = Instant::now();
+        for win in self.windows.values_mut() {
+            if let Some(until) = win.bell_active_until {
+                if now < until {
+                    win.needs_redraw = true;
+                } else {
+                    win.bell_active_until = None;
+                    win.needs_redraw = true;
+                }
             }
-        }
 
-        // Ask for a frame when one is due; it is drawn in `redraw` when the
-        // window system delivers `RedrawRequested` (see `pacing`).
-        let due = self.frame_due(Instant::now()).is_some();
-        if self.frame_pacing.should_request(due) {
-            self.window.request_redraw();
+            let due = win.frame_due(&self.shared.runtime.manager, now).is_some();
+            if win.frame_pacing.should_request(due) {
+                win.window.request_redraw();
+            }
         }
 
         false
     }
 
-    /// Draw a frame for `WindowEvent::RedrawRequested`, if one is due.
-    pub(super) fn redraw(&mut self) {
-        self.reconcile_copy_mode_pane();
-        let now = Instant::now();
-        let due = self.frame_due(now);
-        if !self.frame_pacing.should_draw(due.is_some()) {
+    fn mark_dirty_native_windows(&mut self) {
+        let Some(server) = self.shared.runtime.protocol.as_ref() else {
             return;
+        };
+        for (&key, win) in &mut self.windows {
+            if let Some(active_tab) = self
+                .shared
+                .runtime
+                .manager
+                .window_active_tab(key)
+                .map(|tab| tab.id)
+            {
+                if server
+                    .tab_sessions(active_tab)
+                    .any(|session| session.is_render_dirty())
+                {
+                    win.needs_redraw = true;
+                }
+            }
         }
-        if let (true, Some((frame_elapsed, sync_active))) = (pipeline_trace_enabled(), due) {
-            tracing::info!(
-                target: "ultty::perf",
-                frame_elapsed_us = frame_elapsed.as_micros(),
-                sync_active,
-                "pipeline_render_scheduled"
-            );
-        }
-        self.render();
-        self.last_render = now;
-        if self.output_since_input {
-            self.input_sent_at = None;
-            self.output_since_input = false;
-        }
-        // A frame that skipped glyphs (atlas overflow) must draw again
-        // once the deferred eviction has run.
-        self.needs_redraw = self
-            .renderer
-            .ready()
-            .is_some_and(|renderer| renderer.frame_incomplete());
-    }
-
-    /// The window was hidden or shown again (`WindowEvent::Occluded`).
-    pub(super) fn set_occluded(&mut self, occluded: bool) {
-        if self.frame_pacing.set_occluded(occluded) {
-            self.needs_redraw = true;
-        }
-    }
-
-    /// Whether a frame is due at `now`, with the time since the last frame
-    /// and whether a synchronized update is active, for the pipeline trace.
-    ///
-    /// Frames are limited to about 60 per second. A synchronized update
-    /// (mode 2026) holds them to prevent partial frames, but only up to a
-    /// 200 ms safety timeout in case the app never ends it.
-    fn frame_due(&self, now: Instant) -> Option<(Duration, bool)> {
-        let sync_active = self.sync_update_active();
-        let frame_elapsed = now.duration_since(self.last_render);
-        let echo_after = self
-            .input_sent_at
-            .filter(|_| self.output_since_input)
-            .map(|sent| now.saturating_duration_since(sent));
-        let needs_redraw = self.needs_redraw && self.can_draw();
-        should_render(needs_redraw, frame_elapsed, sync_active, echo_after)
-            .then_some((frame_elapsed, sync_active))
     }
 }
 

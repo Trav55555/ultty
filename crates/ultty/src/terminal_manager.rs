@@ -244,6 +244,25 @@ impl ManagedTerminal {
     }
 }
 
+/// Unique identifier for a window inside one Ultty process (ADR 0027).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WindowKey(usize);
+
+impl WindowKey {
+    /// The initial window created with a fresh [`TerminalManager`].
+    pub const PRIMARY: Self = Self(0);
+
+    /// Create a window key from a raw counter value.
+    pub const fn new(id: usize) -> Self {
+        Self(id)
+    }
+
+    /// Get the raw counter value.
+    pub const fn raw(&self) -> usize {
+        self.0
+    }
+}
+
 /// Unique identifier for a tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TabId(usize);
@@ -264,6 +283,8 @@ impl TabId {
 pub struct Tab {
     /// Unique ID
     pub id: TabId,
+    /// The window that currently displays this tab.
+    pub window_id: WindowKey,
     /// This tab's panes in layout order, read-only: kept in step with
     /// `layout` by `split` and `remove_terminal`, the only writers.
     pub terminals: Vec<TerminalId>,
@@ -280,10 +301,16 @@ pub struct Tab {
 }
 
 impl Tab {
-    /// Create a new tab with a single terminal.
+    /// Create a new tab with a single terminal in the primary window.
     pub fn new(id: TabId, terminal_id: TerminalId) -> Self {
+        Self::new_in_window(id, terminal_id, WindowKey::PRIMARY)
+    }
+
+    /// Create a new tab with a single terminal owned by `window_id`.
+    pub fn new_in_window(id: TabId, terminal_id: TerminalId, window_id: WindowKey) -> Self {
         Self {
             id,
+            window_id,
             terminals: vec![terminal_id],
             focused_terminal: terminal_id,
             title: format!("Tab {}", id.0 + 1),
@@ -375,15 +402,41 @@ impl PaneArea {
     }
 }
 
+struct WindowRecord {
+    id: WindowKey,
+    tabs: Vec<TabId>,
+    active_tab: Option<TabId>,
+    pane_area: Option<PaneArea>,
+    default_cols: u16,
+    default_rows: u16,
+}
+
+impl WindowRecord {
+    fn new(id: WindowKey, cols: u16, rows: u16) -> Self {
+        Self {
+            id,
+            tabs: Vec::new(),
+            active_tab: None,
+            pane_area: None,
+            default_cols: cols,
+            default_rows: rows,
+        }
+    }
+}
+
 pub struct TerminalManager {
     /// All managed terminals
     terminals: Vec<ManagedTerminal>,
     /// Bounded process outcomes, independent of pane/grid retention.
     completed_jobs: VecDeque<ProcessJob>,
-    /// All tabs
+    /// All tabs across every window
     tabs: Vec<Tab>,
-    /// Currently active tab
-    active_tab: TabId,
+    /// Per-window tab lists, active tabs, and pane layout areas (ADR 0027)
+    windows: Vec<WindowRecord>,
+    /// Window currently targeted by window-unqualified operations
+    focused_window: WindowKey,
+    /// Next window key counter
+    next_window_id: usize,
     /// Next terminal ID
     next_terminal_id: usize,
     /// Next tab ID
@@ -410,9 +463,6 @@ pub struct TerminalManager {
     inherit_working_directory: bool,
     /// This machine's hostname, to tell a local OSC 7 URI from a remote one.
     hostname: String,
-    /// Where panes are laid out, once the window has a size. Splits,
-    /// closes and divider drags re-lay panes out within it.
-    pane_area: Option<PaneArea>,
     /// Counts the pane layouts done (`layout_panes`), so a caller can tell
     /// with one compare that pane grids may have changed since it looked.
     layout_generation: u64,
@@ -507,16 +557,36 @@ impl TerminalManager {
         self.close_on_exit
     }
 
-    fn push_terminal(&mut self, terminal: ManagedTerminal) {
+    fn window_record(&self, window: WindowKey) -> Option<&WindowRecord> {
+        self.windows.iter().find(|record| record.id == window)
+    }
+
+    fn window_record_mut(&mut self, window: WindowKey) -> Option<&mut WindowRecord> {
+        self.windows.iter_mut().find(|record| record.id == window)
+    }
+
+    fn ensure_window_record(&mut self, window: WindowKey) -> &mut WindowRecord {
+        if let Some(pos) = self.windows.iter().position(|record| record.id == window) {
+            return &mut self.windows[pos];
+        }
+        let record = WindowRecord::new(window, self.default_cols, self.default_rows);
+        self.windows.push(record);
+        self.windows.last_mut().expect("window record just pushed")
+    }
+
+    fn push_terminal(&mut self, terminal: ManagedTerminal, window: WindowKey) {
         if let Some(waker) = &self.waker {
             terminal.event_loop.set_waker(Arc::clone(waker));
         }
+        let area = self
+            .window_record(window)
+            .and_then(|record| record.pane_area);
         {
             let mut state = terminal.event_loop.terminal();
             state.set_theme_colors(self.theme_colors.clone());
             state.set_scrollback_limit(self.scrollback_lines);
             state.set_image_storage_limit(self.image_storage_limit);
-            if let Some(area) = self.pane_area {
+            if let Some(area) = area {
                 let (width, height) = area.cell_pixel_size();
                 state.set_cell_pixel_size(width, height);
             }
@@ -561,7 +631,9 @@ impl TerminalManager {
             terminals: Vec::new(),
             completed_jobs: VecDeque::new(),
             tabs: Vec::new(),
-            active_tab: TabId(0),
+            windows: vec![WindowRecord::new(WindowKey::PRIMARY, cols, rows)],
+            focused_window: WindowKey::PRIMARY,
+            next_window_id: 1,
             next_terminal_id: 0,
             next_tab_id: 0,
             default_cols: cols,
@@ -573,9 +645,156 @@ impl TerminalManager {
             close_on_exit: true,
             inherit_working_directory: true,
             hostname: crate::inherit_dir::hostname(),
-            pane_area: None,
             layout_generation: 0,
         }
+    }
+
+    /// The primary window created when the manager starts.
+    pub fn primary_window(&self) -> WindowKey {
+        self.windows
+            .first()
+            .map(|record| record.id)
+            .unwrap_or(WindowKey::PRIMARY)
+    }
+
+    /// The currently focused window.
+    pub fn focused_window(&self) -> WindowKey {
+        self.focused_window
+    }
+
+    /// Focus an open window. Returns `false` if `window` is not known.
+    pub fn set_focused_window(&mut self, window: WindowKey) -> bool {
+        if self.window_record(window).is_none() {
+            return false;
+        }
+        self.focused_window = window;
+        true
+    }
+
+    /// Open window keys in creation order.
+    pub fn window_ids(&self) -> Vec<WindowKey> {
+        self.windows.iter().map(|record| record.id).collect()
+    }
+
+    /// Number of tracked windows.
+    pub fn window_count(&self) -> usize {
+        self.windows.len()
+    }
+
+    /// Allocate a new window with one initial tab and focus it.
+    pub fn create_window(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        tab_env: TabEnvFn,
+    ) -> io::Result<(WindowKey, TabId)> {
+        let window_id = WindowKey(self.next_window_id);
+        self.next_window_id += 1;
+        self.windows.push(WindowRecord::new(window_id, cols, rows));
+        match self.create_tab_in_window(window_id, tab_env) {
+            Ok(tab_id) => {
+                self.focused_window = window_id;
+                Ok((window_id, tab_id))
+            }
+            Err(err) => {
+                self.windows.retain(|record| record.id != window_id);
+                Err(err)
+            }
+        }
+    }
+
+    /// Close a window and every tab and terminal belonging to it.
+    pub fn close_window(&mut self, window: WindowKey) -> bool {
+        let Some(pos) = self.windows.iter().position(|record| record.id == window) else {
+            return false;
+        };
+        let record = self.windows.remove(pos);
+        for tab_id in record.tabs {
+            if let Some(tab_pos) = self.tabs.iter().position(|tab| tab.id == tab_id) {
+                let tab = self.tabs.remove(tab_pos);
+                for terminal_id in tab.terminals {
+                    self.remember_closed_job(terminal_id);
+                    self.terminals.retain(|t| t.id != terminal_id);
+                }
+            }
+        }
+        if self.focused_window == window {
+            self.focused_window = self
+                .windows
+                .first()
+                .map(|record| record.id)
+                .unwrap_or(WindowKey::PRIMARY);
+        }
+        true
+    }
+
+    /// The window that owns `tab_id`.
+    pub fn window_for_tab(&self, tab_id: TabId) -> Option<WindowKey> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.window_id)
+    }
+
+    /// The window that owns `pane`.
+    pub fn window_for_pane(&self, pane: TerminalId) -> Option<WindowKey> {
+        let tab_id = self.terminal(pane)?.tab_id;
+        self.window_for_tab(tab_id)
+    }
+
+    /// Tabs owned by `window` in that window's tab-bar order.
+    pub fn window_tabs(&self, window: WindowKey) -> Vec<&Tab> {
+        let Some(record) = self.window_record(window) else {
+            return Vec::new();
+        };
+        record
+            .tabs
+            .iter()
+            .filter_map(|&tab_id| self.tabs.iter().find(|tab| tab.id == tab_id))
+            .collect()
+    }
+
+    /// Number of tabs owned by `window`.
+    pub fn window_tab_count(&self, window: WindowKey) -> usize {
+        self.window_record(window)
+            .map(|record| record.tabs.len())
+            .unwrap_or(0)
+    }
+
+    /// Active tab of every open window.
+    pub fn active_tab_ids(&self) -> Vec<TabId> {
+        self.windows
+            .iter()
+            .filter_map(|record| record.active_tab)
+            .collect()
+    }
+
+    fn is_active_tab(&self, tab_id: TabId) -> bool {
+        self.windows
+            .iter()
+            .any(|record| record.active_tab == Some(tab_id))
+    }
+
+    /// Whether `window` has no live terminals remaining.
+    pub fn window_is_empty(&self, window: WindowKey) -> bool {
+        let Some(record) = self.window_record(window) else {
+            return true;
+        };
+        let mut saw_terminal = false;
+        for &tab_id in &record.tabs {
+            let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+                continue;
+            };
+            for &pane in &tab.terminals {
+                if let Some(terminal) = self.terminal(pane) {
+                    saw_terminal = true;
+                    if !self.close_on_exit || !terminal.has_exited() {
+                        return false;
+                    }
+                }
+            }
+        }
+        !saw_terminal || self.close_on_exit
     }
 
     /// Create a new tab with a new terminal and no extra shell environment.
@@ -583,19 +802,37 @@ impl TerminalManager {
         self.create_tab_with_env(&mut no_tab_env)
     }
 
-    /// Create a new tab whose shell environment comes from `tab_env`.
+    /// Create a new tab in the focused window whose shell environment comes
+    /// from `tab_env`.
     pub fn create_tab_with_env(&mut self, tab_env: TabEnvFn) -> io::Result<TabId> {
+        self.create_tab_in_window(self.focused_window, tab_env)
+    }
+
+    /// Create a new tab in `window` whose shell environment comes from `tab_env`.
+    pub fn create_tab_in_window(
+        &mut self,
+        window: WindowKey,
+        tab_env: TabEnvFn,
+    ) -> io::Result<TabId> {
+        self.ensure_window_record(window);
         let tab_id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
 
         let env = tab_env(tab_id)?;
-        let source = self.focused_terminal().map(|t| t.id);
-        let terminal_id = self.create_terminal_with_env(tab_id, &env, source)?;
+        let source = self
+            .window_focused_terminal(window)
+            .or_else(|| self.focused_terminal())
+            .map(|t| t.id);
+        let terminal_id = self.create_terminal_with_env(window, tab_id, &env, source)?;
 
-        let mut tab = Tab::new(tab_id, terminal_id);
+        let mut tab = Tab::new_in_window(tab_id, terminal_id, window);
         tab.shell_env = env;
         self.tabs.push(tab);
-        self.active_tab = tab_id;
+        if let Some(record) = self.window_record_mut(window) {
+            record.tabs.push(tab_id);
+            record.active_tab = Some(tab_id);
+        }
+        self.relayout_window(window);
 
         Ok(tab_id)
     }
@@ -617,49 +854,73 @@ impl TerminalManager {
         };
 
         let tab = self.tabs.remove(tab_idx);
+        let window_id = tab.window_id;
 
-        // Remove all terminals in this tab
         for terminal_id in tab.terminals {
             self.remember_closed_job(terminal_id);
             self.terminals.retain(|t| t.id != terminal_id);
         }
 
-        // Update active tab if needed
-        if self.active_tab == tab_id && !self.tabs.is_empty() {
-            let new_idx = tab_idx.min(self.tabs.len() - 1);
-            self.active_tab = self.tabs[new_idx].id;
+        if let Some(record) = self.window_record_mut(window_id) {
+            let removed_pos = record.tabs.iter().position(|&id| id == tab_id);
+            if let Some(pos) = removed_pos {
+                record.tabs.remove(pos);
+            }
+            if record.active_tab == Some(tab_id) {
+                record.active_tab = if record.tabs.is_empty() {
+                    None
+                } else {
+                    let new_idx = removed_pos
+                        .unwrap_or(0)
+                        .min(record.tabs.len().saturating_sub(1));
+                    Some(record.tabs[new_idx])
+                };
+            }
         }
 
         true
     }
 
-    /// Reorder tabs by moving a tab from one index to another.
+    /// Reorder tabs in the focused window by moving a tab from one index to another.
     pub fn reorder_tabs(&mut self, from: usize, to: usize) -> bool {
-        if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
+        self.reorder_window_tabs(self.focused_window, from, to)
+    }
+
+    /// Reorder tabs owned by `window` by moving a tab from `from` to `to`.
+    pub fn reorder_window_tabs(&mut self, window: WindowKey, from: usize, to: usize) -> bool {
+        let Some(record) = self.window_record_mut(window) else {
+            return false;
+        };
+        if from >= record.tabs.len() || to >= record.tabs.len() || from == to {
             return false;
         }
+        let tab_id = record.tabs.remove(from);
+        record.tabs.insert(to, tab_id);
 
-        let tab = self.tabs.remove(from);
-        self.tabs.insert(to, tab);
+        if self.windows.len() == 1 && from < self.tabs.len() && to < self.tabs.len() {
+            let tab = self.tabs.remove(from);
+            self.tabs.insert(to, tab);
+        }
         true
     }
 
     /// Create a new terminal (pane) in an existing tab, inheriting the
     /// tab's shell environment.
     fn create_terminal(&mut self, tab_id: TabId, source: TerminalId) -> io::Result<TerminalId> {
-        let env = self
+        let (window, env) = self
             .tabs
             .iter()
             .find(|tab| tab.id == tab_id)
-            .map(|tab| tab.shell_env.clone())
-            .unwrap_or_default();
-        self.create_terminal_with_env(tab_id, &env, Some(source))
+            .map(|tab| (tab.window_id, tab.shell_env.clone()))
+            .unwrap_or_else(|| (self.focused_window, Vec::new()));
+        self.create_terminal_with_env(window, tab_id, &env, Some(source))
     }
 
     /// Create a new terminal in `tab_id` whose shell gets `env`, starting in
     /// the directory of `source` when there is one to inherit.
     fn create_terminal_with_env(
         &mut self,
+        window: WindowKey,
         tab_id: TabId,
         env: &[(OsString, OsString)],
         source: Option<TerminalId>,
@@ -667,8 +928,16 @@ impl TerminalManager {
         let terminal_id = TerminalId(self.next_terminal_id);
         self.next_terminal_id += 1;
 
-        let (cols, rows) = (self.default_cols, self.default_rows);
-        let cell_px = self.pane_area.map(|area| area.cell_pixel_size());
+        let (cols, rows, cell_px) = self
+            .window_record(window)
+            .map(|record| {
+                (
+                    record.default_cols,
+                    record.default_rows,
+                    record.pane_area.map(|area| area.cell_pixel_size()),
+                )
+            })
+            .unwrap_or((self.default_cols, self.default_rows, None));
         let terminal = match self.inherited_directory(source) {
             Some(dir) => {
                 ManagedTerminal::new_with_dir(terminal_id, tab_id, cols, rows, cell_px, &dir, env)?
@@ -676,32 +945,60 @@ impl TerminalManager {
             None => ManagedTerminal::new(terminal_id, tab_id, cols, rows, cell_px, env)?,
         };
 
-        self.push_terminal(terminal);
+        self.push_terminal(terminal, window);
         Ok(terminal_id)
     }
 
-    /// Get the active tab.
-    pub fn active_tab(&self) -> Option<&Tab> {
-        self.tabs.iter().find(|t| t.id == self.active_tab)
+    /// Get the active tab of `window`.
+    pub fn window_active_tab(&self, window: WindowKey) -> Option<&Tab> {
+        let active = self.window_record(window)?.active_tab?;
+        self.tabs.iter().find(|t| t.id == active)
     }
 
-    /// Get the active tab mutably.
-    pub fn active_tab_mut(&mut self) -> Option<&mut Tab> {
-        let active = self.active_tab;
+    /// Get the active tab of `window` mutably.
+    pub fn window_active_tab_mut(&mut self, window: WindowKey) -> Option<&mut Tab> {
+        let active = self.window_record(window)?.active_tab?;
         self.tabs.iter_mut().find(|t| t.id == active)
+    }
+
+    /// Get the active tab of the focused window.
+    pub fn active_tab(&self) -> Option<&Tab> {
+        self.window_active_tab(self.focused_window)
+    }
+
+    /// Get the active tab of the focused window mutably.
+    pub fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        self.window_active_tab_mut(self.focused_window)
+    }
+
+    /// Get the currently focused terminal of `window`.
+    pub fn window_focused_terminal(&self, window: WindowKey) -> Option<&ManagedTerminal> {
+        let tab = self.window_active_tab(window)?;
+        self.terminals.iter().find(|t| t.id == tab.focused_terminal)
+    }
+
+    /// Get the currently focused terminal of `window` mutably.
+    pub fn window_focused_terminal_mut(
+        &mut self,
+        window: WindowKey,
+    ) -> Option<&mut ManagedTerminal> {
+        let focused_id = self.window_active_tab(window)?.focused_terminal;
+        self.terminals.iter_mut().find(|t| t.id == focused_id)
+    }
+
+    /// Get the focused terminal ID in `window`'s active tab.
+    pub fn window_focused_terminal_id(&self, window: WindowKey) -> Option<TerminalId> {
+        self.window_active_tab(window).map(|t| t.focused_terminal)
     }
 
     /// Get the currently focused terminal.
     pub fn focused_terminal(&self) -> Option<&ManagedTerminal> {
-        let tab = self.active_tab()?;
-        self.terminals.iter().find(|t| t.id == tab.focused_terminal)
+        self.window_focused_terminal(self.focused_window)
     }
 
     /// Get the currently focused terminal mutably.
     pub fn focused_terminal_mut(&mut self) -> Option<&mut ManagedTerminal> {
-        let tab = self.active_tab()?;
-        let focused_id = tab.focused_terminal;
-        self.terminals.iter_mut().find(|t| t.id == focused_id)
+        self.window_focused_terminal_mut(self.focused_window)
     }
 
     /// Get a terminal by ID.
@@ -721,7 +1018,22 @@ impl TerminalManager {
         }
     }
 
-    /// Get all tabs.
+    /// Clear dirty flags only on terminals shown in `window`'s active tab.
+    pub fn clear_window_active_dirty(&mut self, window: WindowKey) {
+        let Some(panes) = self
+            .window_active_tab(window)
+            .map(|tab| tab.terminals.clone())
+        else {
+            return;
+        };
+        for pane in panes {
+            if let Some(terminal) = self.terminal_mut(pane) {
+                terminal.event_loop.terminal_mut().clear_dirty();
+            }
+        }
+    }
+
+    /// Get all tabs across every window.
     pub fn tabs(&self) -> &[Tab] {
         &self.tabs
     }
@@ -740,7 +1052,7 @@ impl TerminalManager {
             return tab.default_title();
         };
 
-        if tab.id == self.active_tab {
+        if self.is_active_tab(tab.id) {
             if let Some(app) = terminal.event_loop.foreground_process_name() {
                 return app;
             }
@@ -776,58 +1088,96 @@ impl TerminalManager {
             .collect()
     }
 
-    /// Get number of tabs.
+    /// Get display titles for every tab owned by `window`, in tab-bar order.
+    pub fn window_tab_display_titles(&self, window: WindowKey) -> Vec<String> {
+        self.window_tabs(window)
+            .into_iter()
+            .map(|tab| self.tab_display_title(tab.id))
+            .collect()
+    }
+
+    /// Get number of tabs across all windows.
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
     }
 
-    /// Switch to the next tab.
-    pub fn next_tab(&mut self) {
-        if self.tabs.is_empty() {
+    /// Switch to the next tab in `window`.
+    pub fn next_tab_in_window(&mut self, window: WindowKey) {
+        let Some(record) = self.window_record_mut(window) else {
+            return;
+        };
+        if record.tabs.is_empty() {
             return;
         }
-
-        let current_idx = self
-            .tabs
-            .iter()
-            .position(|t| t.id == self.active_tab)
+        let current_idx = record
+            .active_tab
+            .and_then(|active| record.tabs.iter().position(|&id| id == active))
             .unwrap_or(0);
-        let next_idx = (current_idx + 1) % self.tabs.len();
-        self.active_tab = self.tabs[next_idx].id;
+        let next_idx = (current_idx + 1) % record.tabs.len();
+        record.active_tab = Some(record.tabs[next_idx]);
+    }
+
+    /// Switch to the previous tab in `window`.
+    pub fn prev_tab_in_window(&mut self, window: WindowKey) {
+        let Some(record) = self.window_record_mut(window) else {
+            return;
+        };
+        if record.tabs.is_empty() {
+            return;
+        }
+        let current_idx = record
+            .active_tab
+            .and_then(|active| record.tabs.iter().position(|&id| id == active))
+            .unwrap_or(0);
+        let prev_idx = if current_idx == 0 {
+            record.tabs.len() - 1
+        } else {
+            current_idx - 1
+        };
+        record.active_tab = Some(record.tabs[prev_idx]);
+    }
+
+    /// Switch to a specific tab by index within `window`.
+    pub fn switch_to_tab_in_window(&mut self, window: WindowKey, index: usize) {
+        if let Some(record) = self.window_record_mut(window) {
+            if index < record.tabs.len() {
+                record.active_tab = Some(record.tabs[index]);
+            }
+        }
+    }
+
+    /// Switch to a specific tab by ID within its owning window.
+    pub fn switch_to_tab_id(&mut self, tab_id: TabId) -> bool {
+        let Some(window) = self.window_for_tab(tab_id) else {
+            return false;
+        };
+        if let Some(record) = self.window_record_mut(window) {
+            record.active_tab = Some(tab_id);
+            return true;
+        }
+        false
+    }
+
+    /// Switch to the next tab.
+    pub fn next_tab(&mut self) {
+        self.next_tab_in_window(self.focused_window);
     }
 
     /// Switch to the previous tab.
     pub fn prev_tab(&mut self) {
-        if self.tabs.is_empty() {
-            return;
-        }
-
-        let current_idx = self
-            .tabs
-            .iter()
-            .position(|t| t.id == self.active_tab)
-            .unwrap_or(0);
-        let prev_idx = if current_idx == 0 {
-            self.tabs.len() - 1
-        } else {
-            current_idx - 1
-        };
-        self.active_tab = self.tabs[prev_idx].id;
+        self.prev_tab_in_window(self.focused_window);
     }
 
     /// Switch to a specific tab by index.
     pub fn switch_to_tab(&mut self, index: usize) {
-        if index < self.tabs.len() {
-            self.active_tab = self.tabs[index].id;
-        }
+        self.switch_to_tab_in_window(self.focused_window, index);
     }
 
-    /// Resize all terminals.
-    /// Size every pane's terminal to its share of `area`, in every tab, and
-    /// remember `area` so later splits, closes and divider drags keep panes
-    /// sized. Unchanged grids avoid reflow; pixel metrics still reach the PTY.
-    pub fn layout_panes(&mut self, area: PaneArea) -> io::Result<()> {
-        self.pane_area = Some(area);
+    /// Size every pane's terminal in `window` to its share of `area` and
+    /// remember `area` for later splits, closes, and divider drags in that
+    /// window. Unchanged grids avoid reflow; pixel metrics still reach the PTY.
+    pub fn layout_window_panes(&mut self, window: WindowKey, area: PaneArea) -> io::Result<()> {
+        self.ensure_window_record(window);
         self.layout_generation = self.layout_generation.wrapping_add(1);
         let (cols, rows) = crate::geometry::grid_dimensions_for(
             area.width,
@@ -835,11 +1185,18 @@ impl TerminalManager {
             area.cell_width,
             area.cell_height,
         );
-        self.default_cols = cols;
-        self.default_rows = rows;
+        if let Some(record) = self.window_record_mut(window) {
+            record.pane_area = Some(area);
+            record.default_cols = cols;
+            record.default_rows = rows;
+        }
+        if window == self.focused_window {
+            self.default_cols = cols;
+            self.default_rows = rows;
+        }
 
         let mut sizes = Vec::new();
-        for tab in &self.tabs {
+        for tab in self.tabs.iter().filter(|tab| tab.window_id == window) {
             for (terminal_id, (_, _, width, height)) in
                 tab.visible_rects((0.0, 0.0, area.width, area.height))
             {
@@ -863,13 +1220,16 @@ impl TerminalManager {
                 state.set_cell_pixel_size(cell_width, cell_height);
                 (state.dimensions(), cell_changed)
             };
-            // A zoom or font change moves the pixel size without moving the
-            // grid; the PTY reports pixels, so it needs the new size too.
             if cell_changed || (current.cols, current.rows) != (cols, rows) {
                 terminal.resize(cols, rows)?;
             }
         }
         Ok(())
+    }
+
+    /// Size every pane's terminal in the focused window to its share of `area`.
+    pub fn layout_panes(&mut self, area: PaneArea) -> io::Result<()> {
+        self.layout_window_panes(self.focused_window, area)
     }
 
     /// How many times panes have been laid out; see `layout_generation`.
@@ -902,11 +1262,28 @@ impl TerminalManager {
         })
     }
 
-    /// Lay panes out again after their number or ratios changed.
-    fn relayout(&mut self) {
-        if let Some(area) = self.pane_area {
-            if let Err(e) = self.layout_panes(area) {
+    /// Lay `window`'s panes out again after their number or ratios changed.
+    fn relayout_window(&mut self, window: WindowKey) {
+        if let Some(area) = self
+            .window_record(window)
+            .and_then(|record| record.pane_area)
+        {
+            if let Err(e) = self.layout_window_panes(window, area) {
                 tracing::warn!("Failed to resize panes: {}", e);
+            }
+        }
+    }
+
+    /// Lay every window's panes out again using each window's own pane area.
+    fn relayout(&mut self) {
+        let areas: Vec<(WindowKey, PaneArea)> = self
+            .windows
+            .iter()
+            .filter_map(|record| record.pane_area.map(|area| (record.id, area)))
+            .collect();
+        for (window, area) in areas {
+            if let Err(e) = self.layout_window_panes(window, area) {
+                tracing::warn!("Failed to resize panes for window {}: {}", window.raw(), e);
             }
         }
     }
@@ -1034,9 +1411,26 @@ impl TerminalManager {
             self.terminals.retain(|t| t.id != terminal_id);
         }
 
-        // Remove empty tabs (except keep at least one)
-        if self.tabs.len() > 1 {
-            self.tabs.retain(|t| !t.is_empty());
+        let multi_window = self.windows.len() > 1;
+        let mut drop_tabs = Vec::new();
+        for record in &mut self.windows {
+            let allow_empty_removal = multi_window || record.tabs.len() > 1;
+            if allow_empty_removal {
+                record.tabs.retain(|&tab_id| {
+                    let keep = self
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.id == tab_id)
+                        .is_some_and(|tab| !tab.is_empty());
+                    if !keep {
+                        drop_tabs.push(tab_id);
+                    }
+                    keep
+                });
+            }
+        }
+        if !drop_tabs.is_empty() {
+            self.tabs.retain(|tab| !drop_tabs.contains(&tab.id));
         }
 
         self.repair_active_tab();
@@ -1046,12 +1440,14 @@ impl TerminalManager {
     }
 
     fn repair_active_tab(&mut self) {
-        if self.tabs.iter().any(|tab| tab.id == self.active_tab) {
-            return;
-        }
-
-        if let Some(tab) = self.tabs.first() {
-            self.active_tab = tab.id;
+        for record in &mut self.windows {
+            if record
+                .active_tab
+                .is_some_and(|active| record.tabs.contains(&active))
+            {
+                continue;
+            }
+            record.active_tab = record.tabs.first().copied();
         }
     }
 
@@ -1072,13 +1468,22 @@ impl TerminalManager {
         self.split_focused(SplitDirection::Vertical)
     }
 
-    /// Put a new pane next to the focused one. Splitting along the focused
-    /// pane's own split adds a sibling; splitting across it nests.
-    fn split_focused(&mut self, direction: SplitDirection) -> io::Result<Option<TerminalId>> {
-        let Some(target) = self.focused_terminal_id() else {
+    /// Split the focused pane of `window` side by side or stacked.
+    pub fn split_window_focused(
+        &mut self,
+        window: WindowKey,
+        direction: SplitDirection,
+    ) -> io::Result<Option<TerminalId>> {
+        let Some(target) = self.window_focused_terminal_id(window) else {
             return Ok(None);
         };
         self.split_pane(target, direction)
+    }
+
+    /// Put a new pane next to the focused one. Splitting along the focused
+    /// pane's own split adds a sibling; splitting across it nests.
+    fn split_focused(&mut self, direction: SplitDirection) -> io::Result<Option<TerminalId>> {
+        self.split_window_focused(self.focused_window, direction)
     }
 
     /// Put a new shell pane next to `target`, in whatever tab holds it.
@@ -1120,14 +1525,18 @@ impl TerminalManager {
         direction: SplitDirection,
         spawn: impl FnOnce(&mut Self, TabId) -> io::Result<TerminalId>,
     ) -> io::Result<Option<TerminalId>> {
-        let Some(tab_id) = self.terminal(target).map(|t| t.tab_id) else {
+        let Some((tab_id, window_id)) = self
+            .terminal(target)
+            .map(|t| t.tab_id)
+            .and_then(|tab_id| Some((tab_id, self.window_for_tab(tab_id)?)))
+        else {
             return Ok(None);
         };
         let terminal_id = spawn(self, tab_id)?;
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             tab.split(target, direction, terminal_id);
         }
-        self.relayout();
+        self.relayout_window(window_id);
         Ok(Some(terminal_id))
     }
 
@@ -1140,21 +1549,45 @@ impl TerminalManager {
             .collect()
     }
 
+    /// Number of panes in `window`'s active tab.
+    pub fn window_pane_count(&self, window: WindowKey) -> usize {
+        self.window_active_tab(window)
+            .map(|t| t.terminals.len())
+            .unwrap_or(0)
+    }
+
     pub fn pane_count(&self) -> usize {
-        self.active_tab().map(|t| t.terminals.len()).unwrap_or(0)
+        self.window_pane_count(self.focused_window)
+    }
+
+    /// `window`'s active tab panes and their rectangles within `width` x
+    /// `height`, in layout order.
+    pub fn window_active_pane_rects(
+        &self,
+        window: WindowKey,
+        width: f32,
+        height: f32,
+    ) -> Vec<(TerminalId, Rect)> {
+        self.window_active_tab(window)
+            .map(|tab| tab.visible_rects((0.0, 0.0, width, height)))
+            .unwrap_or_default()
     }
 
     /// The active tab's panes and their rectangles within a `width` x
     /// `height` area, in layout order.
     pub fn active_pane_rects(&self, width: f32, height: f32) -> Vec<(TerminalId, Rect)> {
-        self.active_tab()
-            .map(|tab| tab.visible_rects((0.0, 0.0, width, height)))
-            .unwrap_or_default()
+        self.window_active_pane_rects(self.focused_window, width, height)
     }
 
-    /// Move focus to the nearest pane on one side of the focused one.
-    pub fn focus_direction(&mut self, direction: FocusDirection, width: f32, height: f32) {
-        let Some(tab) = self.active_tab_mut() else {
+    /// Move focus to the nearest pane on one side of the focused one in `window`.
+    pub fn window_focus_direction(
+        &mut self,
+        window: WindowKey,
+        direction: FocusDirection,
+        width: f32,
+        height: f32,
+    ) {
+        let Some(tab) = self.window_active_tab_mut(window) else {
             return;
         };
         if let Some(next) =
@@ -1162,14 +1595,19 @@ impl TerminalManager {
                 .neighbor((0.0, 0.0, width, height), tab.focused_terminal, direction)
         {
             if tab.focus(next) {
-                self.relayout();
+                self.relayout_window(window);
             }
         }
     }
 
-    /// Focus the next pane in the active tab.
-    pub fn focus_next_pane(&mut self) {
-        let Some(tab) = self.active_tab_mut() else {
+    /// Move focus to the nearest pane on one side of the focused one.
+    pub fn focus_direction(&mut self, direction: FocusDirection, width: f32, height: f32) {
+        self.window_focus_direction(self.focused_window, direction, width, height);
+    }
+
+    /// Focus the next pane in `window`'s active tab.
+    pub fn window_focus_next_pane(&mut self, window: WindowKey) {
+        let Some(tab) = self.window_active_tab_mut(window) else {
             return;
         };
 
@@ -1185,13 +1623,18 @@ impl TerminalManager {
 
         let next_idx = (current_idx + 1) % tab.terminals.len();
         if tab.focus(tab.terminals[next_idx]) {
-            self.relayout();
+            self.relayout_window(window);
         }
     }
 
-    /// Focus the previous pane in the active tab.
-    pub fn focus_prev_pane(&mut self) {
-        let Some(tab) = self.active_tab_mut() else {
+    /// Focus the next pane in the active tab.
+    pub fn focus_next_pane(&mut self) {
+        self.window_focus_next_pane(self.focused_window);
+    }
+
+    /// Focus the previous pane in `window`'s active tab.
+    pub fn window_focus_prev_pane(&mut self, window: WindowKey) {
+        let Some(tab) = self.window_active_tab_mut(window) else {
             return;
         };
 
@@ -1211,19 +1654,21 @@ impl TerminalManager {
             current_idx - 1
         };
         if tab.focus(tab.terminals[prev_idx]) {
-            self.relayout();
+            self.relayout_window(window);
         }
     }
 
-    /// Close the currently focused pane.
-    ///
-    /// Returns true if a pane was closed, false if it was the last pane.
-    pub fn close_focused_pane(&mut self) -> bool {
-        let Some(tab) = self.active_tab() else {
+    /// Focus the previous pane in the active tab.
+    pub fn focus_prev_pane(&mut self) {
+        self.window_focus_prev_pane(self.focused_window);
+    }
+
+    /// Close the currently focused pane in `window`.
+    pub fn close_window_focused_pane(&mut self, window: WindowKey) -> bool {
+        let Some(tab) = self.window_active_tab(window) else {
             return false;
         };
 
-        // Don't close if it's the only pane
         if tab.terminals.len() <= 1 {
             return false;
         }
@@ -1231,22 +1676,27 @@ impl TerminalManager {
         let focused_id = tab.focused_terminal;
         let tab_id = tab.id;
 
-        // Remove terminal from tab
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
             tab.remove_terminal(focused_id);
         }
 
-        // Remove the terminal itself
         self.remember_closed_job(focused_id);
         self.terminals.retain(|t| t.id != focused_id);
-        self.relayout();
+        self.relayout_window(window);
 
         true
     }
 
-    /// Get all terminals in the active tab for rendering.
-    pub fn active_tab_terminals(&self) -> Vec<&ManagedTerminal> {
-        let Some(tab) = self.active_tab() else {
+    /// Close the currently focused pane.
+    ///
+    /// Returns true if a pane was closed, false if it was the last pane.
+    pub fn close_focused_pane(&mut self) -> bool {
+        self.close_window_focused_pane(self.focused_window)
+    }
+
+    /// Get all terminals in `window`'s active tab for rendering.
+    pub fn window_active_tab_terminals(&self, window: WindowKey) -> Vec<&ManagedTerminal> {
+        let Some(tab) = self.window_active_tab(window) else {
             return Vec::new();
         };
 
@@ -1256,16 +1706,75 @@ impl TerminalManager {
             .collect()
     }
 
-    /// Whether the pane is in the active tab, so its output shows.
-    pub fn is_on_screen(&self, id: TerminalId) -> bool {
-        self.active_tab().is_some_and(|tab| {
+    /// Get all terminals in the active tab for rendering.
+    pub fn active_tab_terminals(&self) -> Vec<&ManagedTerminal> {
+        self.window_active_tab_terminals(self.focused_window)
+    }
+
+    /// Whether `id` is shown on screen in `window`.
+    pub fn is_on_screen_in_window(&self, window: WindowKey, id: TerminalId) -> bool {
+        self.window_active_tab(window).is_some_and(|tab| {
             tab.terminals.contains(&id) && tab.zoomed_pane.is_none_or(|zoomed| zoomed == id)
         })
     }
 
+    /// Whether the pane is shown in any open window's active tab.
+    pub fn is_on_screen(&self, id: TerminalId) -> bool {
+        self.windows
+            .iter()
+            .any(|record| self.is_on_screen_in_window(record.id, id))
+    }
+
     /// Get the focused terminal ID in the active tab.
     pub fn focused_terminal_id(&self) -> Option<TerminalId> {
-        self.active_tab().map(|t| t.focused_terminal)
+        self.window_focused_terminal_id(self.focused_window)
+    }
+
+    /// Create a new tab in `window` running a custom command, with the shell
+    /// environment supplied by `tab_env`.
+    pub fn create_tab_with_command_in_window(
+        &mut self,
+        window: WindowKey,
+        command: &str,
+        args: &[String],
+        working_dir: Option<&str>,
+        title: Option<&str>,
+        tab_env: TabEnvFn,
+    ) -> io::Result<TabId> {
+        self.ensure_window_record(window);
+        let tab_id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
+
+        let env = tab_env(tab_id)?;
+        let terminal_id = self.create_terminal_with_command_in_window(
+            window,
+            tab_id,
+            command,
+            args,
+            working_dir,
+            &env,
+        )?;
+
+        let mut tab = Tab::new_in_window(tab_id, terminal_id, window);
+        tab.shell_env = env;
+        if let Some(title) = title {
+            tab.title = title.to_string();
+        }
+
+        self.tabs.push(tab);
+        if let Some(record) = self.window_record_mut(window) {
+            record.tabs.push(tab_id);
+            record.active_tab = Some(tab_id);
+        }
+
+        if let Some(terminal) = self.terminal_mut(terminal_id) {
+            if let Some(title) = title {
+                terminal.title = title.to_string();
+            }
+        }
+
+        self.relayout_window(window);
+        Ok(tab_id)
     }
 
     /// Create a new tab running a custom command, with the shell
@@ -1278,30 +1787,14 @@ impl TerminalManager {
         title: Option<&str>,
         tab_env: TabEnvFn,
     ) -> io::Result<TabId> {
-        let tab_id = TabId(self.next_tab_id);
-        self.next_tab_id += 1;
-
-        let env = tab_env(tab_id)?;
-        let terminal_id =
-            self.create_terminal_with_command(tab_id, command, args, working_dir, &env)?;
-
-        let mut tab = Tab::new(tab_id, terminal_id);
-        tab.shell_env = env;
-        if let Some(title) = title {
-            tab.title = title.to_string();
-        }
-
-        self.tabs.push(tab);
-        self.active_tab = tab_id;
-
-        // Update terminal title
-        if let Some(terminal) = self.terminal_mut(terminal_id) {
-            if let Some(title) = title {
-                terminal.title = title.to_string();
-            }
-        }
-
-        Ok(tab_id)
+        self.create_tab_with_command_in_window(
+            self.focused_window,
+            command,
+            args,
+            working_dir,
+            title,
+            tab_env,
+        )
     }
 
     /// Create a terminal with a custom command.
@@ -1313,16 +1806,26 @@ impl TerminalManager {
         working_dir: Option<&str>,
         env: &[(OsString, OsString)],
     ) -> io::Result<TerminalId> {
+        let window = self.window_for_tab(tab_id).unwrap_or(self.focused_window);
+        self.create_terminal_with_command_in_window(window, tab_id, command, args, working_dir, env)
+    }
+
+    fn create_terminal_with_command_in_window(
+        &mut self,
+        window: WindowKey,
+        tab_id: TabId,
+        command: &str,
+        args: &[String],
+        working_dir: Option<&str>,
+        env: &[(OsString, OsString)],
+    ) -> io::Result<TerminalId> {
         let terminal_id = TerminalId(self.next_terminal_id);
         self.next_terminal_id += 1;
 
-        // Build args with command as argv[0]
         let mut full_args: Vec<&str> = vec![command];
         for arg in args {
             full_args.push(arg);
         }
-        // A command that is just a shell (`bash`, `zsh -l`) gets the shell
-        // integration like a default shell; anything else is left alone.
         let injected = crate::pty::shell_integration::spawn_plan(command, &full_args, env);
         let (full_args, env): (Vec<&str>, &[(OsString, OsString)]) = match &injected {
             Some((injected_args, injected_env)) => (
@@ -1332,8 +1835,16 @@ impl TerminalManager {
             None => (full_args, env),
         };
 
-        // Explicit launches confirm both directory setup and exec before
-        // publishing the pane; restored shell directories retain their fallback.
+        let (cols, rows, cell_px) = self
+            .window_record(window)
+            .map(|record| {
+                (
+                    record.default_cols,
+                    record.default_rows,
+                    record.pane_area.map(|area| area.cell_pixel_size()),
+                )
+            })
+            .unwrap_or((self.default_cols, self.default_rows, None));
         let dir = working_dir
             .map(std::path::PathBuf::from)
             .unwrap_or_else(crate::pty::current_dir);
@@ -1341,16 +1852,11 @@ impl TerminalManager {
             command,
             &full_args,
             &dir,
-            PtySize::for_cells(
-                self.default_cols,
-                self.default_rows,
-                self.pane_area.map(|area| area.cell_pixel_size()),
-            ),
+            PtySize::for_cells(cols, rows, cell_px),
             &pane_env(terminal_id, env),
         )
         .map_err(io::Error::other)?;
-        let event_loop =
-            TerminalEventLoop::from_child(child, self.default_cols, self.default_rows)?;
+        let event_loop = TerminalEventLoop::from_child(child, cols, rows)?;
 
         let terminal = ManagedTerminal {
             id: terminal_id,
@@ -1364,20 +1870,25 @@ impl TerminalManager {
                 .snapshot(),
         };
 
-        self.push_terminal(terminal);
+        self.push_terminal(terminal, window);
         Ok(terminal_id)
     }
 
-    /// Focus a pane of the active tab by its terminal ID.
-    pub fn focus_terminal(&mut self, terminal_id: TerminalId) {
-        if let Some(tab) = self.active_tab_mut() {
+    /// Focus a pane of `window`'s active tab by its terminal ID.
+    pub fn window_focus_terminal(&mut self, window: WindowKey, terminal_id: TerminalId) {
+        if let Some(tab) = self.window_active_tab_mut(window) {
             if tab.terminals.contains(&terminal_id) && tab.focus(terminal_id) {
-                self.relayout();
+                self.relayout_window(window);
             }
         }
     }
 
-    /// Focus an existing pane, switching to its tab when needed.
+    /// Focus a pane of the active tab by its terminal ID.
+    pub fn focus_terminal(&mut self, terminal_id: TerminalId) {
+        self.window_focus_terminal(self.focused_window, terminal_id);
+    }
+
+    /// Focus an existing pane, switching to its tab and window when needed.
     pub fn focus_pane_by_id(&mut self, terminal_id: TerminalId) -> bool {
         let Some(tab) = self
             .tabs
@@ -1387,9 +1898,14 @@ impl TerminalManager {
             return false;
         };
         let resized = tab.focus(terminal_id);
-        self.active_tab = tab.id;
+        let tab_id = tab.id;
+        let window_id = tab.window_id;
+        if let Some(record) = self.window_record_mut(window_id) {
+            record.active_tab = Some(tab_id);
+        }
+        self.focused_window = window_id;
         if resized {
-            self.relayout();
+            self.relayout_window(window_id);
         }
         true
     }
@@ -1403,13 +1919,14 @@ impl TerminalManager {
         else {
             return false;
         };
+        let window_id = tab.window_id;
         if zoomed {
             tab.focused_terminal = terminal_id;
             tab.zoomed_pane = Some(terminal_id);
         } else if tab.zoomed_pane == Some(terminal_id) {
             tab.zoomed_pane = None;
         }
-        self.relayout();
+        self.relayout_window(window_id);
         true
     }
 
@@ -1422,22 +1939,24 @@ impl TerminalManager {
         else {
             return false;
         };
+        let window_id = tab.window_id;
         if !tab.layout.swap(first, second) {
             return false;
         }
         tab.terminals = tab.layout.panes();
-        self.relayout();
+        self.relayout_window(window_id);
         true
     }
 
     /// Focus a specific pane by index.
     pub fn focus_pane(&mut self, index: usize) {
-        let Some(tab) = self.active_tab_mut() else {
+        let window = self.focused_window;
+        let Some(tab) = self.window_active_tab_mut(window) else {
             return;
         };
 
         if index < tab.terminals.len() && tab.focus(tab.terminals[index]) {
-            self.relayout();
+            self.relayout_window(window);
         }
     }
 
@@ -1453,12 +1972,42 @@ impl TerminalManager {
             .unwrap_or(0)
     }
 
-    /// The pane at (x, y) in a `width` x `height` content area.
-    pub fn pane_at(&self, x: f32, y: f32, width: f32, height: f32) -> Option<TerminalId> {
-        self.active_pane_rects(width, height)
+    /// The pane at (x, y) in `window`'s `width` x `height` content area.
+    pub fn window_pane_at(
+        &self,
+        window: WindowKey,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Option<TerminalId> {
+        self.window_active_pane_rects(window, width, height)
             .into_iter()
             .find(|(_, (px, py, pw, ph))| x >= *px && x < px + pw && y >= *py && y < py + ph)
             .map(|(id, _)| id)
+    }
+
+    /// The pane at (x, y) in a `width` x `height` content area.
+    pub fn pane_at(&self, x: f32, y: f32, width: f32, height: f32) -> Option<TerminalId> {
+        self.window_pane_at(self.focused_window, x, y, width, height)
+    }
+
+    /// The divider within `tolerance` pixels of (x, y) in `window`, if any.
+    pub fn window_divider_at(
+        &self,
+        window: WindowKey,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        tolerance: f32,
+    ) -> Option<Divider> {
+        let tab = self.window_active_tab(window)?;
+        if tab.zoomed_pane.is_some() {
+            return None;
+        }
+        tab.layout
+            .divider_at((0.0, 0.0, width, height), x, y, tolerance)
     }
 
     /// The divider within `tolerance` pixels of (x, y), if any.
@@ -1470,34 +2019,34 @@ impl TerminalManager {
         height: f32,
         tolerance: f32,
     ) -> Option<Divider> {
-        let tab = self.active_tab()?;
-        if tab.zoomed_pane.is_some() {
-            return None;
-        }
-        tab.layout
-            .divider_at((0.0, 0.0, width, height), x, y, tolerance)
+        self.window_divider_at(self.focused_window, x, y, width, height, tolerance)
     }
 
-    /// Move a divider of the active tab by `delta` pixels and resize the
-    /// panes on either side.
-    pub fn drag_divider(&mut self, divider: &Divider, delta: f32) {
-        if let Some(tab) = self.active_tab_mut() {
+    /// Move a divider of `window`'s active tab by `delta` pixels and resize
+    /// the panes on either side.
+    pub fn window_drag_divider(&mut self, window: WindowKey, divider: &Divider, delta: f32) {
+        if let Some(tab) = self.window_active_tab_mut(window) {
             if tab.zoomed_pane.is_some() {
                 return;
             }
             tab.layout.drag(divider, delta);
         }
-        self.relayout();
+        self.relayout_window(window);
+    }
+
+    /// Move a divider of the active tab by `delta` pixels and resize the
+    /// panes on either side.
+    pub fn drag_divider(&mut self, divider: &Divider, delta: f32) {
+        self.window_drag_divider(self.focused_window, divider, delta);
     }
 
     /// Extract session data from the current state.
     pub fn to_session_data(&self) -> crate::session::SessionData {
         use crate::session::{SessionData, TabData, TerminalData};
 
-        let active_tab_index = self
-            .tabs
-            .iter()
-            .position(|t| t.id == self.active_tab)
+        let active_id = self.active_tab().map(|t| t.id);
+        let active_tab_index = active_id
+            .and_then(|active| self.tabs.iter().position(|t| t.id == active))
             .unwrap_or(0);
 
         let tabs = self
@@ -1628,6 +2177,7 @@ impl TerminalManager {
 
             let tab = Tab {
                 id: tab_id,
+                window_id: WindowKey::PRIMARY,
                 focused_terminal: focused_terminal_id.ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -1642,10 +2192,11 @@ impl TerminalManager {
             };
 
             manager.tabs.push(tab);
-
-            // Set active tab
-            if i == session.active_tab_index {
-                manager.active_tab = tab_id;
+            if let Some(record) = manager.window_record_mut(WindowKey::PRIMARY) {
+                record.tabs.push(tab_id);
+                if i == session.active_tab_index || record.active_tab.is_none() {
+                    record.active_tab = Some(tab_id);
+                }
             }
         }
 
@@ -2531,20 +3082,19 @@ mod tests {
         let second_tab = manager.tabs[1].id;
         let third_tab = manager.tabs[2].id;
 
-        // Should be on third tab (most recently created)
-        assert_eq!(manager.active_tab, third_tab);
+        assert_eq!(manager.active_tab().map(|t| t.id), Some(third_tab));
 
         manager.prev_tab();
-        assert_eq!(manager.active_tab, second_tab);
+        assert_eq!(manager.active_tab().map(|t| t.id), Some(second_tab));
 
         manager.prev_tab();
-        assert_eq!(manager.active_tab, first_tab);
+        assert_eq!(manager.active_tab().map(|t| t.id), Some(first_tab));
 
         manager.prev_tab();
-        assert_eq!(manager.active_tab, third_tab); // Wrap around
+        assert_eq!(manager.active_tab().map(|t| t.id), Some(third_tab));
 
         manager.next_tab();
-        assert_eq!(manager.active_tab, first_tab);
+        assert_eq!(manager.active_tab().map(|t| t.id), Some(first_tab));
     }
 
     #[test]
@@ -2555,11 +3105,11 @@ mod tests {
         let first_tab = manager.tabs[0].id;
         let second_tab = manager.tabs[1].id;
 
-        manager.active_tab = first_tab;
+        assert!(manager.switch_to_tab_id(first_tab));
         manager.close_tab(first_tab);
 
         assert_eq!(manager.tab_count(), 1);
-        assert_eq!(manager.active_tab, second_tab);
+        assert_eq!(manager.active_tab().map(|t| t.id), Some(second_tab));
     }
 
     /// Open a tab running `/bin/true` and return its terminal.
@@ -2653,7 +3203,7 @@ mod tests {
         let second_tab = manager.tabs[1].id;
         let second_terminal = manager.tabs[1].focused_terminal;
 
-        manager.active_tab = second_tab;
+        assert!(manager.switch_to_tab_id(second_tab));
         manager.tabs[1].remove_terminal(second_terminal);
         manager
             .terminals
@@ -2662,7 +3212,7 @@ mod tests {
         manager.cleanup_exited();
 
         assert_eq!(manager.tab_count(), 1);
-        assert_eq!(manager.active_tab, first_tab);
+        assert_eq!(manager.active_tab().map(|t| t.id), Some(first_tab));
         assert_eq!(
             manager.focused_terminal().map(|terminal| terminal.id),
             Some(first_terminal)
@@ -2678,7 +3228,166 @@ mod tests {
         let first_tab = manager.tabs[0].id;
 
         manager.switch_to_tab(0);
-        assert_eq!(manager.active_tab, first_tab);
+        assert_eq!(manager.active_tab().map(|t| t.id), Some(first_tab));
+    }
+
+    #[test]
+    fn test_per_window_relayout_sizes_each_window_independently() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let win_a = manager.primary_window();
+        let pane_a1 = manager.window_focused_terminal_id(win_a).unwrap();
+
+        let (win_b, _tab_b) = manager.create_window(80, 24, &mut no_tab_env).unwrap();
+        let pane_b1 = manager.window_focused_terminal_id(win_b).unwrap();
+        assert_ne!(win_a, win_b);
+        assert_eq!(manager.window_count(), 2);
+        assert_eq!(manager.window_tab_count(win_a), 1);
+        assert_eq!(manager.window_tab_count(win_b), 1);
+
+        manager
+            .layout_window_panes(
+                win_a,
+                PaneArea {
+                    width: 800.0,
+                    height: 400.0,
+                    cell_width: 10.0,
+                    cell_height: 20.0,
+                },
+            )
+            .unwrap();
+        manager
+            .layout_window_panes(
+                win_b,
+                PaneArea {
+                    width: 1200.0,
+                    height: 600.0,
+                    cell_width: 10.0,
+                    cell_height: 20.0,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(manager.pane_grid_size(pane_a1), Some((80, 20)));
+        assert_eq!(manager.pane_grid_size(pane_b1), Some((120, 30)));
+
+        let pane_a2 = manager
+            .split_window_focused(win_a, SplitDirection::Horizontal)
+            .unwrap()
+            .unwrap();
+        assert_eq!(manager.pane_grid_size(pane_a1), Some((40, 20)));
+        assert_eq!(manager.pane_grid_size(pane_a2), Some((40, 20)));
+        assert_eq!(manager.pane_grid_size(pane_b1), Some((120, 30)));
+
+        assert!(manager.is_on_screen(pane_a1));
+        assert!(manager.is_on_screen(pane_a2));
+        assert!(manager.is_on_screen(pane_b1));
+        assert!(manager.is_on_screen_in_window(win_a, pane_a1));
+        assert!(!manager.is_on_screen_in_window(win_a, pane_b1));
+
+        assert!(manager.close_window(win_b));
+        assert_eq!(manager.window_count(), 1);
+        assert!(manager.terminal(pane_b1).is_none());
+        assert_eq!(manager.focused_window(), win_a);
+        assert_eq!(manager.pane_grid_size(pane_a1), Some((40, 20)));
+    }
+
+    #[test]
+    fn test_multi_window_close_and_dirty_isolation() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let win_a = WindowKey::PRIMARY;
+        let tab_a = manager.window_active_tab(win_a).unwrap().id;
+        let pane_a = manager.window_focused_terminal(win_a).unwrap().id;
+
+        let (win_b, tab_b) = manager
+            .create_window(80, 24, &mut |_| Ok(Vec::new()))
+            .unwrap();
+        let pane_b = manager.window_focused_terminal(win_b).unwrap().id;
+
+        assert_eq!(manager.window_tabs(win_a).len(), 1);
+        assert_eq!(manager.window_tabs(win_b).len(), 1);
+        assert!(manager.is_on_screen_in_window(win_a, pane_a));
+        assert!(!manager.is_on_screen_in_window(win_a, pane_b));
+        assert!(manager.is_on_screen_in_window(win_b, pane_b));
+        assert!(!manager.is_on_screen_in_window(win_b, pane_a));
+        assert_eq!(manager.active_tab_ids(), vec![tab_a, tab_b]);
+
+        assert!(
+            manager
+                .terminal(pane_a)
+                .unwrap()
+                .event_loop
+                .terminal()
+                .has_dirty(),
+            "new terminal A should start dirty"
+        );
+        assert!(
+            manager
+                .terminal(pane_b)
+                .unwrap()
+                .event_loop
+                .terminal()
+                .has_dirty(),
+            "new terminal B should start dirty"
+        );
+
+        manager.clear_window_active_dirty(win_a);
+        assert!(!manager
+            .terminal(pane_a)
+            .unwrap()
+            .event_loop
+            .terminal()
+            .has_dirty());
+        assert!(
+            manager
+                .terminal(pane_b)
+                .unwrap()
+                .event_loop
+                .terminal()
+                .has_dirty(),
+            "clearing one window's dirty flags must not clear another window"
+        );
+
+        manager.close_window(win_b);
+        assert!(manager.window_is_empty(win_b));
+        assert!(!manager.window_is_empty(win_a));
+        assert_eq!(manager.tab_count(), 1);
+        assert_eq!(manager.window_tabs(win_a).len(), 1);
+        assert_eq!(manager.focused_window(), win_a);
+        assert_eq!(manager.active_tab_ids(), vec![tab_a]);
+    }
+
+    #[test]
+    fn test_multi_window_cleanup_exited_only_empties_affected_window() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let win_a = WindowKey::PRIMARY;
+        let (win_b, initial_tab_b) = manager
+            .create_window(80, 24, &mut |_| Ok(Vec::new()))
+            .unwrap();
+        let _tab_b = manager
+            .create_tab_with_command_in_window(
+                win_b,
+                "/bin/sh",
+                &["-c".to_string(), "exit 0".to_string()],
+                None,
+                None,
+                &mut |_| Ok(Vec::new()),
+            )
+            .unwrap();
+        assert!(manager.close_tab(initial_tab_b));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !manager.window_is_empty(win_b) && std::time::Instant::now() < deadline {
+            let _ = manager.process_all();
+            manager.cleanup_exited();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(manager.window_is_empty(win_b));
+        assert!(
+            !manager.window_is_empty(win_a),
+            "exiting window B's shell must leave window A open"
+        );
+        assert_eq!(manager.window_tabs(win_a).len(), 1);
     }
 
     /// Value of `key` in the child's environment once it has exec'd, or

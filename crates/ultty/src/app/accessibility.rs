@@ -18,30 +18,96 @@ use ultty::a11y::tree::{
 use ultty::command_palette::CommandPalette;
 use ultty::protocol::session::LiveChange;
 use ultty::protocol::{NativeSession, ProtocolServer};
-use ultty::terminal_manager::ManagedTerminal;
+use ultty::terminal_manager::{ManagedTerminal, WindowKey};
 use ultty_protocol::RegionId;
 
-use super::App;
+use super::{App, WindowCtx};
 
 impl App {
+    /// Update every open window's accessibility adapter when assistive
+    /// technology is active.
+    pub(super) fn update_all_accessibility(
+        &mut self,
+        changed_windows: &std::collections::HashSet<WindowKey>,
+        now: Instant,
+    ) {
+        let any_active = self
+            .windows
+            .values()
+            .any(|win| win.accessibility.as_ref().is_some_and(|a| a.is_active()));
+        if let Some(server) = self.shared.runtime.protocol.as_mut() {
+            server.set_live_announcements(any_active);
+        }
+        if !any_active {
+            return;
+        }
+        let mut appends_by_window: std::collections::HashMap<WindowKey, Vec<(u64, LiveChange)>> =
+            std::collections::HashMap::new();
+        if let Some(server) = self.shared.runtime.protocol.as_mut() {
+            let shown: std::collections::HashSet<(ultty::terminal_manager::TabId, u64)> = server
+                .visible_tab_sessions()
+                .filter(|session| session.pane().is_some())
+                .map(|session| (session.tab_id(), session.session_id()))
+                .collect();
+            server.take_visible_live_appends(|tab, session, change| {
+                if let Some(window) = self.shared.runtime.manager.window_for_tab(tab) {
+                    match change {
+                        LiveChange::Appended { .. } if shown.contains(&(tab, session)) => {
+                            appends_by_window
+                                .entry(window)
+                                .or_default()
+                                .push((session, change));
+                        }
+                        LiveChange::Appended { .. } => {}
+                        LiveChange::Removed(_) => {
+                            appends_by_window
+                                .entry(window)
+                                .or_default()
+                                .push((session, change));
+                        }
+                    }
+                }
+            });
+        }
+        for (&key, win) in &mut self.windows {
+            let mut ctx = WindowCtx {
+                app: &mut self.shared,
+                win,
+            };
+            let changes = appends_by_window.remove(&key).unwrap_or_default();
+            ctx.update_accessibility(changed_windows.contains(&key), changes, now);
+        }
+    }
+}
+
+impl WindowCtx<'_> {
     /// Route a request against the last published accessibility tree through
     /// the same application acknowledgement path as named control actions.
     pub(super) fn handle_accessibility_event(&mut self, event: accesskit_winit::WindowEvent) {
         let action = self
+            .win
             .accessibility
             .as_mut()
-            .and_then(|adapter| adapter.handle(&self.window, event));
+            .and_then(|adapter| adapter.handle(&self.win.window, event));
         let Some((target, action)) = action else {
             return;
         };
-        let pane = self.runtime.protocol.as_ref().and_then(|server| {
-            server
-                .active_tab_sessions()
-                .find(|session| session.session_id() == target.session)
-                .and_then(|session| session.pane())
+        let active_tab = self
+            .app
+            .runtime
+            .manager
+            .window_active_tab(self.win.key)
+            .map(|tab| tab.id);
+        let pane = active_tab.and_then(|tab| {
+            self.app.runtime.protocol.as_ref().and_then(|server| {
+                server
+                    .tab_sessions(tab)
+                    .find(|session| session.session_id() == target.session)
+                    .and_then(|session| session.pane())
+            })
         });
         if let Some(pane) = pane {
-            self.dispatch_accessibility_action(
+            self.app.dispatch_accessibility_action(
                 pane.raw() as u64,
                 target.session,
                 target.generation,
@@ -52,109 +118,99 @@ impl App {
         }
     }
 
-    /// Tell the accessibility adapter what changed this pass, including
-    /// text appended to live regions, and send it a tree if one is due.
-    /// `screen_changed` is output in the focused pane or a new title from
-    /// any pane.
-    ///
-    /// Inactive (no screen reader) this is two checks: nothing is hashed,
-    /// locked, kept or copied.
-    pub(super) fn update_accessibility(&mut self, screen_changed: bool, now: Instant) {
-        let active = self.accessibility.as_ref().is_some_and(|a| a.is_active());
-        if let Some(server) = self.runtime.protocol.as_mut() {
-            server.set_live_announcements(active);
-        }
-        if !active {
+    /// Tell this window's accessibility adapter what changed this pass,
+    /// including text appended to live regions, and send a tree if one is due.
+    pub(super) fn update_accessibility(
+        &mut self,
+        screen_changed: bool,
+        live_changes: Vec<(u64, LiveChange)>,
+        now: Instant,
+    ) {
+        if !self
+            .win
+            .accessibility
+            .as_ref()
+            .is_some_and(|a| a.is_active())
+        {
             return;
         }
         let digest = self.shown_digest();
-        let Some(adapter) = self.accessibility.as_mut() else {
+        let Some(adapter) = self.win.accessibility.as_mut() else {
             return;
         };
-        // A scene is shown once its session is bound to a pane of the
-        // visible tab (ADR 0025; see `accessibility_snapshot`); text for a
-        // scene that is not shown is dropped rather than flushed into a
-        // tree that leaves it out.
-        if let Some(server) = self.runtime.protocol.as_mut() {
-            let shown: std::collections::HashSet<u64> = server
-                .active_tab_sessions()
-                .filter(|session| session.pane().is_some())
-                .map(|session| session.session_id())
-                .collect();
-            server.take_live_appends(|session, change| match change {
-                LiveChange::Appended { region, live, text } if shown.contains(&session) => {
+        for (session, change) in live_changes {
+            match change {
+                LiveChange::Appended { region, live, text } => {
                     adapter.appended(session, region.0, live, &text, now);
                 }
-                LiveChange::Appended { .. } => {}
                 LiveChange::Removed(region) => adapter.removed(session, region.0),
-            });
+            }
         }
         if screen_changed {
             adapter.changed();
         }
         adapter.observe_shown(digest);
+        let key = self.win.key;
         let snapshot = || {
             accessibility_snapshot(
-                &self.runtime.manager,
-                &self.tab_bar.tabs,
-                self.runtime.protocol.as_ref(),
-                self.renderer.surface_size(),
-                self.renderer.tab_bar_height(),
-                self.renderer.cell_dimensions(),
-                &self.command_palette,
+                &self.app.runtime.manager,
+                key,
+                &self.win.tab_bar.tabs,
+                self.app.runtime.protocol.as_ref(),
+                self.win.renderer.surface_size(),
+                self.win.renderer.tab_bar_height(),
+                self.win.renderer.cell_dimensions(),
+                &self.win.command_palette,
             )
         };
         adapter.update(now, snapshot);
     }
 
-    /// A digest of what the tree shows besides screen text and titles,
-    /// which arrive as events: the tabs, their bar titles, the active tab,
-    /// its panes and their rectangles (so dragging a divider counts), the
-    /// focused pane, the cell size, whether the focused pane is scrolled
-    /// back, and the active tab's native sessions with their
-    /// [`NativeSession::shown_generation`] (frames, focus, surfaces).
-    /// Hashing it each pass is cheaper than finding every place these
-    /// change. The window size is the renderer's, kept from the last
-    /// resize, not asked of the window system.
     fn shown_digest(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for tab in &self.tab_bar.tabs {
+        for tab in &self.win.tab_bar.tabs {
             (tab.id.raw(), &tab.title, tab.is_active).hash(&mut hasher);
         }
-        if let Some(tab) = self.runtime.manager.active_tab() {
+        let active_tab = self.app.runtime.manager.window_active_tab(self.win.key);
+        if let Some(tab) = active_tab {
             tab.id.raw().hash(&mut hasher);
             for terminal in &tab.terminals {
                 terminal.raw().hash(&mut hasher);
             }
             tab.focused_terminal.raw().hash(&mut hasher);
         }
-        let (width, height) = self.renderer.surface_size();
-        let top = self.renderer.tab_bar_height();
-        for (id, (x, y, w, h)) in self
-            .runtime
-            .manager
-            .active_pane_rects(width as f32, height as f32 - top)
-        {
+        let (width, height) = self.win.renderer.surface_size();
+        let top = self.win.renderer.tab_bar_height();
+        for (id, (x, y, w, h)) in self.app.runtime.manager.window_active_pane_rects(
+            self.win.key,
+            width as f32,
+            height as f32 - top,
+        ) {
             id.raw().hash(&mut hasher);
             for value in [x, y, w, h] {
                 value.to_bits().hash(&mut hasher);
             }
         }
-        let (cell_width, cell_height) = self.renderer.cell_dimensions();
+        let (cell_width, cell_height) = self.win.renderer.cell_dimensions();
         for value in [cell_width, cell_height, top] {
             value.to_bits().hash(&mut hasher);
         }
-        if let Some(terminal) = self.runtime.manager.focused_terminal() {
+        if let Some(terminal) = self
+            .app
+            .runtime
+            .manager
+            .window_focused_terminal(self.win.key)
+        {
             scrolled_back(&terminal.event_loop.terminal()).hash(&mut hasher);
         }
-        if self.command_palette.is_open() {
-            self.command_palette.query().hash(&mut hasher);
-            self.command_palette.selected().hash(&mut hasher);
-            self.command_palette.rows().len().hash(&mut hasher);
+        if self.win.command_palette.is_open() {
+            self.win.command_palette.query().hash(&mut hasher);
+            self.win.command_palette.selected().hash(&mut hasher);
+            self.win.command_palette.rows().len().hash(&mut hasher);
         }
-        if let Some(server) = &self.runtime.protocol {
+        if let (Some(server), Some(tab)) = (&self.app.runtime.protocol, active_tab) {
             let mut sessions: Vec<(u64, u64)> = server
-                .active_tab_sessions()
+                .tab_sessions(tab.id)
                 .map(|session| (session.session_id(), session.shown_generation()))
                 .collect();
             sessions.sort_unstable();
@@ -164,20 +220,10 @@ impl App {
     }
 }
 
-/// The tabs from the tab bar (its titles are the ones drawn), and the
-/// active tab's panes in window pixels with the focused one's screen, the
-/// full scenes of the sessions bound to each pane (ADR 0025), and, when the
-/// tab has one pane, the inline surfaces drawn over its screen: the
-/// renderer draws those only then (spec §10.6).
-///
-/// Each pane is locked once, briefly: the focused one to copy its rows and
-/// find its surfaces, the others to read their titles. Native scenes are
-/// copied after the lock is released. While the focused pane is scrolled
-/// back its surfaces are left out: the rows are the live screen
-/// (scrollback is deferred, ADR 0021 §2), so their anchors would be
-/// misplaced.
+#[allow(clippy::too_many_arguments)]
 fn accessibility_snapshot(
     terminal_manager: &ultty::terminal_manager::TerminalManager,
+    window: WindowKey,
     bar: &[ultty::tabs::TabState],
     server: Option<&ProtocolServer>,
     (window_width, window_height): (u32, u32),
@@ -193,14 +239,17 @@ fn accessibility_snapshot(
             selected: tab.is_active,
         })
         .collect();
-    let focused = terminal_manager.focused_terminal_id();
-    let rects = terminal_manager
-        .active_pane_rects(window_width as f32, window_height as f32 - tab_bar_height);
-    // The shown sessions, in a stable order; each pane takes the ones bound
-    // to it. Surfaces are drawn only in a one-pane tab.
-    let mut sessions: Vec<&NativeSession> = server
-        .map(|server| server.active_tab_sessions().collect())
-        .unwrap_or_default();
+    let focused = terminal_manager.window_focused_terminal_id(window);
+    let active_tab = terminal_manager.window_active_tab(window).map(|t| t.id);
+    let rects = terminal_manager.window_active_pane_rects(
+        window,
+        window_width as f32,
+        window_height as f32 - tab_bar_height,
+    );
+    let mut sessions: Vec<&NativeSession> = match (server, active_tab) {
+        (Some(server), Some(tab)) => server.tab_sessions(tab).collect(),
+        _ => Vec::new(),
+    };
     sessions.sort_by_key(|session| session.session_id());
     let cell = (f64::from(cell_width), f64::from(cell_height));
     let panes = rects

@@ -22,26 +22,40 @@ use std::sync::Arc;
 use anyhow::Result;
 use ultty::config::{clamp_font_size, ColorConfig, FontConfig};
 use ultty::renderer::{grid_dimensions_for, stepped_font_size, ColorScheme, Fonts, Renderer};
+use ultty::terminal_manager::WindowKey;
 use winit::dpi::PhysicalSize;
 use winit::event_loop::{EventLoopProxy, OwnedDisplayHandle};
 use winit::window::Window;
 
-use super::{App, AppEvent};
+use super::{AppEvent, WindowCtx};
+
+/// Process-wide GPU objects shared across windows (ADR 0027).
+#[derive(Clone)]
+pub(super) struct SharedGpu {
+    pub(super) instance: Arc<wgpu::Instance>,
+    pub(super) adapter: Arc<wgpu::Adapter>,
+    pub(super) device: Arc<wgpu::Device>,
+    pub(super) queue: Arc<wgpu::Queue>,
+}
 
 /// A renderer and the window surface it draws to.
 pub(super) struct Gpu {
     pub(super) surface: wgpu::Surface<'static>,
     pub(super) renderer: Renderer,
+    pub(super) shared: SharedGpu,
 }
 
-/// The outcome of the GPU setup, sent from its worker thread.
-pub(super) struct Handoff(pub(super) Result<Box<Gpu>>);
+/// The outcome of the GPU setup for one window, sent from its worker thread.
+pub(super) struct Handoff {
+    pub(super) window_key: WindowKey,
+    pub(super) result: Result<Box<Gpu>>,
+}
 
 impl std::fmt::Debug for Handoff {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.0 {
-            Ok(_) => f.write_str("Handoff(Ok(..))"),
-            Err(error) => write!(f, "Handoff(Err({error:#}))"),
+        match &self.result {
+            Ok(_) => write!(f, "Handoff(win={}, Ok(..))", self.window_key.raw()),
+            Err(error) => write!(f, "Handoff(win={}, Err({error:#}))", self.window_key.raw()),
         }
     }
 }
@@ -254,24 +268,76 @@ impl RendererState {
     }
 }
 
-impl App {
+impl WindowCtx<'_> {
     /// Take over the renderer from the GPU setup: bring it up to what
     /// changed meanwhile, size it to the window and draw the first frame.
     pub(super) fn install_renderer(&mut self, mut gpu: Box<Gpu>) {
-        let RendererState::Starting(starting) = &self.renderer else {
+        let RendererState::Starting(starting) = &self.win.renderer else {
             tracing::warn!("A second renderer arrived; keeping the first");
             return;
         };
         starting.clone().apply_to(&mut gpu.renderer);
-        self.renderer = RendererState::Ready(gpu);
-        // Before the GPU's first present: see `cpu_frames`.
-        self.cpu_frames = None;
-        tracing::debug!(target: "ultty::startup", "renderer handed over");
-        // The window may have been resized, and the fonts changed, while
-        // the GPU started: size the surface and every grid again.
-        self.handle_resize(self.window.inner_size());
-        self.needs_redraw = true;
+        self.win.renderer = RendererState::Ready(gpu);
+        self.win.cpu_frames = None;
+        tracing::debug!(
+            target: "ultty::startup",
+            window = self.win.key.raw(),
+            "renderer handed over"
+        );
+        self.handle_resize(self.win.window.inner_size());
+        self.win.needs_redraw = true;
     }
+}
+
+/// Outcome of creating an additional window's surface and renderer on the
+/// shared GPU device.
+pub(super) enum SharedGpuSetup {
+    /// Surface is compatible and the renderer is ready.
+    Ready(Box<Gpu>),
+    /// Surface is incompatible with the shared adapter; returns the measured
+    /// [`Fonts`] so the caller can fall back to a dedicated adapter and device.
+    Incompatible(Box<Fonts>),
+    /// Surface or renderer creation failed.
+    Failed(anyhow::Error),
+}
+
+/// Create a surface and renderer for an additional window on the shared GPU
+/// device (ADR 0027).
+pub(super) fn setup_with_shared(
+    shared: &SharedGpu,
+    window: Arc<Window>,
+    size: PhysicalSize<u32>,
+    colors: &ColorConfig,
+    fonts: Fonts,
+    paced_by_frame_callbacks: bool,
+) -> SharedGpuSetup {
+    let surface = match shared.instance.create_surface(window) {
+        Ok(surface) => surface,
+        Err(error) => return SharedGpuSetup::Failed(error.into()),
+    };
+    let caps = surface.get_capabilities(&shared.adapter);
+    if caps.formats.is_empty() || caps.alpha_modes.is_empty() {
+        return SharedGpuSetup::Incompatible(Box::new(fonts));
+    }
+    let renderer = match Renderer::with_shared_device(
+        &surface,
+        &shared.adapter,
+        Arc::clone(&shared.device),
+        Arc::clone(&shared.queue),
+        size.width,
+        size.height,
+        colors,
+        fonts,
+        paced_by_frame_callbacks,
+    ) {
+        Ok(renderer) => renderer,
+        Err(error) => return SharedGpuSetup::Failed(error),
+    };
+    SharedGpuSetup::Ready(Box::new(Gpu {
+        surface,
+        renderer,
+        shared: shared.clone(),
+    }))
 }
 
 /// Start the GPU setup on a worker thread: a surface for `window` of
@@ -280,7 +346,9 @@ impl App {
 /// [`Fonts`]) and `colors`. The result comes back through `proxy` as
 /// [`AppEvent::Renderer`]. `paced_by_frame_callbacks` is as for
 /// [`Renderer::with_config`].
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_setup(
+    window_key: WindowKey,
     display: OwnedDisplayHandle,
     window: Arc<Window>,
     size: PhysicalSize<u32>,
@@ -292,7 +360,7 @@ pub(super) fn spawn_setup(
     std::thread::Builder::new()
         .name("ultty-gpu-setup".into())
         .spawn(move || {
-            let gpu = setup(
+            let result = setup(
                 display,
                 window,
                 size,
@@ -300,8 +368,7 @@ pub(super) fn spawn_setup(
                 fonts,
                 paced_by_frame_callbacks,
             );
-            // With the loop gone, Ultty is exiting and nobody needs it.
-            let _ = proxy.send_event(AppEvent::Renderer(Handoff(gpu)));
+            let _ = proxy.send_event(AppEvent::Renderer(Handoff { window_key, result }));
         })
         .map(drop)
 }
@@ -314,13 +381,8 @@ fn setup(
     fonts: mpsc::Receiver<Fonts>,
     paced_by_frame_callbacks: bool,
 ) -> Result<Box<Gpu>> {
-    // Vulkan (or the platform's primary API) first, GL only if that
-    // finds no adapter. An instance with every backend brings up GL as
-    // well, which loads and initializes the EGL driver even when Vulkan
-    // is then chosen: startup time and resident memory for nothing.
-    // `WGPU_BACKEND` (vulkan, gl, ...) picks one for diagnosis.
     let primary = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY);
-    let (surface, adapter) = match request_gpu(&display, &window, primary) {
+    let (instance, surface, adapter) = match request_gpu(&display, &window, primary) {
         Ok(gpu) => gpu,
         Err(primary) => {
             tracing::info!("No primary GPU backend ({primary:#}); trying GL");
@@ -359,20 +421,29 @@ fn setup(
         fonts,
         paced_by_frame_callbacks,
     ))?;
+    let shared = SharedGpu {
+        instance: Arc::new(instance),
+        adapter: Arc::new(adapter),
+        device: Arc::clone(renderer.device()),
+        queue: Arc::clone(renderer.queue()),
+    };
     tracing::debug!(target: "ultty::startup", "renderer ready");
-    Ok(Box::new(Gpu { surface, renderer }))
+    Ok(Box::new(Gpu {
+        surface,
+        renderer,
+        shared,
+    }))
 }
 
-/// A surface for `window` and an adapter that can draw to it, from an
-/// instance limited to `backends`.
+/// An instance, a surface for `window`, and an adapter that can draw to it,
+/// limited to `backends`.
 fn request_gpu(
     display: &OwnedDisplayHandle,
     window: &Arc<Window>,
     backends: wgpu::Backends,
-) -> Result<(wgpu::Surface<'static>, wgpu::Adapter)> {
+) -> Result<(wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends,
-        // GL presents through the display connection (Wayland needs it).
         display: Some(Box::new(display.clone())),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
@@ -384,7 +455,7 @@ fn request_gpu(
         ..Default::default()
     }))
     .map_err(|e| anyhow::anyhow!("Failed to find suitable GPU adapter: {e}"))?;
-    Ok((surface, adapter))
+    Ok((instance, surface, adapter))
 }
 
 #[cfg(test)]
