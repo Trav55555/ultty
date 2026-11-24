@@ -564,19 +564,15 @@ impl App {
                     message: format!("Cannot list workspaces: {error}"),
                 },
             },
-            ControlRequest::WorkspaceSave { name } => match self
-                .shared
-                .runtime
-                .manager
-                .to_session_data()
-                .save_named(&name)
-            {
-                Ok(()) => ControlResponse::Ok,
-                Err(error) => ControlResponse::Error {
-                    code: 2,
-                    message: format!("Cannot save workspace: {error}"),
-                },
-            },
+            ControlRequest::WorkspaceSave { name } => {
+                match self.to_session_data().save_named(&name) {
+                    Ok(()) => ControlResponse::Ok,
+                    Err(error) => ControlResponse::Error {
+                        code: 2,
+                        message: format!("Cannot save workspace: {error}"),
+                    },
+                }
+            }
 
             ControlRequest::ProgramStatus { target } => {
                 match resolve_control_target(&self.shared.runtime.manager, target) {
