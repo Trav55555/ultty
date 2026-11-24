@@ -74,10 +74,9 @@ fn main() {
             std::process::exit(2);
         }
     };
-    default_split_target(
-        &mut request,
-        if pid_flag.is_none() { own_pane() } else { None },
-    );
+    let caller_pane = if pid_flag.is_none() { own_pane() } else { None };
+    default_split_target(&mut request, caller_pane);
+    default_window_target(&mut request, caller_pane);
     let read_timeout = read_timeout_for(&request, timeout_secs);
     let endpoint = match find_instance(instance) {
         Ok(endpoint) => endpoint,
@@ -130,6 +129,10 @@ fn main() {
             ..
         }
         | ControlData::PaneOpened {
+            warning: Some(warning),
+            ..
+        }
+        | ControlData::WindowOpened {
             warning: Some(warning),
             ..
         },
@@ -334,7 +337,7 @@ fn take_pid_flag(mut args: Vec<String>) -> Result<(Vec<String>, Option<u32>), St
                 args.drain(index..index + 2);
                 return Ok((args, Some(pid)));
             }
-            "--pane" => index += 2,
+            "--pane" | "--window" => index += 2,
             _ => break,
         }
     }
@@ -365,17 +368,37 @@ fn parse_job(args: &[String]) -> Result<u64, String> {
 }
 
 fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
-    // `--pane <id>` comes before the command, so it can never be mistaken
-    // for part of the text that send-text or search take.
-    if args.first().map(String::as_str) == Some("--pane") {
-        let id = args
-            .get(1)
-            .ok_or_else(|| "--pane requires a pane id (see `ulttyctl panes`)".to_string())?
-            .parse()
-            .map_err(|_| "--pane requires a numeric pane id".to_string())?;
-        let mut request = parse_cli_request(&args[2..])?;
-        return set_target(&mut request, id).map(|()| request);
+    // `--pane <id>` and `--window <id>` come before the command, so they can
+    // never be mistaken for part of the text that send-text or search take.
+    let mut pane_flag: Option<u64> = None;
+    let mut window_flag: Option<u64> = None;
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "--pane" => {
+                let id = args
+                    .get(index + 1)
+                    .ok_or_else(|| "--pane requires a pane id (see `ulttyctl panes`)".to_string())?
+                    .parse()
+                    .map_err(|_| "--pane requires a numeric pane id".to_string())?;
+                pane_flag = Some(id);
+                index += 2;
+            }
+            "--window" => {
+                let id = args
+                    .get(index + 1)
+                    .ok_or_else(|| {
+                        "--window requires a window id (see `ulttyctl windows`)".to_string()
+                    })?
+                    .parse()
+                    .map_err(|_| "--window requires a numeric window id".to_string())?;
+                window_flag = Some(id);
+                index += 2;
+            }
+            _ => break,
+        }
     }
+    let args = &args[index..];
 
     let command = args
         .first()
@@ -383,10 +406,26 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
         .as_str();
     let rest = &args[1..];
 
-    match command {
+    let mut request = match command {
         "ping" => Ok(ControlRequest::Ping),
         "version" => Ok(ControlRequest::Version),
         "info" => Ok(ControlRequest::GetInfo),
+        "windows" if rest.is_empty() => Ok(ControlRequest::ListWindows),
+        "windows" => Err("usage: windows".to_string()),
+        "new-window" => Ok(ControlRequest::NewWindow {
+            title: None,
+            command: rest.first().cloned(),
+            args: rest.iter().skip(1).cloned().collect(),
+            working_dir: None,
+        }),
+        "close-window" => match rest {
+            [id] => Ok(ControlRequest::CloseWindow {
+                window: id
+                    .parse()
+                    .map_err(|_| "close-window requires a numeric window id".to_string())?,
+            }),
+            _ => Err("usage: close-window <window>".to_string()),
+        },
         "tabs" => Ok(ControlRequest::ListTabs),
         "panes" => Ok(ControlRequest::ListPanes),
         "text" => Ok(ControlRequest::GetText {
@@ -426,6 +465,8 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             command: rest.first().cloned(),
             args: rest.iter().skip(1).cloned().collect(),
             working_dir: None,
+            window: None,
+            pane: None,
         }),
         "split" => parse_split(rest),
         "lua" => match rest.first().map(String::as_str) {
@@ -449,7 +490,10 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
         "close-tab" => Ok(ControlRequest::CloseTab {
             index: rest.first().and_then(|arg| parse_display_tab_index(arg)),
         }),
-        "focus" => Ok(ControlRequest::FocusWindow),
+        "focus" => Ok(ControlRequest::FocusWindow {
+            window: None,
+            pane: None,
+        }),
         "workspace" => match rest {
             [action] if action == "list" => Ok(ControlRequest::WorkspaceList),
             [action, name] if action == "save" => {
@@ -484,14 +528,21 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             }),
             _ => Err("usage: swap-panes <first> <second>".to_string()),
         },
-        "fullscreen" => Ok(ControlRequest::ToggleFullscreen),
+        "fullscreen" => Ok(ControlRequest::ToggleFullscreen {
+            window: None,
+            pane: None,
+        }),
         "opacity" => {
             let opacity = rest
                 .first()
                 .ok_or_else(|| "opacity requires a value".to_string())?
                 .parse()
                 .map_err(|_| "opacity requires a number".to_string())?;
-            Ok(ControlRequest::SetOpacity { opacity })
+            Ok(ControlRequest::SetOpacity {
+                opacity,
+                window: None,
+                pane: None,
+            })
         }
         "run" => {
             let command = rest
@@ -518,10 +569,17 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
                 .ok_or_else(|| "resize requires width and height".to_string())?
                 .parse()
                 .map_err(|_| "resize height must be a number".to_string())?;
-            Ok(ControlRequest::Resize { width, height })
+            Ok(ControlRequest::Resize {
+                width,
+                height,
+                window: None,
+                pane: None,
+            })
         }
         "screenshot" => Ok(ControlRequest::Screenshot {
             path: rest.first().cloned(),
+            window: None,
+            pane: None,
         }),
         "search" => {
             let pattern = rest.join(" ");
@@ -618,7 +676,15 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
                 .clone(),
         }),
         _ => Err(format!("unknown command: {}", command)),
+    }?;
+
+    if let Some(id) = pane_flag {
+        set_target(&mut request, id)?;
     }
+    if let Some(id) = window_flag {
+        set_window_target(&mut request, id)?;
+    }
+    Ok(request)
 }
 
 fn parse_run_and_wait(args: &[String]) -> Result<ControlRequest, String> {
@@ -794,6 +860,8 @@ impl LuaOpen {
                 command: Some(runner.to_string()),
                 args: runner_args,
                 working_dir,
+                window: None,
+                pane: None,
             },
             // The tool draws natively in its pane (ADR 0025), as in a tab.
             Some(direction) => ControlRequest::SplitPane {
@@ -933,7 +1001,7 @@ fn parse_progress(value: &str) -> Result<f32, String> {
         .ok_or_else(|| format!("--progress must be 0-1 or a percentage, not {value}"))
 }
 
-/// Point a pane-scoped request at pane `id`; other requests refuse `--pane`.
+/// Point a pane-scoped or window-scoped request at pane `id`; other requests refuse `--pane`.
 fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
     match request {
         ControlRequest::GetText { target, .. }
@@ -958,7 +1026,35 @@ fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
             *target = Some(id);
             Ok(())
         }
-        _ => Err("--pane only applies to text, selection, send-text, send-key, send-raw, run, search, wait-for, subscribe, status, last-command, regions, images, override, split and lua open --split".to_string()),
+        ControlRequest::NewTab { pane, .. }
+        | ControlRequest::FocusWindow { pane, .. }
+        | ControlRequest::ToggleFullscreen { pane, .. }
+        | ControlRequest::Resize { pane, .. }
+        | ControlRequest::SetOpacity { pane, .. }
+        | ControlRequest::Screenshot { pane, .. } => {
+            *pane = Some(id);
+            Ok(())
+        }
+        _ => Err("--pane only applies to pane commands, window commands (focus, fullscreen, opacity, resize, screenshot), new-tab, split and lua open".to_string()),
+    }
+}
+
+/// Point a window-scoped request at window `id`; other requests refuse `--window`.
+fn set_window_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
+    match request {
+        ControlRequest::NewTab { window, .. }
+        | ControlRequest::FocusWindow { window, .. }
+        | ControlRequest::ToggleFullscreen { window, .. }
+        | ControlRequest::Resize { window, .. }
+        | ControlRequest::SetOpacity { window, .. }
+        | ControlRequest::Screenshot { window, .. } => {
+            *window = Some(id);
+            Ok(())
+        }
+        _ => Err(
+            "--window only applies to focus, fullscreen, opacity, resize, screenshot, new-tab and lua open"
+                .to_string(),
+        ),
     }
 }
 
@@ -970,6 +1066,48 @@ fn default_split_target(request: &mut ControlRequest, own_pane: Option<u64>) {
         if let Some(pane) = own_pane {
             let _ = set_target(request, pane);
         }
+    }
+}
+
+/// Window commands and `new-tab` with neither `--window` nor `--pane` target
+/// the window holding `ULTTY_PANE` when set; otherwise the server uses the
+/// last focused window (ADR 0027).
+fn default_window_target(request: &mut ControlRequest, own_pane: Option<u64>) {
+    let Some(caller_pane) = own_pane else {
+        return;
+    };
+    match request {
+        ControlRequest::NewTab {
+            window: None,
+            pane: pane @ None,
+            ..
+        }
+        | ControlRequest::FocusWindow {
+            window: None,
+            pane: pane @ None,
+        }
+        | ControlRequest::ToggleFullscreen {
+            window: None,
+            pane: pane @ None,
+        }
+        | ControlRequest::Resize {
+            window: None,
+            pane: pane @ None,
+            ..
+        }
+        | ControlRequest::SetOpacity {
+            window: None,
+            pane: pane @ None,
+            ..
+        }
+        | ControlRequest::Screenshot {
+            window: None,
+            pane: pane @ None,
+            ..
+        } => {
+            *pane = Some(caller_pane);
+        }
+        _ => {}
     }
 }
 
@@ -1226,12 +1364,13 @@ GLOBAL FLAGS:
     --read-timeout <secs>   Socket read timeout in seconds (default: 5;
                             wait-for always waits out its own timeout)
     --pane <id>             Act on pane <id> (from `panes`) instead of the
-                            focused one. Goes before the command; applies to
-                            text, selection, send-*, run, search, wait-for,
-                            subscribe, status, last-command, regions, images,
-                            override, split and lua open --split (which
-                            otherwise split the pane ulttyctl runs in, from
-                            $ULTTY_PANE)
+                            focused one (or its owning window for window
+                            commands and new-tab). Goes before the command
+    --window <id>           Act on window <id> (from `windows`) instead of the
+                            window holding --pane/$ULTTY_PANE or the last
+                            focused window. Goes before the command; applies to
+                            focus, fullscreen, opacity, resize, screenshot,
+                            new-tab and lua open
     --pid <pid>             Talk only to the ultty with this pid; fail if it
                             is not running or not listening yet, never use
                             another. Goes before the command
@@ -1291,11 +1430,15 @@ WAIT COMMANDS:
                             bell, notification, title_changed, process_exited
 
 WINDOW COMMANDS:
-    focus                   Focus the ultty window
-    fullscreen              Toggle fullscreen
-    opacity <0.0-1.0>       Set window opacity
-    resize <width> <height> Resize the window (pixels); fails, naming the size
-                            it has, if it does not reach it within 2 s
+    windows                 List all open windows (* marks the focused one)
+    new-window [cmd] [args] Open a new window in the running process (prints
+                            the new window's id)
+    close-window <id>       Close window <id>
+    focus                   Focus the target ultty window
+    fullscreen              Toggle fullscreen on the target window
+    opacity <0.0-1.0>       Set target window opacity
+    resize <width> <height> Resize the target window (pixels); fails, naming
+                            the size it has, if it does not reach it within 2 s
 
 EXECUTION:
     run <command> [args]    Type shell text and Enter; acknowledges input acceptance
@@ -1397,9 +1540,10 @@ TARGETS AND INPUT:
 #[cfg(test)]
 mod tests {
     use super::{
-        default_split_target, exit_status, parse_cli_request, parse_response, read_response,
-        read_timeout_for, response_is_failure, select_instance, selected_pid, should_print_version,
-        take_pid_flag, version_output, with_auth_token, LuaOpen, PinnedInstance,
+        default_split_target, default_window_target, exit_status, parse_cli_request,
+        parse_response, read_response, read_timeout_for, response_is_failure, select_instance,
+        selected_pid, should_print_version, take_pid_flag, version_output, with_auth_token,
+        LuaOpen, PinnedInstance,
     };
 
     use std::io::Write;
@@ -1994,7 +2138,11 @@ mod tests {
     fn command_done_exits_with_the_commands_status() {
         let finished = |exit_code| {
             ControlResponse::Data(ControlData::WaitEvent {
-                event: ControlEvent::CommandFinished { pane: 0, exit_code },
+                event: ControlEvent::CommandFinished {
+                    pane: 0,
+                    exit_code,
+                    window: None,
+                },
             })
         };
         assert_eq!(exit_status(&finished(Some(0))), 0);
@@ -2266,6 +2414,8 @@ mod tests {
                     "--wait-on-error --exec ulttyctl --log /home/me/l.log /home/me/tools/panes.luau"
                 ),
                 working_dir: Some("/home/me".to_string()),
+                window: None,
+                pane: None,
             }
         );
         let open = LuaOpen::parse(&args("--allow-exec --log /var/l.log /abs/tool.luau")).unwrap();
@@ -2276,6 +2426,8 @@ mod tests {
                 command: Some("ulttui-lua".to_string()),
                 args: args("--wait-on-error --allow-exec --log /var/l.log /abs/tool.luau"),
                 working_dir: Some("/home/me".to_string()),
+                window: None,
+                pane: None,
             }
         );
     }
@@ -2308,7 +2460,169 @@ mod tests {
             } => {}
             other => panic!("{other:?}"),
         }
-        assert!(parse_cli_request(&args(&format!("--pane 5 lua open {here}"))).is_err());
+        match parse_cli_request(&args(&format!("--pane 5 lua open {here}"))).unwrap() {
+            ControlRequest::NewTab {
+                window: None,
+                pane: Some(5),
+                ..
+            } => {}
+            other => panic!("{other:?}"),
+        }
+        match parse_cli_request(&args(&format!("--window 2 lua open {here}"))).unwrap() {
+            ControlRequest::NewTab {
+                window: Some(2),
+                pane: None,
+                ..
+            } => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn window_commands_and_global_window_flag_parse_and_validate() {
+        assert_eq!(
+            parse_cli_request(&args("windows")).unwrap(),
+            ControlRequest::ListWindows
+        );
+        assert!(parse_cli_request(&args("windows extra")).is_err());
+
+        assert_eq!(
+            parse_cli_request(&args("new-window")).unwrap(),
+            ControlRequest::NewWindow {
+                title: None,
+                command: None,
+                args: Vec::new(),
+                working_dir: None,
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("new-window htop -d 5")).unwrap(),
+            ControlRequest::NewWindow {
+                title: None,
+                command: Some("htop".to_string()),
+                args: vec!["-d".to_string(), "5".to_string()],
+                working_dir: None,
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("close-window 2")).unwrap(),
+            ControlRequest::CloseWindow { window: 2 }
+        );
+        assert!(parse_cli_request(&args("close-window")).is_err());
+        assert!(parse_cli_request(&args("close-window nope")).is_err());
+
+        assert_eq!(
+            parse_cli_request(&args("--window 3 focus")).unwrap(),
+            ControlRequest::FocusWindow {
+                window: Some(3),
+                pane: None,
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("--pane 9 fullscreen")).unwrap(),
+            ControlRequest::ToggleFullscreen {
+                window: None,
+                pane: Some(9),
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("--window 1 --pane 9 resize 1024 768")).unwrap(),
+            ControlRequest::Resize {
+                width: 1024,
+                height: 768,
+                window: Some(1),
+                pane: Some(9),
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("--window 2 opacity 0.85")).unwrap(),
+            ControlRequest::SetOpacity {
+                opacity: 0.85,
+                window: Some(2),
+                pane: None,
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("--window 2 screenshot out.png")).unwrap(),
+            ControlRequest::Screenshot {
+                path: Some("out.png".to_string()),
+                window: Some(2),
+                pane: None,
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("--window 2 new-tab sh -c true")).unwrap(),
+            ControlRequest::NewTab {
+                title: None,
+                command: Some("sh".to_string()),
+                args: vec!["-c".to_string(), "true".to_string()],
+                working_dir: None,
+                window: Some(2),
+                pane: None,
+            }
+        );
+
+        assert_eq!(
+            take_pid_flag(args("--window 2 --pid 42 focus")),
+            Ok((args("--window 2 focus"), Some(42)))
+        );
+        assert_eq!(
+            parse_cli_request(&args("send-text --window 2")).unwrap(),
+            ControlRequest::SendText {
+                text: "--window 2".to_string(),
+                target: None,
+            }
+        );
+        assert!(parse_cli_request(&args("--window 2 tabs")).is_err());
+        assert!(parse_cli_request(&args("--window 2 text")).is_err());
+        assert!(parse_cli_request(&args("--window nope focus")).is_err());
+        assert!(parse_cli_request(&args("--window")).is_err());
+    }
+
+    #[test]
+    fn window_commands_and_new_tab_fall_back_to_callers_pane_window() {
+        let mut req = parse_cli_request(&args("new-tab")).unwrap();
+        default_window_target(&mut req, Some(7));
+        assert!(matches!(
+            req,
+            ControlRequest::NewTab {
+                window: None,
+                pane: Some(7),
+                ..
+            }
+        ));
+
+        let mut req = parse_cli_request(&args("--window 1 new-tab")).unwrap();
+        default_window_target(&mut req, Some(7));
+        assert!(matches!(
+            req,
+            ControlRequest::NewTab {
+                window: Some(1),
+                pane: None,
+                ..
+            }
+        ));
+
+        let mut req = parse_cli_request(&args("resize 900 700")).unwrap();
+        default_window_target(&mut req, Some(7));
+        assert!(matches!(
+            req,
+            ControlRequest::Resize {
+                window: None,
+                pane: Some(7),
+                ..
+            }
+        ));
+
+        let mut req = parse_cli_request(&args("--pane 4 focus")).unwrap();
+        default_window_target(&mut req, Some(7));
+        assert!(matches!(
+            req,
+            ControlRequest::FocusWindow {
+                window: None,
+                pane: Some(4),
+            }
+        ));
     }
 
     #[test]
