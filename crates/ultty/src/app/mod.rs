@@ -181,6 +181,7 @@ struct ProcessState {
     socket_wakeup: wakeup::SocketWakeup,
     auto_dump_frames: u32,
     pending_new_windows: usize,
+    pending_restored_windows: Vec<(WindowKey, Option<LogicalSize<f64>>)>,
     pending_reload_config: bool,
     pending_cycle_theme: bool,
 }
@@ -262,11 +263,16 @@ impl WindowState {
         config: &Config,
         font_system: &ultty::renderer::SharedFontSystem,
         shared_gpu: Option<&gpu::SharedGpu>,
+        initial_size: Option<LogicalSize<f64>>,
     ) -> Result<Self> {
         let create_start = Instant::now();
+        let inner_size = initial_size.unwrap_or(LogicalSize::new(
+            f64::from(DEFAULT_WIDTH),
+            f64::from(DEFAULT_HEIGHT),
+        ));
         let attributes = Window::default_attributes()
             .with_title(WINDOW_TITLE)
-            .with_inner_size(LogicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT))
+            .with_inner_size(inner_size)
             .with_min_inner_size(LogicalSize::new(200.0, 100.0))
             .with_transparent(true)
             .with_decorations(false)
@@ -480,11 +486,6 @@ impl WindowState {
 }
 
 impl ProcessState {
-    /// Save the current session, unless this process keeps none.
-    pub(super) fn save_session(&self) {
-        save_session(&self.runtime.manager, self.session_file.as_deref());
-    }
-
     /// Create a new tab in `window` whose shell is wired to its own protocol socket.
     pub(super) fn create_tab_in_window(&mut self, window: WindowKey) -> std::io::Result<TabId> {
         self.runtime
@@ -545,7 +546,8 @@ impl ProcessState {
 }
 
 impl App {
-    /// Create a new application with its initial window.
+    /// Create a new application with its initial window (and queue any extra
+    /// windows restored from a v2 session once the shared GPU is ready).
     fn new(
         event_loop: &ActiveEventLoop,
         event_proxy: EventLoopProxy<AppEvent>,
@@ -553,6 +555,23 @@ impl App {
         config: Config,
     ) -> Result<Self> {
         tracing::info!("Loaded configuration");
+
+        let restored_session = Self::load_startup_session(&config, startup_command)?;
+        let restored_sizes: Vec<Option<LogicalSize<f64>>> = restored_session
+            .as_ref()
+            .map(|session| {
+                session
+                    .windows
+                    .iter()
+                    .filter(|window| !window.tabs.is_empty())
+                    .map(|window| {
+                        window
+                            .size
+                            .map(|size| LogicalSize::new(size.width, size.height))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let primary_key = WindowKey::PRIMARY;
         let font_system = ultty::renderer::SharedFontSystem::new();
@@ -563,6 +582,7 @@ impl App {
             &config,
             &font_system,
             None,
+            restored_sizes.first().copied().flatten(),
         )?;
         let (cols, rows) = first_window.renderer.terminal_dimensions();
         tracing::info!("Terminal size: {}x{}", cols, rows);
@@ -574,12 +594,13 @@ impl App {
         }
         let control_server = Self::start_control_server();
 
-        let mut terminal_manager = Self::create_terminal_manager(
+        let mut terminal_manager = Self::create_terminal_manager_with_session(
             &config,
             cols,
             rows,
             &mut protocol_server,
             startup_command,
+            restored_session.as_ref(),
         )?;
         tracing::debug!(target: "ultty::startup", "shell started");
         terminal_manager.set_theme_colors(config.colors.theme_colors());
@@ -587,6 +608,13 @@ impl App {
         terminal_manager.set_image_storage_limit(config.images.storage_limit_bytes());
         terminal_manager.set_close_on_exit(config.behavior.close_on_exit);
         terminal_manager.set_inherit_working_directory(config.behavior.inherit_working_directory);
+        let pending_restored_windows: Vec<(WindowKey, Option<LogicalSize<f64>>)> = terminal_manager
+            .window_ids()
+            .into_iter()
+            .enumerate()
+            .skip(1)
+            .map(|(idx, key)| (key, restored_sizes.get(idx).copied().flatten()))
+            .collect();
         let pty_proxy = std::sync::Mutex::new(event_proxy.clone());
         let published_panes = control_events::open_panes(&terminal_manager)
             .into_iter()
@@ -647,6 +675,7 @@ impl App {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0),
             pending_new_windows: 0,
+            pending_restored_windows,
             pending_reload_config: false,
             pending_cycle_theme: false,
         };
@@ -683,6 +712,89 @@ impl App {
             win,
         };
         Some(f(&mut ctx))
+    }
+
+    /// Snapshot every open window (including logical inner sizes) into v2 session data.
+    pub(super) fn to_session_data(&self) -> ultty::session::SessionData {
+        let mut sizes: HashMap<WindowKey, ultty::session::WindowSize> = self
+            .windows
+            .iter()
+            .map(|(&key, win)| {
+                let physical = win.window.inner_size();
+                let scale = f64::from(win.scale_factor.max(f32::EPSILON));
+                (
+                    key,
+                    ultty::session::WindowSize {
+                        width: f64::from(physical.width) / scale,
+                        height: f64::from(physical.height) / scale,
+                    },
+                )
+            })
+            .collect();
+        for &(key, size) in &self.shared.pending_restored_windows {
+            if let Some(logical) = size {
+                sizes.entry(key).or_insert(ultty::session::WindowSize {
+                    width: logical.width,
+                    height: logical.height,
+                });
+            }
+        }
+        self.shared
+            .runtime
+            .manager
+            .to_session_data_with_sizes(&sizes)
+    }
+
+    /// Save all open windows to `session_file`, unless this process keeps none.
+    pub(super) fn save_session(&self) {
+        let Some(file) = self.shared.session_file.as_deref() else {
+            return;
+        };
+        match self.to_session_data().save(file) {
+            Ok(()) => tracing::info!("Session saved"),
+            Err(e) => tracing::warn!("Failed to save session: {}", e),
+        }
+    }
+
+    /// Create OS windows for any additional restored session windows once the
+    /// primary window's shared GPU device is ready.
+    fn open_pending_restored_windows(&mut self, event_loop: &ActiveEventLoop) {
+        let pending = std::mem::take(&mut self.shared.pending_restored_windows);
+        for (key, initial_size) in pending {
+            if self.windows.contains_key(&key) {
+                continue;
+            }
+            match WindowState::create(
+                key,
+                event_loop,
+                self.shared.proxy.clone(),
+                &self.shared.config,
+                &self.shared.font_system,
+                self.shared.shared_gpu.as_ref(),
+                initial_size,
+            ) {
+                Ok(win) => {
+                    let winit_id = win.window.id();
+                    self.windows.insert(key, win);
+                    self.window_ids.insert(winit_id, key);
+                    self.with_window(key, |ctx| {
+                        ctx.update_tab_bar();
+                        ctx.relayout_terminals();
+                        ctx.win.needs_redraw = true;
+                    });
+                    if let Some(server) = self.shared.control_server.as_mut() {
+                        server.publish(&ultty_protocol::control::ControlEvent::WindowOpened {
+                            window: key.raw() as u64,
+                        });
+                    }
+                }
+                Err(error) => {
+                    tracing::error!("Failed to open restored window {}: {error:#}", key.raw());
+                    self.shared.runtime.manager.close_window(key);
+                    self.shared.sync_protocol_tabs();
+                }
+            }
+        }
     }
 
     /// The window targeted by window-unqualified control commands.
@@ -755,6 +867,7 @@ impl App {
             &self.shared.config,
             &self.shared.font_system,
             self.shared.shared_gpu.as_ref(),
+            None,
         ) {
             Ok(win) => win,
             Err(error) => {
@@ -794,7 +907,7 @@ impl App {
     pub(super) fn close_window(&mut self, key: WindowKey) -> bool {
         let is_last = self.windows.len() <= 1;
         if is_last {
-            self.shared.save_session();
+            self.save_session();
         }
         let removed = self.windows.remove(&key);
         if let Some(win) = removed {
@@ -898,12 +1011,55 @@ impl App {
     ///
     /// Every tab created here gets a listening socket on `protocol_server`
     /// before its shell is spawned.
+    fn load_startup_session(
+        config: &Config,
+        startup_command: Option<&StartupCommand>,
+    ) -> Result<Option<ultty::session::SessionData>> {
+        match startup_command {
+            Some(StartupCommand::Workspace(name)) => {
+                Ok(Some(ultty::session::SessionData::load_named(name)?))
+            }
+            Some(_) => Ok(None),
+            None if config.behavior.restore_session => {
+                let Some(session) = ultty::session::SessionData::load_last() else {
+                    return Ok(None);
+                };
+                if let Err(error) = session.validate() {
+                    tracing::warn!("Ignoring invalid saved session: {error}");
+                    return Ok(None);
+                }
+                Ok(Some(session))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[cfg(test)]
     fn create_terminal_manager(
         config: &Config,
         cols: u16,
         rows: u16,
         protocol_server: &mut Option<ProtocolServer>,
         startup_command: Option<&StartupCommand>,
+    ) -> Result<TerminalManager> {
+        let session = Self::load_startup_session(config, startup_command)?;
+        Self::create_terminal_manager_with_session(
+            config,
+            cols,
+            rows,
+            protocol_server,
+            startup_command,
+            session.as_ref(),
+        )
+    }
+
+    fn create_terminal_manager_with_session(
+        config: &Config,
+        cols: u16,
+        rows: u16,
+        protocol_server: &mut Option<ProtocolServer>,
+        startup_command: Option<&StartupCommand>,
+        restored_session: Option<&ultty::session::SessionData>,
     ) -> Result<TerminalManager> {
         if let Some(command) = startup_command {
             return match command {
@@ -928,9 +1084,16 @@ impl App {
                     )
                 }
                 StartupCommand::Workspace(name) => {
-                    let session = ultty::session::SessionData::load_named(name)?;
+                    let owned;
+                    let session = match restored_session {
+                        Some(session) => session,
+                        None => {
+                            owned = ultty::session::SessionData::load_named(name)?;
+                            &owned
+                        }
+                    };
                     Self::create_manager_from_session(
-                        &session,
+                        session,
                         &config.terminal,
                         cols,
                         rows,
@@ -940,24 +1103,22 @@ impl App {
             };
         }
 
-        // Try to restore session if enabled
-        if config.behavior.restore_session {
-            if let Some(session) = ultty::session::SessionData::load_last() {
-                tracing::info!(
-                    "Restoring previous session with {} tabs",
-                    session.tabs.len()
-                );
-                match Self::create_manager_from_session(
-                    &session,
-                    &config.terminal,
-                    cols,
-                    rows,
-                    protocol_server,
-                ) {
-                    Ok(manager) => return Ok(manager),
-                    Err(e) => {
-                        tracing::warn!("Failed to restore session: {}, using default", e);
-                    }
+        if let Some(session) = restored_session {
+            tracing::info!(
+                "Restoring previous session with {} window(s) and {} tab(s)",
+                session.windows.len(),
+                session.total_tab_count()
+            );
+            match Self::create_manager_from_session(
+                session,
+                &config.terminal,
+                cols,
+                rows,
+                protocol_server,
+            ) {
+                Ok(manager) => return Ok(manager),
+                Err(e) => {
+                    tracing::warn!("Failed to restore session: {}, using default", e);
                 }
             }
         }
@@ -2001,6 +2162,7 @@ fn profile_split_direction(value: Option<&str>) -> Result<ultty::terminal_manage
 }
 
 /// Write `manager`'s tabs to `file`; with no file, write nothing.
+#[cfg(test)]
 fn save_session(manager: &TerminalManager, file: Option<&std::path::Path>) {
     let Some(file) = file else {
         return;
@@ -2093,7 +2255,7 @@ impl ApplicationHandler<AppEvent> for AppHandler {
             }
             AppEvent::ShutdownSignal => {
                 if let Some(app) = self.app.as_ref() {
-                    app.shared.save_session();
+                    app.save_session();
                 }
                 event_loop.exit();
             }
@@ -2109,6 +2271,7 @@ impl ApplicationHandler<AppEvent> for AppHandler {
                         app.with_window(window_key, |ctx| {
                             ctx.install_renderer(gpu);
                         });
+                        app.open_pending_restored_windows(event_loop);
                         app.update_and_schedule(event_loop);
                     }
                     Err(error) => {
@@ -2246,6 +2409,8 @@ mod tests {
         let file = session_file(None, Some(last.clone()));
         save_session(&manager, file.as_deref());
         let saved = std::fs::read_to_string(&last).unwrap();
+        assert!(saved.contains("\"version\": 2"), "{saved}");
+        assert!(saved.contains("\"windows\""), "{saved}");
         assert!(saved.contains("\"tabs\""), "{saved}");
     }
 

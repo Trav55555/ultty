@@ -64,16 +64,17 @@ Ranked by how much a typical user would notice:
    and can switch between a light and a dark theme with the system
    appearance, which Ultty does not read. Themes whose licence is unknown or
    restrictive upstream are left out.
-9. **Multi-window (in progress), and no quick terminal.** *Partly fixed.*
-   "New window" opens an in-process window sharing the GPU device, font
-   database, and ref-counted per-size glyph atlases with per-window zoom, and
-   `ulttyctl` supports window-scoped automation (`windows`, `new-window`,
-   `close-window`, `--window`, and `window_opened`/`window_closed` events)
-   ([ADR 0027](adr/0027-multiple-windows-per-process.md) slices 1–3; opt-in
+9. **Multi-window (in progress), and no quick terminal.** *Mostly fixed for
+   multi-window.* "New window" opens an in-process window sharing the GPU
+   device, font database, and ref-counted per-size glyph atlases with
+   per-window zoom; `ulttyctl` supports window-scoped automation (`windows`,
+   `new-window`, `close-window`, `--window`, and `window_opened`/`window_closed`
+   events); and `SessionData` v2 saves and restores multiple windows and their
+   logical sizes with v1 backward compatibility
+   ([ADR 0027](adr/0027-multiple-windows-per-process.md) slices 1–4; opt-in
    `behavior.window_per_process = true` keeps process isolation). Still
-   missing: multi-window session restore (slice 4), moving tabs between
-   windows (slice 5), single-instance CLI (slice 6), and a quick terminal
-   ([ADR 0028](adr/0028-quick-terminal.md)).
+   missing: moving tabs between windows (slice 5), single-instance CLI
+   (slice 6), and a quick terminal ([ADR 0028](adr/0028-quick-terminal.md)).
 10. **Linux x86_64 only in practice.** Release builds and CI cover Linux
     x86_64 only. macOS code exists but is not built or tested by CI. There
     is no Windows or BSD support. Alacritty runs on Linux, BSD, macOS and

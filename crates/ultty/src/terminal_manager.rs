@@ -2074,69 +2074,95 @@ impl TerminalManager {
         self.window_drag_divider(self.focused_window, divider, delta);
     }
 
-    /// Extract session data from the current state.
+    /// Extract v2 session data from the current state without window sizes.
     pub fn to_session_data(&self) -> crate::session::SessionData {
-        use crate::session::{SessionData, TabData, TerminalData};
+        self.to_session_data_with_sizes(&std::collections::HashMap::new())
+    }
 
-        let active_id = self.active_tab().map(|t| t.id);
-        let active_tab_index = active_id
-            .and_then(|active| self.tabs.iter().position(|t| t.id == active))
-            .unwrap_or(0);
+    /// Extract v2 session data from the current state, recording each window's
+    /// logical inner size when supplied.
+    pub fn to_session_data_with_sizes(
+        &self,
+        sizes: &std::collections::HashMap<WindowKey, crate::session::WindowSize>,
+    ) -> crate::session::SessionData {
+        use crate::session::{SessionData, TabData, TerminalData, WindowData, SESSION_VERSION};
 
-        let tabs = self
-            .tabs
+        let windows = self
+            .windows
             .iter()
-            .map(|tab| {
-                let terminals = tab
-                    .terminals
-                    .iter()
-                    .filter_map(|&tid| {
-                        self.terminals.iter().find(|t| t.id == tid).map(|t| {
-                            let working_dir: Option<String> = t
-                                .event_loop
+            .filter_map(|record| {
+                let mut tabs = Vec::new();
+                let mut active_tab_index = 0;
+
+                for &tab_id in &record.tabs {
+                    let Some(tab) = self.tabs.iter().find(|t| t.id == tab_id) else {
+                        continue;
+                    };
+                    if record.active_tab == Some(tab_id) {
+                        active_tab_index = tabs.len();
+                    }
+                    let terminals = tab
+                        .terminals
+                        .iter()
+                        .filter_map(|&tid| {
+                            self.terminals.iter().find(|t| t.id == tid).map(|t| {
+                                let working_dir: Option<String> = t
+                                    .event_loop
+                                    .terminal()
+                                    .working_directory()
+                                    .map(|s| s.to_string())
+                                    .or_else(|| t.event_loop.child_working_directory());
+                                TerminalData {
+                                    title: t.title.clone(),
+                                    working_directory: working_dir,
+                                    is_focused: tid == tab.focused_terminal,
+                                }
+                            })
+                        })
+                        .collect();
+
+                    let working_directory: Option<String> = tab
+                        .terminals
+                        .first()
+                        .and_then(|&tid| self.terminals.iter().find(|t| t.id == tid))
+                        .and_then(|t| {
+                            t.event_loop
                                 .terminal()
                                 .working_directory()
-                                .map(|s| s.to_string());
-                            TerminalData {
-                                title: t.title.clone(),
-                                working_directory: working_dir,
-                                is_focused: tid == tab.focused_terminal,
-                            }
-                        })
-                    })
-                    .collect();
+                                .map(str::to_string)
+                                .or_else(|| t.event_loop.child_working_directory())
+                        });
 
-                // Get working directory from the first terminal or focused terminal
-                let working_directory: Option<String> = tab
-                    .terminals
-                    .first()
-                    .and_then(|&tid| self.terminals.iter().find(|t| t.id == tid))
-                    .and_then(|t| {
-                        t.event_loop
-                            .terminal()
-                            .working_directory()
-                            .map(str::to_string)
+                    tabs.push(TabData {
+                        title: tab.title.clone(),
+                        working_directory,
+                        terminals,
+                        split_direction: direction_name(tab.layout.root_direction()).to_string(),
+                        layout: Some(layout_data(tab.layout.root(), &tab.terminals)),
                     });
-
-                TabData {
-                    title: tab.title.clone(),
-                    working_directory,
-                    terminals,
-                    split_direction: direction_name(tab.layout.root_direction()).to_string(),
-                    layout: Some(layout_data(tab.layout.root(), &tab.terminals)),
                 }
+
+                if tabs.is_empty() {
+                    return None;
+                }
+
+                Some(WindowData {
+                    tabs,
+                    active_tab_index,
+                    size: sizes.get(&record.id).copied(),
+                })
             })
             .collect();
 
         SessionData {
-            version: 1,
-            timestamp: String::new(), // Will be filled by SessionData
-            tabs,
-            active_tab_index,
+            version: SESSION_VERSION,
+            timestamp: crate::session::current_timestamp(),
+            windows,
         }
     }
 
-    /// Create a terminal manager from session data.
+    /// Create a terminal manager from session data (v2 multi-window or
+    /// upgraded v1 single-window).
     ///
     /// `tab_env` supplies the shell environment of every restored tab.
     pub fn from_session(
@@ -2145,95 +2171,105 @@ impl TerminalManager {
         rows: u16,
         tab_env: TabEnvFn,
     ) -> io::Result<Self> {
-        if session.tabs.is_empty() {
-            // No tabs in session, create default
+        let non_empty_windows: Vec<_> = session
+            .windows
+            .iter()
+            .filter(|window| !window.tabs.is_empty())
+            .collect();
+        if non_empty_windows.is_empty() {
             return Self::with_tab_env(cols, rows, tab_env);
         }
 
         let mut manager = Self::empty(cols, rows);
 
-        for (i, tab_data) in session.tabs.iter().enumerate() {
-            // Create tab
-            let tab_id = TabId(manager.next_tab_id);
-            manager.next_tab_id += 1;
-            let env = tab_env(tab_id)?;
-
-            // Create at least one terminal for this tab
-            let terminal_count = tab_data.terminals.len().max(1);
-            let mut terminal_ids = Vec::new();
-            let mut focused_terminal_id = None;
-
-            for (j, term_data) in tab_data.terminals.iter().take(terminal_count).enumerate() {
-                let tid = TerminalId(manager.next_terminal_id);
-                manager.next_terminal_id += 1;
-
-                // Create terminal with working directory if available
-                let mut terminal = if let Some(ref wd) = term_data.working_directory {
-                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, None, wd, &env)?
-                } else if let Some(ref wd) = tab_data.working_directory {
-                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, None, wd, &env)?
-                } else {
-                    ManagedTerminal::new(tid, tab_id, cols, rows, None, &env)?
-                };
-
-                terminal.title = term_data.title.clone();
-                manager.terminals.push(terminal);
-                terminal_ids.push(tid);
-
-                if term_data.is_focused || j == 0 {
-                    focused_terminal_id = Some(tid);
-                }
-            }
-
-            // If no terminals were created (empty terminals list), create one
-            if terminal_ids.is_empty() {
-                let tid = TerminalId(manager.next_terminal_id);
-                manager.next_terminal_id += 1;
-                let mut terminal = if let Some(ref wd) = tab_data.working_directory {
-                    ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, None, wd, &env)?
-                } else {
-                    ManagedTerminal::new(tid, tab_id, cols, rows, None, &env)?
-                };
-                terminal.title = tab_data.title.clone();
-                manager.terminals.push(terminal);
-                terminal_ids.push(tid);
-                focused_terminal_id = Some(tid);
-            }
-
-            let split_direction = parse_direction(&tab_data.split_direction);
-            // The saved tree when it covers exactly these panes; otherwise
-            // (older sessions, or a mismatch) one row or column of them.
-            let layout = tab_data
-                .layout
-                .as_ref()
-                .and_then(|data| restore_layout(data, &terminal_ids))
-                .unwrap_or_else(|| flat_layout(split_direction, &terminal_ids));
-
-            let tab = Tab {
-                id: tab_id,
-                window_id: WindowKey::PRIMARY,
-                focused_terminal: focused_terminal_id.ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "no focused terminal in restored tab",
-                    )
-                })?,
-                title: tab_data.title.clone(),
-                terminals: layout.panes(),
-                zoomed_pane: None,
-                layout,
-                shell_env: env,
+        for (win_idx, win_data) in non_empty_windows.into_iter().enumerate() {
+            let window_key = if win_idx == 0 {
+                WindowKey::PRIMARY
+            } else {
+                let key = WindowKey(manager.next_window_id);
+                manager.next_window_id += 1;
+                manager.windows.push(WindowRecord::new(key, cols, rows));
+                key
             };
 
-            manager.tabs.push(tab);
-            if let Some(record) = manager.window_record_mut(WindowKey::PRIMARY) {
-                record.tabs.push(tab_id);
-                if i == session.active_tab_index || record.active_tab.is_none() {
-                    record.active_tab = Some(tab_id);
+            for (i, tab_data) in win_data.tabs.iter().enumerate() {
+                let tab_id = TabId(manager.next_tab_id);
+                manager.next_tab_id += 1;
+                let env = tab_env(tab_id)?;
+
+                let terminal_count = tab_data.terminals.len().max(1);
+                let mut terminal_ids = Vec::new();
+                let mut focused_terminal_id = None;
+
+                for (j, term_data) in tab_data.terminals.iter().take(terminal_count).enumerate() {
+                    let tid = TerminalId(manager.next_terminal_id);
+                    manager.next_terminal_id += 1;
+
+                    let mut terminal = if let Some(ref wd) = term_data.working_directory {
+                        ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, None, wd, &env)?
+                    } else if let Some(ref wd) = tab_data.working_directory {
+                        ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, None, wd, &env)?
+                    } else {
+                        ManagedTerminal::new(tid, tab_id, cols, rows, None, &env)?
+                    };
+
+                    terminal.title = term_data.title.clone();
+                    manager.terminals.push(terminal);
+                    terminal_ids.push(tid);
+
+                    if term_data.is_focused || j == 0 {
+                        focused_terminal_id = Some(tid);
+                    }
+                }
+
+                if terminal_ids.is_empty() {
+                    let tid = TerminalId(manager.next_terminal_id);
+                    manager.next_terminal_id += 1;
+                    let mut terminal = if let Some(ref wd) = tab_data.working_directory {
+                        ManagedTerminal::new_with_dir(tid, tab_id, cols, rows, None, wd, &env)?
+                    } else {
+                        ManagedTerminal::new(tid, tab_id, cols, rows, None, &env)?
+                    };
+                    terminal.title = tab_data.title.clone();
+                    manager.terminals.push(terminal);
+                    terminal_ids.push(tid);
+                    focused_terminal_id = Some(tid);
+                }
+
+                let split_direction = parse_direction(&tab_data.split_direction);
+                let layout = tab_data
+                    .layout
+                    .as_ref()
+                    .and_then(|data| restore_layout(data, &terminal_ids))
+                    .unwrap_or_else(|| flat_layout(split_direction, &terminal_ids));
+
+                let tab = Tab {
+                    id: tab_id,
+                    window_id: window_key,
+                    focused_terminal: focused_terminal_id.ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "no focused terminal in restored tab",
+                        )
+                    })?,
+                    title: tab_data.title.clone(),
+                    terminals: layout.panes(),
+                    zoomed_pane: None,
+                    layout,
+                    shell_env: env,
+                };
+
+                manager.tabs.push(tab);
+                if let Some(record) = manager.window_record_mut(window_key) {
+                    record.tabs.push(tab_id);
+                    if i == win_data.active_tab_index || record.active_tab.is_none() {
+                        record.active_tab = Some(tab_id);
+                    }
                 }
             }
         }
 
+        manager.focused_window = WindowKey::PRIMARY;
         Ok(manager)
     }
 }
@@ -2469,7 +2505,9 @@ mod tests {
         manager.focus_terminal(right);
         manager.split_vertical().unwrap().unwrap();
         let saved = manager.to_session_data();
-        let layout = saved.tabs[0].layout.clone().unwrap();
+        assert_eq!(saved.version, crate::session::SESSION_VERSION);
+        assert_eq!(saved.windows.len(), 1);
+        let layout = saved.windows[0].tabs[0].layout.clone().unwrap();
         let restored =
             restore_layout(&layout, &[TerminalId(10), TerminalId(11), TerminalId(12)]).unwrap();
         let rects = restored.rects((0.0, 0.0, 800.0, 480.0));
@@ -2478,6 +2516,64 @@ mod tests {
         assert_eq!(rects[2], (TerminalId(12), (400.0, 240.0, 400.0, 240.0)));
         // A tree that does not cover the panes falls back to a flat layout.
         assert!(restore_layout(&layout, &[TerminalId(10), TerminalId(11)]).is_none());
+    }
+
+    #[test]
+    fn multi_window_session_round_trips_windows_tabs_and_sizes() {
+        use crate::session::WindowSize;
+        use std::collections::HashMap;
+
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let w0_tab2 = manager
+            .create_tab_in_window(WindowKey::PRIMARY, &mut no_tab_env)
+            .unwrap();
+        manager.set_tab_title(w0_tab2, "win0-second");
+        let (w1, w1_tab1) = manager.create_window(80, 24, &mut no_tab_env).unwrap();
+        manager.set_tab_title(w1_tab1, "win1-first");
+
+        let sizes = HashMap::from([
+            (
+                WindowKey::PRIMARY,
+                WindowSize {
+                    width: 960.0,
+                    height: 640.0,
+                },
+            ),
+            (
+                w1,
+                WindowSize {
+                    width: 720.0,
+                    height: 480.0,
+                },
+            ),
+        ]);
+        let saved = manager.to_session_data_with_sizes(&sizes);
+        assert_eq!(saved.version, 2);
+        assert_eq!(saved.windows.len(), 2);
+        assert_eq!(saved.windows[0].tabs.len(), 2);
+        assert_eq!(saved.windows[0].active_tab_index, 1);
+        assert_eq!(
+            saved.windows[0].size,
+            sizes.get(&WindowKey::PRIMARY).copied()
+        );
+        assert_eq!(saved.windows[1].tabs.len(), 1);
+        assert_eq!(saved.windows[1].active_tab_index, 0);
+        assert_eq!(saved.windows[1].size, sizes.get(&w1).copied());
+
+        let restored = TerminalManager::from_session(&saved, 80, 24, &mut no_tab_env).unwrap();
+        assert_eq!(restored.window_count(), 2);
+        let keys = restored.window_ids();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(restored.window_tab_count(keys[0]), 2);
+        assert_eq!(restored.window_tab_count(keys[1]), 1);
+        assert_eq!(
+            restored.window_active_tab(keys[0]).unwrap().title,
+            "win0-second"
+        );
+        assert_eq!(
+            restored.window_active_tab(keys[1]).unwrap().title,
+            "win1-first"
+        );
     }
 
     fn grid(manager: &TerminalManager, id: TerminalId) -> (u16, u16) {

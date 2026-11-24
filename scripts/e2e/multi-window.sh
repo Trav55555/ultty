@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# ADR 0027 slices 1 and 3 GUI smoke: open windows in a single Ultty process
+# ADR 0027 slices 1, 3, and 4 GUI smoke: open windows in a single Ultty process
 # via the main menu ("New window") and `ulttyctl new-window`, verify X11 input
 # isolation, `describe`, `windows`, `--window` / `--pane` targeting (`new-tab`,
 # `resize`, `screenshot`), `window_opened`/`window_closed` subscribe events,
-# closing a window while keeping another alive, and closing the last window.
+# closing a window while keeping another alive, closing the last window, and
+# SessionData v2 multi-window save/restore with logical window sizes.
 #
 #   scripts/e2e/multi-window.sh [artifact-dir]
 set -euo pipefail
@@ -269,6 +270,22 @@ for _ in $(seq 80); do
 done
 [ "$win3_shot" -eq 1 ] && [ -s "$out/win3.png" ] || fail "--window $win3_id screenshot failed"
 
+# Save the 2-window layout via `workspace save` and verify SessionData v2 schema.
+"$ULTTYCTL" workspace save mw-s4 || fail "workspace save mw-s4 failed"
+ws_file="$out/config/ultty/sessions/mw-s4.json"
+[ -s "$ws_file" ] || fail "workspace save did not write $ws_file"
+python3 -c '
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert data["version"] == 2, data
+assert "tabs" not in data, data
+wins = data["windows"]
+assert len(wins) == 2, wins
+assert len(wins[0]["tabs"]) == 2 and len(wins[1]["tabs"]) == 2, wins
+assert wins[0]["size"]["width"] == 920.0 and wins[0]["size"]["height"] == 640.0, wins
+assert wins[1]["size"]["width"] == 800.0 and wins[1]["size"]["height"] == 600.0, wins
+' "$ws_file" || fail "saved v2 workspace file mismatch"
+
 # Unknown window IDs fail cleanly.
 if "$ULTTYCTL" --window 999 focus >/dev/null 2>&1; then
     fail "expected --window 999 focus to fail"
@@ -317,5 +334,73 @@ wait "$ultty_pid" || fail "Ultty exited with non-zero status"
 ultty_pid=""
 
 ! grep -q "panicked at" "$out/ultty.log" || fail "Ultty logged a panic"
+
+# Slice 4: restore the saved 2-window v2 session via `restore_session = true`,
+# verify both windows reopen in-process with their saved sizes and tabs, then
+# exit cleanly via SIGTERM so ShutdownSignal saves both windows back to last.json.
+printf '[behavior]\ncursor_blink = false\nrestore_session = true\n' >"$out/config/ultty/config.toml"
+cp "$ws_file" "$out/config/ultty/sessions/last.json"
+
+env -u WAYLAND_DISPLAY \
+    DISPLAY="$display" \
+    XDG_RUNTIME_DIR="$runtime" \
+    XDG_CONFIG_HOME="$out/config" \
+    SHELL=/bin/sh \
+    PS1='$ ' \
+    RUST_LOG="info,ultty::startup=debug,wgpu_core=warn,wgpu_hal=warn" \
+    "$ULTTY" >"$out/ultty-restore.log" 2>&1 &
+ultty_pid=$!
+export ULTTY_PID="$ultty_pid"
+
+for _ in $(seq 600); do
+    [ -S "$runtime/ultty-ctl-$ultty_pid.sock" ] && "$ULTTYCTL" ping >/dev/null 2>&1 && break
+    kill -0 "$ultty_pid" 2>/dev/null || fail "Restored Ultty exited during startup"
+    sleep 0.1
+done
+"$ULTTYCTL" ping >/dev/null 2>&1 || fail "Restored Ultty never answered on control socket"
+
+restored_ok=0
+for _ in $(seq 120); do
+    if "$ULTTYCTL" --json windows 2>/dev/null | python3 -c '
+import json, sys
+wins = json.load(sys.stdin)["windows"]
+if len(wins) != 2:
+    sys.exit(1)
+assert len(wins[0]["tabs"]) == 2 and len(wins[1]["tabs"]) == 2, wins
+assert wins[0]["width"] == 920 and wins[0]["height"] == 640, wins
+assert wins[1]["width"] == 800 and wins[1]["height"] == 600, wins
+' 2>/dev/null; then
+        restored_ok=1
+        break
+    fi
+    kill -0 "$ultty_pid" 2>/dev/null || fail "Restored Ultty exited while restoring windows"
+    sleep 0.1
+done
+[ "$restored_ok" -eq 1 ] || fail "Session v2 restore did not reopen 2 windows with saved sizes and tabs"
+
+ctl_count=$(ls "$runtime"/ultty-ctl-*.sock 2>/dev/null | wc -l)
+[ "$ctl_count" -eq 1 ] || fail "expected 1 control socket after multi-window restore, found $ctl_count"
+
+kill -TERM "$ultty_pid"
+exited=0
+for _ in $(seq 100); do
+    if ! kill -0 "$ultty_pid" 2>/dev/null; then
+        exited=1
+        break
+    fi
+    sleep 0.1
+done
+[ "$exited" -eq 1 ] || fail "Restored Ultty did not exit cleanly on SIGTERM"
+wait "$ultty_pid" || fail "Restored Ultty exited with non-zero status on SIGTERM"
+ultty_pid=""
+
+python3 -c '
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert data["version"] == 2 and len(data["windows"]) == 2, data
+assert len(data["windows"][0]["tabs"]) == 2 and len(data["windows"][1]["tabs"]) == 2, data
+' "$out/config/ultty/sessions/last.json" || fail "ShutdownSignal did not preserve both windows in last.json"
+
+! grep -q "panicked at" "$out/ultty-restore.log" || fail "Restored Ultty logged a panic"
 
 echo "multi-window: ok ($out)"

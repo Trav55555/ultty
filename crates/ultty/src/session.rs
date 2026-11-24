@@ -1,6 +1,6 @@
 //! Session save/restore for persisting terminal state across restarts.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fs;
 use std::io;
 use std::io::{Read, Write};
@@ -11,18 +11,134 @@ use std::time::SystemTime;
 
 static NEXT_SAVE: AtomicU64 = AtomicU64::new(1);
 const MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_SESSION_WINDOWS: usize = 64;
+const MAX_SESSION_TABS: usize = 128;
+const MAX_SESSION_PANES: usize = 1024;
+const MIN_WINDOW_LOGICAL_WIDTH: f64 = 200.0;
+const MIN_WINDOW_LOGICAL_HEIGHT: f64 = 100.0;
+const MAX_WINDOW_LOGICAL_EXTENT: f64 = 32_768.0;
+
+/// Current session file format version (ADR 0027 Slice 4).
+pub const SESSION_VERSION: u32 = 2;
+
+/// Saved inner window size in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowSize {
+    /// Inner width in logical pixels.
+    pub width: f64,
+    /// Inner height in logical pixels.
+    pub height: f64,
+}
+
+/// Saved state of a single window in a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowData {
+    /// Tabs belonging to this window, in tab-bar order.
+    pub tabs: Vec<TabData>,
+    /// Index of the active tab within `tabs`.
+    pub active_tab_index: usize,
+    /// Saved inner window size in logical pixels, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<WindowSize>,
+}
 
 /// Session data that can be saved and restored.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The writer always emits v2 (`windows: [{ tabs, active_tab_index, size }]`).
+/// Legacy v1 files (`tabs`, `active_tab_index`) load transparently as a single
+/// window with `size: None`.
+#[derive(Debug, Clone, Serialize)]
 pub struct SessionData {
-    /// Session format version
+    /// Session format version (`2`).
     pub version: u32,
-    /// When the session was saved
+    /// When the session was saved.
     pub timestamp: String,
-    /// Tabs in the session
-    pub tabs: Vec<TabData>,
-    /// Index of the active tab
-    pub active_tab_index: usize,
+    /// Windows in the session.
+    pub windows: Vec<WindowData>,
+}
+
+#[derive(Deserialize)]
+struct RawSessionData {
+    version: u32,
+    timestamp: String,
+    #[serde(default)]
+    windows: Option<Vec<WindowData>>,
+    #[serde(default)]
+    tabs: Option<Vec<TabData>>,
+    #[serde(default)]
+    active_tab_index: Option<usize>,
+}
+
+impl<'de> Deserialize<'de> for SessionData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawSessionData::deserialize(deserializer)?;
+        match raw.version {
+            1 => {
+                if raw.windows.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "v1 session must not contain a windows field",
+                    ));
+                }
+                let tabs = raw
+                    .tabs
+                    .ok_or_else(|| serde::de::Error::missing_field("tabs"))?;
+                let active_tab_index = raw.active_tab_index.unwrap_or(0);
+                let windows = if tabs.is_empty() && active_tab_index == 0 {
+                    Vec::new()
+                } else {
+                    vec![WindowData {
+                        tabs,
+                        active_tab_index,
+                        size: None,
+                    }]
+                };
+                Ok(Self {
+                    version: SESSION_VERSION,
+                    timestamp: raw.timestamp,
+                    windows,
+                })
+            }
+            2 => {
+                if raw.tabs.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "v2 session must not contain top-level tabs",
+                    ));
+                }
+                let windows = raw
+                    .windows
+                    .ok_or_else(|| serde::de::Error::missing_field("windows"))?;
+                Ok(Self {
+                    version: SESSION_VERSION,
+                    timestamp: raw.timestamp,
+                    windows,
+                })
+            }
+            other => {
+                if raw.windows.is_none() && raw.tabs.is_none() {
+                    return Err(serde::de::Error::missing_field("windows"));
+                }
+                let windows = raw.windows.unwrap_or_else(|| {
+                    raw.tabs
+                        .map(|tabs| {
+                            vec![WindowData {
+                                tabs,
+                                active_tab_index: raw.active_tab_index.unwrap_or(0),
+                                size: None,
+                            }]
+                        })
+                        .unwrap_or_default()
+                });
+                Ok(Self {
+                    version: other,
+                    timestamp: raw.timestamp,
+                    windows,
+                })
+            }
+        }
+    }
 }
 
 /// Data for a single tab.
@@ -123,14 +239,18 @@ fn validate_layout(layout: &LayoutData, depth: usize, seen: &mut [bool]) -> io::
 }
 
 impl SessionData {
-    /// Create a new empty session.
+    /// Create a new empty v2 session.
     pub fn new() -> Self {
         Self {
-            version: 1,
-            timestamp: iso_timestamp(SystemTime::now()),
-            tabs: Vec::new(),
-            active_tab_index: 0,
+            version: SESSION_VERSION,
+            timestamp: current_timestamp(),
+            windows: Vec::new(),
         }
+    }
+
+    /// Total number of tabs across all windows in the session.
+    pub fn total_tab_count(&self) -> usize {
+        self.windows.iter().map(|window| window.tabs.len()).sum()
     }
 
     /// Get the sessions directory path.
@@ -197,27 +317,47 @@ impl SessionData {
     /// Validate a requested layout before creating any processes.
     pub fn validate(&self) -> io::Result<()> {
         let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
-        if self.version != 1 {
+        if self.version != SESSION_VERSION {
             return Err(invalid("unsupported workspace version"));
         }
-        if self.tabs.is_empty() || self.tabs.len() > 128 || self.active_tab_index >= self.tabs.len()
-        {
-            return Err(invalid("invalid workspace tab count or active tab"));
+        if self.windows.is_empty() || self.windows.len() > MAX_SESSION_WINDOWS {
+            return Err(invalid("invalid workspace window count"));
         }
-        let mut total = 0usize;
-        for tab in &self.tabs {
-            total = total.saturating_add(tab.terminals.len());
-            if tab.terminals.is_empty() || total > 1024 {
-                return Err(invalid("invalid workspace pane count"));
+        let mut total_tabs = 0usize;
+        let mut total_panes = 0usize;
+        for window in &self.windows {
+            if let Some(size) = window.size {
+                if !size.width.is_finite()
+                    || !size.height.is_finite()
+                    || size.width < MIN_WINDOW_LOGICAL_WIDTH
+                    || size.height < MIN_WINDOW_LOGICAL_HEIGHT
+                    || size.width > MAX_WINDOW_LOGICAL_EXTENT
+                    || size.height > MAX_WINDOW_LOGICAL_EXTENT
+                {
+                    return Err(invalid("invalid workspace window size"));
+                }
             }
-            if !matches!(tab.split_direction.as_str(), "Horizontal" | "Vertical") {
-                return Err(invalid("invalid workspace split direction"));
+            total_tabs = total_tabs.saturating_add(window.tabs.len());
+            if window.tabs.is_empty()
+                || total_tabs > MAX_SESSION_TABS
+                || window.active_tab_index >= window.tabs.len()
+            {
+                return Err(invalid("invalid workspace tab count or active tab"));
             }
-            if let Some(layout) = &tab.layout {
-                let mut seen = vec![false; tab.terminals.len()];
-                validate_layout(layout, 0, &mut seen)?;
-                if seen.iter().any(|seen| !seen) {
-                    return Err(invalid("workspace layout omits a pane"));
+            for tab in &window.tabs {
+                total_panes = total_panes.saturating_add(tab.terminals.len());
+                if tab.terminals.is_empty() || total_panes > MAX_SESSION_PANES {
+                    return Err(invalid("invalid workspace pane count"));
+                }
+                if !matches!(tab.split_direction.as_str(), "Horizontal" | "Vertical") {
+                    return Err(invalid("invalid workspace split direction"));
+                }
+                if let Some(layout) = &tab.layout {
+                    let mut seen = vec![false; tab.terminals.len()];
+                    validate_layout(layout, 0, &mut seen)?;
+                    if seen.iter().any(|seen| !seen) {
+                        return Err(invalid("workspace layout omits a pane"));
+                    }
                 }
             }
         }
@@ -311,6 +451,11 @@ impl Default for SessionData {
     }
 }
 
+/// Return the current UTC timestamp in ISO 8601 format (`YYYY-MM-DDTHH:MM:SSZ`).
+pub(crate) fn current_timestamp() -> String {
+    iso_timestamp(SystemTime::now())
+}
+
 /// Formats `time` as an ISO 8601 UTC timestamp, `YYYY-MM-DDTHH:MM:SSZ`.
 fn iso_timestamp(time: SystemTime) -> String {
     let secs = time
@@ -371,7 +516,7 @@ mod tests {
     fn test_workspace_validation_rejects_duplicate_missing_and_invalid_weights() {
         let mut session = sample_session();
         session.validate().unwrap();
-        session.tabs[0].layout = Some(LayoutData::Split {
+        session.windows[0].tabs[0].layout = Some(LayoutData::Split {
             direction: "Horizontal".to_owned(),
             children: vec![
                 (LayoutData::Pane { index: 0 }, 0.5),
@@ -379,9 +524,9 @@ mod tests {
             ],
         });
         assert!(session.validate().is_err());
-        session.tabs[0].layout = Some(LayoutData::Pane { index: 0 });
+        session.windows[0].tabs[0].layout = Some(LayoutData::Pane { index: 0 });
         assert!(session.validate().is_err());
-        session.tabs[0].layout = Some(LayoutData::Split {
+        session.windows[0].tabs[0].layout = Some(LayoutData::Split {
             direction: "Horizontal".to_owned(),
             children: vec![
                 (LayoutData::Pane { index: 0 }, 1.0),
@@ -389,9 +534,173 @@ mod tests {
             ],
         });
         assert!(session.validate().is_err());
-        session.tabs[0].layout = None;
-        session.version = 2;
+        session.windows[0].tabs[0].layout = None;
+        session.version = 3;
         assert!(session.validate().is_err());
+    }
+
+    #[test]
+    fn test_v2_validation_rejects_empty_windows_and_invalid_sizes() {
+        let mut empty = SessionData::new();
+        assert!(empty.validate().is_err());
+
+        empty.windows.push(WindowData {
+            tabs: vec![],
+            active_tab_index: 0,
+            size: None,
+        });
+        assert!(empty.validate().is_err());
+
+        for bad_size in [
+            WindowSize {
+                width: 100.0,
+                height: 600.0,
+            },
+            WindowSize {
+                width: 800.0,
+                height: 50.0,
+            },
+            WindowSize {
+                width: f64::NAN,
+                height: 600.0,
+            },
+            WindowSize {
+                width: 800.0,
+                height: f64::INFINITY,
+            },
+            WindowSize {
+                width: 40_000.0,
+                height: 600.0,
+            },
+        ] {
+            let mut session = sample_session();
+            session.windows[0].size = Some(bad_size);
+            assert!(session.validate().is_err(), "{bad_size:?}");
+        }
+    }
+
+    #[test]
+    fn test_v1_file_loads_as_one_window_and_saves_as_v2() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy-v1.json");
+        let v1_json = r#"{
+            "version": 1,
+            "timestamp": "2025-01-15T10:30:00Z",
+            "tabs": [
+                {
+                    "title": "editor",
+                    "working_directory": "/home/user/project",
+                    "terminals": [
+                        {"title": "nvim", "working_directory": "/home/user/project", "is_focused": true}
+                    ],
+                    "split_direction": "Horizontal"
+                },
+                {
+                    "title": "shell",
+                    "working_directory": "/tmp",
+                    "terminals": [
+                        {"title": "sh", "working_directory": "/tmp", "is_focused": true}
+                    ],
+                    "split_direction": "Vertical"
+                }
+            ],
+            "active_tab_index": 1
+        }"#;
+        fs::write(&path, v1_json).unwrap();
+
+        let loaded = SessionData::load(&path).unwrap();
+        loaded.validate().unwrap();
+        assert_eq!(loaded.version, SESSION_VERSION);
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(loaded.windows[0].active_tab_index, 1);
+        assert_eq!(loaded.windows[0].size, None);
+        assert_eq!(loaded.windows[0].tabs.len(), 2);
+        assert_eq!(loaded.windows[0].tabs[0].title, "editor");
+        assert_eq!(loaded.windows[0].tabs[1].title, "shell");
+
+        let v2_path = dir.path().join("rewritten-v2.json");
+        loaded.save(&v2_path).unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&v2_path).unwrap()).unwrap();
+        assert_eq!(raw["version"], 2);
+        assert!(raw.get("tabs").is_none());
+        assert_eq!(raw["windows"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_v2_multi_window_session_round_trips_with_logical_sizes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("multi-window.json");
+        let original = SessionData {
+            version: SESSION_VERSION,
+            timestamp: "2026-11-24T00:00:00Z".to_string(),
+            windows: vec![
+                WindowData {
+                    tabs: sample_tabs(),
+                    active_tab_index: 1,
+                    size: Some(WindowSize {
+                        width: 1024.0,
+                        height: 768.0,
+                    }),
+                },
+                WindowData {
+                    tabs: vec![TabData {
+                        title: "logs".to_string(),
+                        working_directory: Some("/var/log".to_string()),
+                        terminals: vec![TerminalData {
+                            title: "tail".to_string(),
+                            working_directory: Some("/var/log".to_string()),
+                            is_focused: true,
+                        }],
+                        split_direction: "Horizontal".to_string(),
+                        layout: Some(LayoutData::Pane { index: 0 }),
+                    }],
+                    active_tab_index: 0,
+                    size: Some(WindowSize {
+                        width: 900.0,
+                        height: 540.0,
+                    }),
+                },
+            ],
+        };
+        original.validate().unwrap();
+        original.save(&path).unwrap();
+
+        let loaded = SessionData::load(&path).unwrap();
+        loaded.validate().unwrap();
+        assert_eq!(loaded.version, 2);
+        assert_eq!(loaded.windows.len(), 2);
+        assert_eq!(loaded.total_tab_count(), 3);
+        assert_eq!(loaded.windows[0].active_tab_index, 1);
+        assert_eq!(
+            loaded.windows[0].size,
+            Some(WindowSize {
+                width: 1024.0,
+                height: 768.0
+            })
+        );
+        assert_eq!(loaded.windows[1].active_tab_index, 0);
+        assert_eq!(
+            loaded.windows[1].size,
+            Some(WindowSize {
+                width: 900.0,
+                height: 540.0
+            })
+        );
+        assert_eq!(loaded.windows[1].tabs[0].title, "logs");
+    }
+
+    #[test]
+    fn test_malformed_version_schema_combinations_error() {
+        assert!(serde_json::from_str::<SessionData>(
+            r#"{"version":1,"timestamp":"ts","windows":[]}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<SessionData>(
+            r#"{"version":2,"timestamp":"ts","tabs":[],"active_tab_index":0}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<SessionData>(r#"{"version":2,"timestamp":"ts"}"#).is_err());
     }
 
     #[test]
@@ -403,8 +712,8 @@ mod tests {
         let session = sample_session();
         session.save(&path).unwrap();
         assert_eq!(
-            SessionData::load(&path).unwrap().tabs.len(),
-            session.tabs.len()
+            SessionData::load(&path).unwrap().total_tab_count(),
+            session.total_tab_count()
         );
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -415,64 +724,69 @@ mod tests {
 
     // ── Helpers ──────────────────────────────────────────────────────
 
+    fn sample_tabs() -> Vec<TabData> {
+        vec![
+            TabData {
+                title: "editor".to_string(),
+                working_directory: Some("/home/user/project".to_string()),
+                terminals: vec![
+                    TerminalData {
+                        title: "nvim".to_string(),
+                        working_directory: Some("/home/user/project".to_string()),
+                        is_focused: true,
+                    },
+                    TerminalData {
+                        title: "cargo watch".to_string(),
+                        working_directory: Some("/home/user/project".to_string()),
+                        is_focused: false,
+                    },
+                ],
+                split_direction: "Horizontal".to_string(),
+                layout: None,
+            },
+            TabData {
+                title: "shell".to_string(),
+                working_directory: Some("/tmp".to_string()),
+                terminals: vec![TerminalData {
+                    title: "bash".to_string(),
+                    working_directory: Some("/tmp".to_string()),
+                    is_focused: true,
+                }],
+                split_direction: "Vertical".to_string(),
+                layout: None,
+            },
+        ]
+    }
+
     /// Build a minimal but complete SessionData for testing.
     fn sample_session() -> SessionData {
         SessionData {
-            version: 1,
+            version: SESSION_VERSION,
             timestamp: "2025-01-15T10:30:00Z".to_string(),
-            tabs: vec![
-                TabData {
-                    title: "editor".to_string(),
-                    working_directory: Some("/home/user/project".to_string()),
-                    terminals: vec![
-                        TerminalData {
-                            title: "nvim".to_string(),
-                            working_directory: Some("/home/user/project".to_string()),
-                            is_focused: true,
-                        },
-                        TerminalData {
-                            title: "cargo watch".to_string(),
-                            working_directory: Some("/home/user/project".to_string()),
-                            is_focused: false,
-                        },
-                    ],
-                    split_direction: "Horizontal".to_string(),
-                    layout: None,
-                },
-                TabData {
-                    title: "shell".to_string(),
-                    working_directory: Some("/tmp".to_string()),
-                    terminals: vec![TerminalData {
-                        title: "bash".to_string(),
-                        working_directory: Some("/tmp".to_string()),
-                        is_focused: true,
-                    }],
-                    split_direction: "Vertical".to_string(),
-                    layout: None,
-                },
-            ],
-            active_tab_index: 0,
+            windows: vec![WindowData {
+                tabs: sample_tabs(),
+                active_tab_index: 0,
+                size: Some(WindowSize {
+                    width: 800.0,
+                    height: 600.0,
+                }),
+            }],
         }
     }
 
     // ── SessionData::new / Default ───────────────────────────────────
 
     #[test]
-    fn new_session_has_version_1() {
+    fn new_session_has_version_2() {
         let session = SessionData::new();
-        assert_eq!(session.version, 1);
+        assert_eq!(session.version, SESSION_VERSION);
     }
 
     #[test]
-    fn new_session_starts_with_no_tabs() {
+    fn new_session_starts_with_no_windows() {
         let session = SessionData::new();
-        assert!(session.tabs.is_empty());
-    }
-
-    #[test]
-    fn new_session_active_tab_index_is_zero() {
-        let session = SessionData::new();
-        assert_eq!(session.active_tab_index, 0);
+        assert!(session.windows.is_empty());
+        assert_eq!(session.total_tab_count(), 0);
     }
 
     #[test]
@@ -487,8 +801,7 @@ mod tests {
         let from_default = SessionData::default();
 
         assert_eq!(from_new.version, from_default.version);
-        assert_eq!(from_new.tabs.len(), from_default.tabs.len());
-        assert_eq!(from_new.active_tab_index, from_default.active_tab_index);
+        assert_eq!(from_new.windows.len(), from_default.windows.len());
         // timestamps may differ by a few nanoseconds but should both be non-empty
         assert!(!from_default.timestamp.is_empty());
     }
@@ -517,8 +830,8 @@ mod tests {
         let session = sample_session();
         let cloned = session.clone();
         assert_eq!(cloned.version, session.version);
-        assert_eq!(cloned.tabs.len(), session.tabs.len());
-        assert_eq!(cloned.active_tab_index, session.active_tab_index);
+        assert_eq!(cloned.windows.len(), session.windows.len());
+        assert_eq!(cloned.total_tab_count(), session.total_tab_count());
         assert_eq!(cloned.timestamp, session.timestamp);
     }
 
@@ -563,14 +876,13 @@ mod tests {
     #[test]
     fn serialize_empty_session() {
         let session = SessionData {
-            version: 1,
+            version: SESSION_VERSION,
             timestamp: "2025-01-01T00:00:00Z".to_string(),
-            tabs: vec![],
-            active_tab_index: 0,
+            windows: vec![],
         };
         let json = serde_json::to_string(&session).unwrap();
-        assert!(json.contains("\"version\":1"));
-        assert!(json.contains("\"tabs\":[]"));
+        assert!(json.contains("\"version\":2"));
+        assert!(json.contains("\"windows\":[]"));
     }
 
     #[test]
@@ -581,23 +893,28 @@ mod tests {
 
         assert_eq!(loaded.version, original.version);
         assert_eq!(loaded.timestamp, original.timestamp);
-        assert_eq!(loaded.active_tab_index, original.active_tab_index);
-        assert_eq!(loaded.tabs.len(), 2);
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(
+            loaded.windows[0].active_tab_index,
+            original.windows[0].active_tab_index
+        );
+        assert_eq!(loaded.windows[0].size, original.windows[0].size);
+        assert_eq!(loaded.windows[0].tabs.len(), 2);
 
         // First tab
-        assert_eq!(loaded.tabs[0].title, "editor");
+        assert_eq!(loaded.windows[0].tabs[0].title, "editor");
         assert_eq!(
-            loaded.tabs[0].working_directory,
+            loaded.windows[0].tabs[0].working_directory,
             Some("/home/user/project".to_string())
         );
-        assert_eq!(loaded.tabs[0].terminals.len(), 2);
-        assert_eq!(loaded.tabs[0].split_direction, "Horizontal");
-        assert!(loaded.tabs[0].terminals[0].is_focused);
-        assert!(!loaded.tabs[0].terminals[1].is_focused);
+        assert_eq!(loaded.windows[0].tabs[0].terminals.len(), 2);
+        assert_eq!(loaded.windows[0].tabs[0].split_direction, "Horizontal");
+        assert!(loaded.windows[0].tabs[0].terminals[0].is_focused);
+        assert!(!loaded.windows[0].tabs[0].terminals[1].is_focused);
 
         // Second tab
-        assert_eq!(loaded.tabs[1].title, "shell");
-        assert_eq!(loaded.tabs[1].terminals.len(), 1);
+        assert_eq!(loaded.windows[0].tabs[1].title, "shell");
+        assert_eq!(loaded.windows[0].tabs[1].terminals.len(), 1);
     }
 
     #[test]
@@ -618,26 +935,22 @@ mod tests {
             "active_tab_index": 0
         }"#;
         let session: SessionData = serde_json::from_str(json).unwrap();
-        assert!(session.tabs[0].working_directory.is_none());
-        assert!(session.tabs[0].terminals[0].working_directory.is_none());
+        assert!(session.windows[0].tabs[0].working_directory.is_none());
+        assert!(session.windows[0].tabs[0].terminals[0]
+            .working_directory
+            .is_none());
     }
 
     #[test]
-    fn deserialize_missing_optional_working_directory() {
-        // serde should also accept the field being absent entirely when
-        // it's Option<String> (only if the struct uses
-        // #[serde(default)]).  In practice, serde_json will error if
-        // the field is absent and there's no default, so we just verify
-        // with null.
+    fn deserialize_future_version_preserves_version_for_validation() {
         let json = r#"{
-            "version": 2,
+            "version": 3,
             "timestamp": "ts",
-            "tabs": [],
-            "active_tab_index": 5
+            "windows": []
         }"#;
         let session: SessionData = serde_json::from_str(json).unwrap();
-        assert_eq!(session.version, 2);
-        assert_eq!(session.active_tab_index, 5);
+        assert_eq!(session.version, 3);
+        assert!(session.validate().is_err());
     }
 
     #[test]
@@ -648,8 +961,7 @@ mod tests {
 
     #[test]
     fn deserialize_wrong_types_errors() {
-        let json =
-            r#"{"version": "not_a_number", "timestamp": 123, "tabs": [], "active_tab_index": 0}"#;
+        let json = r#"{"version": "not_a_number", "timestamp": 123, "windows": []}"#;
         let result = serde_json::from_str::<SessionData>(json);
         assert!(result.is_err());
     }
@@ -657,24 +969,27 @@ mod tests {
     #[test]
     fn serialize_preserves_unicode() {
         let session = SessionData {
-            version: 1,
+            version: SESSION_VERSION,
             timestamp: "ts".to_string(),
-            tabs: vec![TabData {
-                title: "tab with unicode".to_string(),
-                working_directory: Some("/home/user/docs".to_string()),
-                terminals: vec![TerminalData {
-                    title: "zsh".to_string(),
+            windows: vec![WindowData {
+                tabs: vec![TabData {
+                    title: "tab with unicode".to_string(),
                     working_directory: Some("/home/user/docs".to_string()),
-                    is_focused: true,
+                    terminals: vec![TerminalData {
+                        title: "zsh".to_string(),
+                        working_directory: Some("/home/user/docs".to_string()),
+                        is_focused: true,
+                    }],
+                    split_direction: "Horizontal".to_string(),
+                    layout: None,
                 }],
-                split_direction: "Horizontal".to_string(),
-                layout: None,
+                active_tab_index: 0,
+                size: None,
             }],
-            active_tab_index: 0,
         };
         let json = serde_json::to_string(&session).unwrap();
         let loaded: SessionData = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.tabs[0].title, "tab with unicode");
+        assert_eq!(loaded.windows[0].tabs[0].title, "tab with unicode");
     }
 
     #[test]
@@ -693,16 +1008,19 @@ mod tests {
             })
             .collect();
         let session = SessionData {
-            version: 1,
+            version: SESSION_VERSION,
             timestamp: "ts".to_string(),
-            tabs,
-            active_tab_index: 50,
+            windows: vec![WindowData {
+                tabs,
+                active_tab_index: 50,
+                size: None,
+            }],
         };
         let json = serde_json::to_string(&session).unwrap();
         let loaded: SessionData = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.tabs.len(), 100);
-        assert_eq!(loaded.active_tab_index, 50);
-        assert_eq!(loaded.tabs[99].title, "Tab 99");
+        assert_eq!(loaded.windows[0].tabs.len(), 100);
+        assert_eq!(loaded.windows[0].active_tab_index, 50);
+        assert_eq!(loaded.windows[0].tabs[99].title, "Tab 99");
     }
 
     // ── Save / Load (file I/O) ───────────────────────────────────────
@@ -741,7 +1059,7 @@ mod tests {
         session.save(&path).unwrap();
         let raw = fs::read_to_string(&path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(parsed["version"], 1);
+        assert_eq!(parsed["version"], 2);
     }
 
     #[test]
@@ -768,10 +1086,18 @@ mod tests {
 
         assert_eq!(loaded.version, session.version);
         assert_eq!(loaded.timestamp, session.timestamp);
-        assert_eq!(loaded.tabs.len(), session.tabs.len());
-        assert_eq!(loaded.active_tab_index, session.active_tab_index);
+        assert_eq!(loaded.windows.len(), session.windows.len());
+        assert_eq!(
+            loaded.windows[0].active_tab_index,
+            session.windows[0].active_tab_index
+        );
+        assert_eq!(loaded.windows[0].size, session.windows[0].size);
 
-        for (orig_tab, loaded_tab) in session.tabs.iter().zip(loaded.tabs.iter()) {
+        for (orig_tab, loaded_tab) in session.windows[0]
+            .tabs
+            .iter()
+            .zip(loaded.windows[0].tabs.iter())
+        {
             assert_eq!(orig_tab.title, loaded_tab.title);
             assert_eq!(orig_tab.working_directory, loaded_tab.working_directory);
             assert_eq!(orig_tab.split_direction, loaded_tab.split_direction);
@@ -826,37 +1152,47 @@ mod tests {
 
         // Save first session with 1 tab
         let mut session1 = SessionData::new();
-        session1.tabs.push(TabData {
-            title: "first".to_string(),
-            working_directory: None,
-            terminals: vec![],
-            split_direction: "Horizontal".to_string(),
-            layout: None,
+        session1.windows.push(WindowData {
+            tabs: vec![TabData {
+                title: "first".to_string(),
+                working_directory: None,
+                terminals: vec![],
+                split_direction: "Horizontal".to_string(),
+                layout: None,
+            }],
+            active_tab_index: 0,
+            size: None,
         });
         session1.save(&path).unwrap();
 
         // Save second session with 2 tabs
         let mut session2 = SessionData::new();
-        session2.tabs.push(TabData {
-            title: "second-a".to_string(),
-            working_directory: None,
-            terminals: vec![],
-            split_direction: "Vertical".to_string(),
-            layout: None,
-        });
-        session2.tabs.push(TabData {
-            title: "second-b".to_string(),
-            working_directory: None,
-            terminals: vec![],
-            split_direction: "Vertical".to_string(),
-            layout: None,
+        session2.windows.push(WindowData {
+            tabs: vec![
+                TabData {
+                    title: "second-a".to_string(),
+                    working_directory: None,
+                    terminals: vec![],
+                    split_direction: "Vertical".to_string(),
+                    layout: None,
+                },
+                TabData {
+                    title: "second-b".to_string(),
+                    working_directory: None,
+                    terminals: vec![],
+                    split_direction: "Vertical".to_string(),
+                    layout: None,
+                },
+            ],
+            active_tab_index: 0,
+            size: None,
         });
         session2.save(&path).unwrap();
 
         let loaded = SessionData::load(&path).unwrap();
-        assert_eq!(loaded.tabs.len(), 2);
-        assert_eq!(loaded.tabs[0].title, "second-a");
-        assert_eq!(loaded.tabs[1].title, "second-b");
+        assert_eq!(loaded.windows[0].tabs.len(), 2);
+        assert_eq!(loaded.windows[0].tabs[0].title, "second-a");
+        assert_eq!(loaded.windows[0].tabs[1].title, "second-b");
     }
 
     #[test]
@@ -867,8 +1203,8 @@ mod tests {
 
         session.save(&path).unwrap();
         let loaded = SessionData::load(&path).unwrap();
-        assert!(loaded.tabs.is_empty());
-        assert_eq!(loaded.version, 1);
+        assert!(loaded.windows.is_empty());
+        assert_eq!(loaded.version, SESSION_VERSION);
     }
 
     // ── sessions_dir / last_session_path ─────────────────────────────
@@ -993,37 +1329,46 @@ mod tests {
         let session = SessionData {
             version: 0,
             timestamp: "".to_string(),
-            tabs: vec![TabData {
-                title: "".to_string(),
-                working_directory: Some("".to_string()),
-                terminals: vec![TerminalData {
+            windows: vec![WindowData {
+                tabs: vec![TabData {
                     title: "".to_string(),
                     working_directory: Some("".to_string()),
-                    is_focused: false,
+                    terminals: vec![TerminalData {
+                        title: "".to_string(),
+                        working_directory: Some("".to_string()),
+                        is_focused: false,
+                    }],
+                    split_direction: "".to_string(),
+                    layout: None,
                 }],
-                split_direction: "".to_string(),
-                layout: None,
+                active_tab_index: 0,
+                size: None,
             }],
-            active_tab_index: 0,
         };
         let json = serde_json::to_string(&session).unwrap();
         let loaded: SessionData = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.tabs[0].title, "");
-        assert_eq!(loaded.tabs[0].working_directory, Some("".to_string()));
-        assert_eq!(loaded.tabs[0].terminals[0].title, "");
+        assert_eq!(loaded.windows[0].tabs[0].title, "");
+        assert_eq!(
+            loaded.windows[0].tabs[0].working_directory,
+            Some("".to_string())
+        );
+        assert_eq!(loaded.windows[0].tabs[0].terminals[0].title, "");
     }
 
     #[test]
     fn large_active_tab_index() {
         let session = SessionData {
-            version: 1,
+            version: SESSION_VERSION,
             timestamp: "ts".to_string(),
-            tabs: vec![],
-            active_tab_index: usize::MAX,
+            windows: vec![WindowData {
+                tabs: vec![],
+                active_tab_index: usize::MAX,
+                size: None,
+            }],
         };
         let json = serde_json::to_string(&session).unwrap();
         let loaded: SessionData = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded.active_tab_index, usize::MAX);
+        assert_eq!(loaded.windows[0].active_tab_index, usize::MAX);
     }
 
     #[test]
@@ -1052,8 +1397,12 @@ mod tests {
         // Full structural equality check
         assert_eq!(loaded.version, original.version);
         assert_eq!(loaded.timestamp, original.timestamp);
-        assert_eq!(loaded.active_tab_index, original.active_tab_index);
-        assert_eq!(loaded.tabs.len(), original.tabs.len());
+        assert_eq!(loaded.windows.len(), original.windows.len());
+        assert_eq!(
+            loaded.windows[0].active_tab_index,
+            original.windows[0].active_tab_index
+        );
+        assert_eq!(loaded.windows[0].tabs.len(), original.windows[0].tabs.len());
     }
 
     #[test]
@@ -1082,21 +1431,29 @@ mod tests {
         let tmp = TempDir::new().unwrap();
 
         let mut s1 = SessionData::new();
-        s1.tabs.push(TabData {
-            title: "A".to_string(),
-            working_directory: None,
-            terminals: vec![],
-            split_direction: "Horizontal".to_string(),
-            layout: None,
+        s1.windows.push(WindowData {
+            tabs: vec![TabData {
+                title: "A".to_string(),
+                working_directory: None,
+                terminals: vec![],
+                split_direction: "Horizontal".to_string(),
+                layout: None,
+            }],
+            active_tab_index: 0,
+            size: None,
         });
 
         let mut s2 = SessionData::new();
-        s2.tabs.push(TabData {
-            title: "B".to_string(),
-            working_directory: None,
-            terminals: vec![],
-            split_direction: "Vertical".to_string(),
-            layout: None,
+        s2.windows.push(WindowData {
+            tabs: vec![TabData {
+                title: "B".to_string(),
+                working_directory: None,
+                terminals: vec![],
+                split_direction: "Vertical".to_string(),
+                layout: None,
+            }],
+            active_tab_index: 0,
+            size: None,
         });
 
         let p1 = tmp.path().join("s1.json");
@@ -1108,7 +1465,7 @@ mod tests {
         let l1 = SessionData::load(&p1).unwrap();
         let l2 = SessionData::load(&p2).unwrap();
 
-        assert_eq!(l1.tabs[0].title, "A");
-        assert_eq!(l2.tabs[0].title, "B");
+        assert_eq!(l1.windows[0].tabs[0].title, "A");
+        assert_eq!(l2.windows[0].tabs[0].title, "B");
     }
 }

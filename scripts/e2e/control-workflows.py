@@ -360,7 +360,10 @@ def run(args):
             assert next(pane for pane in panes() if pane["id"] == sibling)["focused"]
             assert ctl.request({"type": "workspace_save", "name": "zoomed"})["status"] == "ok"
             zoomed = json.loads((config / "sessions/zoomed.json").read_text())
-            assert [tab["layout"] for tab in recipe["tabs"]] == [tab["layout"] for tab in zoomed["tabs"]]
+            assert recipe["version"] == 2 and zoomed["version"] == 2
+            assert [[tab["layout"] for tab in win["tabs"]] for win in recipe["windows"]] == [
+                [tab["layout"] for tab in win["tabs"]] for win in zoomed["windows"]
+            ]
             assert ctl.request({"type": "zoom_pane", "target": sibling, "zoomed": False})["status"] == "ok"
             assert ctl.request({"type": "swap_panes", "first": initial, "second": sibling})["status"] == "ok"
             assert {pane["id"]: pane["pid"] for pane in panes()} == identities
