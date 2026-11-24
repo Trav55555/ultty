@@ -390,7 +390,7 @@ impl ControlServer {
                 keys.push(key);
                 descriptors.push(libc::pollfd {
                     fd: client.stream.as_raw_fd(),
-                    events: 0,
+                    events: libc::POLLOUT,
                     revents: 0,
                 });
             }

@@ -398,10 +398,7 @@ impl Connection {
     fn exchange_frame(&mut self, frame: &[u8], hello: bool) -> io::Result<Response> {
         match self {
             Self::Local(stream) => {
-                let mut timed = DeadlineStream {
-                    stream,
-                    deadline: Instant::now() + DEFAULT_TIMEOUT,
-                };
+                let mut timed = DeadlineStream::new(stream, Instant::now() + DEFAULT_TIMEOUT)?;
                 timed.write_all(frame)?;
                 timed.flush()?;
                 wire::read(&mut timed, wire::MAX_RESPONSE_BYTES)
@@ -446,6 +443,15 @@ impl Drop for Connection {
 struct DeadlineStream<'a> {
     stream: &'a mut UnixStream,
     deadline: Instant,
+    was_nonblocking: bool,
+}
+fn is_nonblocking(fd: RawFd) -> io::Result<bool> {
+    // SAFETY: the caller owns the live descriptor; F_GETFL reads flags only.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(flags & libc::O_NONBLOCK != 0)
 }
 fn remaining_until(deadline: Instant) -> io::Result<Duration> {
     deadline
@@ -473,10 +479,7 @@ pub(crate) fn set_nonblocking(fd: RawFd) -> io::Result<()> {
 }
 /// Forward one exact request locally with a whole-operation deadline.
 pub(crate) fn exchange_local(stream: &mut UnixStream, request: &Request) -> io::Result<Response> {
-    let mut timed = DeadlineStream {
-        stream,
-        deadline: Instant::now() + DEFAULT_TIMEOUT,
-    };
+    let mut timed = DeadlineStream::new(stream, Instant::now() + DEFAULT_TIMEOUT)?;
     wire::write(&mut timed, request, wire::MAX_REQUEST_BYTES)?;
     wire::read(&mut timed, wire::MAX_RESPONSE_BYTES)
 }
@@ -541,29 +544,52 @@ impl<T: Write + AsRawFd> Write for DeadlinePipe<'_, T> {
         self.stream.flush()
     }
 }
-impl DeadlineStream<'_> {
-    fn remaining(&self) -> io::Result<Duration> {
-        self.deadline
-            .checked_duration_since(Instant::now())
-            .filter(|duration| !duration.is_zero())
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "attachment request deadline elapsed",
-                )
-            })
+impl<'a> DeadlineStream<'a> {
+    fn new(stream: &'a mut UnixStream, deadline: Instant) -> io::Result<Self> {
+        let was_nonblocking = is_nonblocking(stream.as_raw_fd())?;
+        if !was_nonblocking {
+            stream.set_nonblocking(true)?;
+        }
+        Ok(Self {
+            stream,
+            deadline,
+            was_nonblocking,
+        })
+    }
+}
+impl Drop for DeadlineStream<'_> {
+    fn drop(&mut self) {
+        if !self.was_nonblocking {
+            let _ = self.stream.set_nonblocking(false);
+        }
     }
 }
 impl Read for DeadlineStream<'_> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        self.stream.set_read_timeout(Some(self.remaining()?))?;
-        self.stream.read(bytes)
+        loop {
+            remaining_until(self.deadline)?;
+            match self.stream.read(bytes) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait_pipe(self.stream.as_raw_fd(), libc::POLLIN, self.deadline)?
+                }
+                result => return result,
+            }
+        }
     }
 }
 impl Write for DeadlineStream<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.stream.set_write_timeout(Some(self.remaining()?))?;
-        self.stream.write(bytes)
+        loop {
+            remaining_until(self.deadline)?;
+            match self.stream.write(bytes) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    wait_pipe(self.stream.as_raw_fd(), libc::POLLOUT, self.deadline)?
+                }
+                result => return result,
+            }
+        }
     }
     fn flush(&mut self) -> io::Result<()> {
         self.stream.flush()

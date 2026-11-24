@@ -1463,7 +1463,40 @@ fn child_working_directory(pid: u32) -> Option<String> {
         .filter(|path| !path.is_empty())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+fn child_working_directory(pid: u32) -> Option<String> {
+    let pid = nix::libc::c_int::try_from(pid).ok()?;
+    if pid <= 0 {
+        return None;
+    }
+    let mut info = std::mem::MaybeUninit::<nix::libc::proc_vnodepathinfo>::zeroed();
+    let size = std::mem::size_of::<nix::libc::proc_vnodepathinfo>() as nix::libc::c_int;
+    // SAFETY: `info` is a valid writable `proc_vnodepathinfo` buffer of `size` bytes.
+    let rc = unsafe {
+        nix::libc::proc_pidinfo(
+            pid,
+            nix::libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if rc != size {
+        return None;
+    }
+    // SAFETY: `proc_pidinfo` succeeded and filled the entire `proc_vnodepathinfo` struct.
+    let info = unsafe { info.assume_init() };
+    let path_len = std::mem::size_of_val(&info.pvi_cdir.vip_path);
+    // SAFETY: `vip_path` is a contiguous initialized `[[c_char; 32]; 32]` array of `path_len` bytes.
+    let raw = unsafe {
+        std::slice::from_raw_parts(info.pvi_cdir.vip_path.as_ptr().cast::<u8>(), path_len)
+    };
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let path = String::from_utf8_lossy(&raw[..end]).into_owned();
+    (!path.is_empty()).then_some(path)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn foreground_working_directory(pty_fd: RawFd) -> Option<String> {
     // SAFETY: `pty_fd` is an open PTY master file descriptor owned by the child
     // wrapper. `tcgetpgrp` only queries kernel metadata for that terminal.
@@ -1475,12 +1508,12 @@ fn foreground_working_directory(pty_fd: RawFd) -> Option<String> {
     child_working_directory(pgrp as u32)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn foreground_working_directory(_pty_fd: RawFd) -> Option<String> {
     None
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn child_working_directory(_pid: u32) -> Option<String> {
     None
 }
@@ -2032,8 +2065,12 @@ mod tests {
 
     #[test]
     fn child_exit_is_reported_once() {
+        #[cfg(target_os = "macos")]
+        const TRUE_BIN: &str = "/usr/bin/true";
+        #[cfg(not(target_os = "macos"))]
+        const TRUE_BIN: &str = "/bin/true";
         let mut event_loop =
-            EventLoop::with_command("/bin/true", &["/bin/true"], 80, 24).expect("create");
+            EventLoop::with_command(TRUE_BIN, &[TRUE_BIN], 80, 24).expect("create");
         event_loop
             .run(|_, event| !matches!(event, TerminalEvent::ChildExited { .. }))
             .expect("run");

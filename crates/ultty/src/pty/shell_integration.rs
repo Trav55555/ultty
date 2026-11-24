@@ -34,12 +34,14 @@
 //! `ULTTY_SHELL_INTEGRATION_DIR` in the shells it injects.
 
 use crate::platform::socket::{current_uid, ensure_private_dir};
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 /// Environment variable that turns injection off (`off`, `0`, `false`, `no`)
 /// and, in an injected shell, reads `auto`.
@@ -191,7 +193,7 @@ pub fn plan(
 /// process's environment: honours the opt-out and writes the files on first
 /// use. `None` means start the shell unchanged.
 pub fn for_spawn(program: &str, args: &[&str], env: &[(OsString, OsString)]) -> Option<Injection> {
-    detect(program)?;
+    let shell = detect(program)?;
     let var = |name: &str| -> Option<OsString> {
         env.iter()
             .rev()
@@ -202,7 +204,47 @@ pub fn for_spawn(program: &str, args: &[&str], env: &[(OsString, OsString)]) -> 
     if var(ENV_MODE).is_some_and(|value| mode_is_off(&value)) {
         return None;
     }
+    if shell == Shell::Bash && is_login_invocation(program, args) && !bash_is_modern(program) {
+        return None;
+    }
     plan(program, args, &var, runtime_dir()?)
+}
+
+/// Whether `args` invokes a login shell (`-l`, `--login`, or a leading `-` in argv[0]).
+fn is_login_invocation(program: &str, args: &[&str]) -> bool {
+    let argv0 = args.first().copied().unwrap_or(program);
+    matches!(args.get(1..).unwrap_or_default(), ["-l" | "--login"]) || argv0.starts_with('-')
+}
+
+/// Bash 3.2 (shipped as `/bin/bash` on macOS) ignores `$ENV` when started with
+/// `--posix -l`, which would leave the user stuck in POSIX mode. Require bash
+/// 4.4 or newer before injecting login bash.
+fn bash_is_modern(program: &str) -> bool {
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(&supported) = guard.get(program) {
+            return supported;
+        }
+    }
+    let supported = Command::new(program)
+        .args([
+            "-c",
+            "printf '%s.%s' \"${BASH_VERSINFO[0]}\" \"${BASH_VERSINFO[1]}\"",
+        ])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|ver| {
+            let (maj, min) = ver.trim().split_once('.')?;
+            Some((maj.parse::<u32>().ok()?, min.parse::<u32>().ok()?))
+        })
+        .is_some_and(|version| version >= (4, 4));
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(program.to_owned(), supported);
+    }
+    supported
 }
 
 /// The argv and the complete extra environment to spawn a shell with.
