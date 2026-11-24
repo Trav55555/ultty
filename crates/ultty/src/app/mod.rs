@@ -160,6 +160,19 @@ struct TabWidthFreeze {
     until: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MoveDestination {
+    Existing(WindowKey),
+    NewWindow,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PendingTabMove {
+    pub(super) tab_id: TabId,
+    pub(super) destination: MoveDestination,
+    pub(super) position: Option<PhysicalPosition<i32>>,
+}
+
 /// Process-wide application state shared across every open window (ADR 0027).
 struct ProcessState {
     proxy: EventLoopProxy<AppEvent>,
@@ -181,6 +194,7 @@ struct ProcessState {
     socket_wakeup: wakeup::SocketWakeup,
     auto_dump_frames: u32,
     pending_new_windows: usize,
+    pending_tab_moves: Vec<PendingTabMove>,
     pending_restored_windows: Vec<(WindowKey, Option<LogicalSize<f64>>)>,
     pending_reload_config: bool,
     pending_cycle_theme: bool,
@@ -207,6 +221,7 @@ struct WindowState {
     modifiers: ModifiersState,
     mouse_pos: PhysicalPosition<f64>,
     mouse_pressed: bool,
+    cursor_inside: bool,
     native_selection: native_selection::NativeSelectionState,
     reported_button: Option<ultty::grid::MouseButton>,
     last_click_time: Instant,
@@ -405,6 +420,7 @@ impl WindowState {
             modifiers: ModifiersState::empty(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             mouse_pressed: false,
+            cursor_inside: true,
             native_selection: native_selection::NativeSelectionState::default(),
             reported_button: None,
             last_click_time: Instant::now() - CLICK_THRESHOLD * 2,
@@ -675,6 +691,7 @@ impl App {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0),
             pending_new_windows: 0,
+            pending_tab_moves: Vec::new(),
             pending_restored_windows,
             pending_reload_config: false,
             pending_cycle_theme: false,
@@ -938,6 +955,134 @@ impl App {
         self.windows.is_empty() && cfg!(not(target_os = "macos"))
     }
 
+    /// Move `tab_id` to another existing window or detach it into a new window,
+    /// resizing its panes to the destination window, rebuilding both tab bars,
+    /// and updating both windows' accessibility trees in the same pass.
+    ///
+    /// Returns `(destination_window, should_exit)`.
+    pub(super) fn move_tab_to_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        tab_id: TabId,
+        destination: MoveDestination,
+        position: Option<PhysicalPosition<i32>>,
+    ) -> std::result::Result<(WindowKey, bool), String> {
+        let mut changed = std::collections::HashSet::new();
+        let (dest_key, should_exit) = match destination {
+            MoveDestination::Existing(dest_key) => {
+                if !self.windows.contains_key(&dest_key) {
+                    return Err(format!(
+                        "No window {}; `ulttyctl windows` lists them",
+                        dest_key.raw()
+                    ));
+                }
+                let outcome = self
+                    .shared
+                    .runtime
+                    .manager
+                    .move_tab_to_window(tab_id, dest_key)
+                    .map_err(str::to_string)?;
+                changed.insert(dest_key);
+                self.with_window(dest_key, |ctx| {
+                    ctx.clear_tab_width_freeze();
+                    ctx.update_tab_bar();
+                    ctx.relayout_terminals();
+                    ctx.win.needs_redraw = true;
+                });
+                let mut should_exit = false;
+                if outcome.source_empty {
+                    should_exit = self.close_window(outcome.source_window);
+                } else if outcome.source_window != dest_key {
+                    changed.insert(outcome.source_window);
+                    self.with_window(outcome.source_window, |ctx| {
+                        ctx.clear_tab_width_freeze();
+                        ctx.update_tab_bar();
+                        ctx.relayout_terminals();
+                        ctx.win.needs_redraw = true;
+                    });
+                }
+                self.focused_window = Some(dest_key);
+                if let Some(win) = self.windows.get(&dest_key) {
+                    win.window.focus_window();
+                }
+                (dest_key, should_exit)
+            }
+            MoveDestination::NewWindow => {
+                let source_key = self
+                    .shared
+                    .runtime
+                    .manager
+                    .window_for_tab(tab_id)
+                    .ok_or_else(|| "Tab not found".to_string())?;
+                let (cols, rows) = self
+                    .windows
+                    .get(&source_key)
+                    .map(|win| win.renderer.terminal_dimensions())
+                    .unwrap_or((80, 24));
+                let (new_key, outcome) = self
+                    .shared
+                    .runtime
+                    .manager
+                    .detach_tab_to_new_window(tab_id, cols, rows)
+                    .map_err(str::to_string)?;
+                let win = match WindowState::create(
+                    new_key,
+                    event_loop,
+                    self.shared.proxy.clone(),
+                    &self.shared.config,
+                    &self.shared.font_system,
+                    self.shared.shared_gpu.as_ref(),
+                    None,
+                ) {
+                    Ok(win) => win,
+                    Err(error) => {
+                        let _ = self
+                            .shared
+                            .runtime
+                            .manager
+                            .move_tab_to_window(tab_id, outcome.source_window);
+                        self.shared.runtime.manager.close_window(new_key);
+                        self.shared.sync_protocol_tabs();
+                        return Err(format!("Failed to open new window: {error:#}"));
+                    }
+                };
+                if let Some(pos) = position {
+                    win.window.set_outer_position(pos);
+                }
+                let winit_id = win.window.id();
+                self.windows.insert(new_key, win);
+                self.window_ids.insert(winit_id, new_key);
+                self.focused_window = Some(new_key);
+                self.shared.runtime.manager.set_focused_window(new_key);
+                self.shared.runtime.set_viewer_present(true);
+
+                changed.insert(outcome.source_window);
+                changed.insert(new_key);
+                self.with_window(outcome.source_window, |ctx| {
+                    ctx.clear_tab_width_freeze();
+                    ctx.update_tab_bar();
+                    ctx.relayout_terminals();
+                    ctx.win.needs_redraw = true;
+                });
+                self.with_window(new_key, |ctx| {
+                    ctx.update_tab_bar();
+                    ctx.relayout_terminals();
+                    ctx.win.needs_redraw = true;
+                });
+                if let Some(server) = self.shared.control_server.as_mut() {
+                    server.publish(&ultty_protocol::control::ControlEvent::WindowOpened {
+                        window: new_key.raw() as u64,
+                    });
+                }
+                (new_key, false)
+            }
+        };
+
+        self.shared.sync_protocol_tabs();
+        self.update_all_accessibility(&changed, Instant::now());
+        Ok((dest_key, should_exit))
+    }
+
     fn drain_pending_process_actions(&mut self, event_loop: &ActiveEventLoop) {
         if self.shared.pending_reload_config {
             self.shared.pending_reload_config = false;
@@ -951,6 +1096,19 @@ impl App {
             self.shared.pending_new_windows -= 1;
             if let Err(error) = self.open_new_window(event_loop) {
                 tracing::warn!("Failed to open new window: {error:#}");
+            }
+        }
+        let moves = std::mem::take(&mut self.shared.pending_tab_moves);
+        for pending in moves {
+            match self.move_tab_to_window(
+                event_loop,
+                pending.tab_id,
+                pending.destination,
+                pending.position,
+            ) {
+                Ok((_, true)) => event_loop.exit(),
+                Ok((_, false)) => {}
+                Err(error) => tracing::warn!("Failed to move tab: {error}"),
             }
         }
     }
@@ -1686,6 +1844,20 @@ impl WindowCtx<'_> {
                 .item_at(x, y);
             if self.win.tab_bar.hovered_menu_item != old_menu_item {
                 self.win.needs_redraw = true;
+            }
+        }
+        if self.win.tab_bar.tab_menu.is_some() {
+            let (cell_width, cell_height) = self.win.renderer.cell_dimensions();
+            let hovered = self
+                .win
+                .tab_bar
+                .tab_menu_layout(cell_width, cell_height)
+                .and_then(|layout| layout.item_at(x, y));
+            if let Some(menu) = self.win.tab_bar.tab_menu.as_mut() {
+                if menu.hovered != hovered {
+                    menu.hovered = hovered;
+                    self.win.needs_redraw = true;
+                }
             }
         }
 

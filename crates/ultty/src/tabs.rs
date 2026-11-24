@@ -7,7 +7,7 @@
 //! accessors ([`TabBarState::title_bar_height`] and friends), so hit testing,
 //! layout and drawing all agree on one scale.
 
-use crate::terminal_manager::{Tab, TabId};
+use crate::terminal_manager::{Tab, TabId, WindowKey};
 use ultty_protocol::control::PaneStatus;
 
 /// Height of the window control band in logical pixels.
@@ -167,6 +167,78 @@ pub fn title_next_change(elapsed: std::time::Duration) -> Option<std::time::Dura
     (shown < TITLE_WORD_LETTERS).then(|| TITLE_TYPE_START + TITLE_TYPE_STEP * shown as u32)
 }
 
+/// Action offered in a tab's context menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabMenuAction {
+    /// Detach the tab into a newly created window.
+    MoveToNewWindow,
+    /// Move the tab into an existing open window.
+    MoveToWindow(WindowKey),
+    /// Close the tab.
+    CloseTab,
+}
+
+/// One row of a tab context menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabMenuItem {
+    /// Display label.
+    pub label: String,
+    /// Action executed when clicked.
+    pub action: TabMenuAction,
+}
+
+/// Open context menu anchored to a tab in the tab bar.
+#[derive(Debug, Clone)]
+pub struct TabMenuState {
+    /// Tab that the menu acts on.
+    pub tab_id: TabId,
+    /// Anchor X position in window pixels.
+    pub anchor_x: f32,
+    /// Anchor Y position in window pixels.
+    pub anchor_y: f32,
+    /// Menu items in display order.
+    pub items: Vec<TabMenuItem>,
+    /// Index of the hovered item, if any.
+    pub hovered: Option<usize>,
+}
+
+/// Positioned rectangle of an open tab context menu.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TabMenuLayout {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub item_height: f32,
+    pub padding: f32,
+    pub item_count: usize,
+}
+
+impl TabMenuLayout {
+    /// Total menu height in pixels.
+    pub fn height(&self) -> f32 {
+        self.item_height * self.item_count as f32 + 2.0 * self.padding
+    }
+
+    /// Item index under `(x, y)`, if any.
+    pub fn item_at(&self, x: f32, y: f32) -> Option<usize> {
+        if x < self.x || x >= self.x + self.width {
+            return None;
+        }
+        let offset = y - self.y - self.padding;
+        if offset < 0.0 || self.item_height <= 0.0 {
+            return None;
+        }
+        let idx = (offset / self.item_height) as usize;
+        (idx < self.item_count).then_some(idx)
+    }
+}
+
+/// Whether releasing a tab drag at `pos` (in window pixels) should detach the
+/// tab into a new window.
+pub fn should_detach_tab_drag(pos: (f32, f32), window_size: (f32, f32), cursor_left: bool) -> bool {
+    cursor_left || pos.0 < 0.0 || pos.1 < 0.0 || pos.0 >= window_size.0 || pos.1 >= window_size.1
+}
+
 /// Space above the first and below the last menu item.
 pub const MENU_PADDING: f32 = 6.0;
 
@@ -226,6 +298,8 @@ pub struct TabBarState {
     pub menu_open: bool,
     /// The menu item under the pointer.
     pub hovered_menu_item: Option<MenuItem>,
+    /// Open context menu for a tab, if any.
+    pub tab_menu: Option<TabMenuState>,
     /// The window's scale factor: physical pixels per logical pixel. All of
     /// the bar's geometry is the logical constants times this.
     pub scale: f32,
@@ -253,6 +327,7 @@ impl TabBarState {
             title_letters: TITLE_WORD_LETTERS,
             menu_open: false,
             hovered_menu_item: None,
+            tab_menu: None,
             scale: 1.0,
         }
     }
@@ -477,6 +552,30 @@ impl TabBarState {
             item_height: (cell_height + self.scaled(12.0)).round(),
             padding: self.scaled(MENU_PADDING),
         }
+    }
+
+    /// Where the tab context menu opens, clamped horizontally within the window.
+    pub fn tab_menu_layout(&self, cell_width: f32, cell_height: f32) -> Option<TabMenuLayout> {
+        let menu = self.tab_menu.as_ref()?;
+        if menu.items.is_empty() {
+            return None;
+        }
+        let longest = menu
+            .items
+            .iter()
+            .map(|item| item.label.chars().count())
+            .max()
+            .unwrap_or(0) as f32;
+        let width = (longest + 4.0) * cell_width;
+        let max_x = (self.total_width - width - self.scaled(4.0)).max(self.scaled(4.0));
+        Some(TabMenuLayout {
+            x: menu.anchor_x.clamp(self.scaled(4.0), max_x),
+            y: menu.anchor_y.max(self.height()),
+            width,
+            item_height: (cell_height + self.scaled(12.0)).round(),
+            padding: self.scaled(MENU_PADDING),
+            item_count: menu.items.len(),
+        })
     }
 
     /// x of the separator between the split buttons and the window controls.
@@ -1849,5 +1948,62 @@ mod tests {
         state.update(&tabs, TabId::new(1), 600.0);
         assert_eq!(state.tabs.len(), len1);
         assert_eq!(state.active_index, active1);
+    }
+
+    #[test]
+    fn tab_menu_layout_clamps_to_window_and_hit_tests_items() {
+        let mut state = bar_with(2, 0, 400.0);
+        state.tab_menu = Some(TabMenuState {
+            tab_id: TabId::new(1),
+            anchor_x: 380.0,
+            anchor_y: 60.0,
+            items: vec![
+                TabMenuItem {
+                    label: "Move tab to new window".to_string(),
+                    action: TabMenuAction::MoveToNewWindow,
+                },
+                TabMenuItem {
+                    label: "Move tab to window 1".to_string(),
+                    action: TabMenuAction::MoveToWindow(WindowKey::new(1)),
+                },
+                TabMenuItem {
+                    label: "Close tab".to_string(),
+                    action: TabMenuAction::CloseTab,
+                },
+            ],
+            hovered: None,
+        });
+        let layout = state.tab_menu_layout(8.0, 16.0).unwrap();
+        assert!(layout.x + layout.width <= state.total_width);
+        assert_eq!(
+            layout.item_at(layout.x + 10.0, layout.y + layout.padding + 2.0),
+            Some(0)
+        );
+        assert_eq!(
+            layout.item_at(
+                layout.x + 10.0,
+                layout.y + layout.padding + layout.item_height + 2.0
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            layout.item_at(
+                layout.x + 10.0,
+                layout.y + layout.padding + 2.0 * layout.item_height + 2.0
+            ),
+            Some(2)
+        );
+        assert_eq!(layout.item_at(layout.x - 1.0, layout.y + 10.0), None);
+    }
+
+    #[test]
+    fn should_detach_tab_drag_triggers_outside_window_or_on_cursor_leave() {
+        let size = (800.0, 600.0);
+        assert!(!should_detach_tab_drag((200.0, 50.0), size, false));
+        assert!(should_detach_tab_drag((-5.0, 50.0), size, false));
+        assert!(should_detach_tab_drag((805.0, 50.0), size, false));
+        assert!(should_detach_tab_drag((200.0, -10.0), size, false));
+        assert!(should_detach_tab_drag((200.0, 610.0), size, false));
+        assert!(should_detach_tab_drag((200.0, 50.0), size, true));
     }
 }

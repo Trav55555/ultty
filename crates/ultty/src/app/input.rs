@@ -54,9 +54,10 @@ impl WindowCtx<'_> {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.win.mouse_pos = position;
+                self.win.cursor_inside = true;
                 if self.win.reported_button.is_some() {
                     self.report_mouse_drag();
-                } else if self.win.mouse_pressed {
+                } else if self.win.mouse_pressed || self.win.tab_bar.is_dragging() {
                     self.handle_mouse_drag();
                 } else if self.terminal().is_some_and(|t| t.track_mouse_motion()) {
                     self.handle_mouse_motion();
@@ -65,6 +66,9 @@ impl WindowCtx<'_> {
                 if !self.update_resize_cursor() {
                     self.update_cursor_for_url();
                 }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.win.cursor_inside = false;
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.handle_mouse_button(button, state);
@@ -199,6 +203,27 @@ impl WindowCtx<'_> {
         if self.win.command_palette.is_open() {
             if state == ElementState::Pressed {
                 self.close_command_palette();
+            }
+            return;
+        }
+
+        if self.win.tab_bar.tab_menu.is_some() {
+            if state == ElementState::Pressed {
+                let (cell_width, cell_height) = self.win.renderer.cell_dimensions();
+                let picked = self
+                    .win
+                    .tab_bar
+                    .tab_menu_layout(cell_width, cell_height)
+                    .and_then(|layout| layout.item_at(x, y))
+                    .filter(|_| button == MouseButton::Left)
+                    .and_then(|idx| {
+                        let menu = self.win.tab_bar.tab_menu.as_ref()?;
+                        Some((menu.tab_id, menu.items.get(idx)?.action))
+                    });
+                self.close_menu();
+                if let Some((tab_id, action)) = picked {
+                    self.perform_tab_menu_action(tab_id, action);
+                }
             }
             return;
         }
@@ -392,14 +417,18 @@ impl WindowCtx<'_> {
 
                     if is_tab_row {
                         if let Some(tab_idx) = self.win.tab_bar.tab_at_x(x) {
-                            self.win.tab_bar.start_drag(tab_idx, x);
-                            self.app
-                                .runtime
-                                .manager
-                                .switch_to_tab_in_window(self.win.key, tab_idx);
-                            self.update_tab_bar();
-                            self.win.needs_redraw = true;
-                            tracing::debug!("Started drag on tab {}", tab_idx);
+                            if button == MouseButton::Right {
+                                self.open_tab_menu(tab_idx, x, y);
+                            } else if button == MouseButton::Left {
+                                self.win.tab_bar.start_drag(tab_idx, x);
+                                self.app
+                                    .runtime
+                                    .manager
+                                    .switch_to_tab_in_window(self.win.key, tab_idx);
+                                self.update_tab_bar();
+                                self.win.needs_redraw = true;
+                                tracing::debug!("Started drag on tab {}", tab_idx);
+                            }
                         }
                     }
                     return;
@@ -547,9 +576,38 @@ impl WindowCtx<'_> {
                     );
                 }
 
-                if self.win.tab_bar.is_dragging() {
+                if let Some(tab_idx) = self.win.tab_bar.dragging_tab {
                     self.win.tab_bar.end_drag();
                     self.win.needs_redraw = true;
+                    let win_size = self.win.window.inner_size();
+                    if self.app.runtime.manager.window_tab_count(self.win.key) > 1
+                        && ultty::tabs::should_detach_tab_drag(
+                            (x, y),
+                            (win_size.width as f32, win_size.height as f32),
+                            !self.win.cursor_inside,
+                        )
+                    {
+                        if let Some(tab_id) = self
+                            .app
+                            .runtime
+                            .manager
+                            .window_tabs(self.win.key)
+                            .get(tab_idx)
+                            .map(|tab| tab.id)
+                        {
+                            let position = self.win.window.outer_position().ok().map(|origin| {
+                                winit::dpi::PhysicalPosition::new(
+                                    origin.x + x.round() as i32,
+                                    origin.y + y.round() as i32,
+                                )
+                            });
+                            self.app.pending_tab_moves.push(super::PendingTabMove {
+                                tab_id,
+                                destination: super::MoveDestination::NewWindow,
+                                position,
+                            });
+                        }
+                    }
                 }
 
                 if self.app.config.behavior.copy_on_select {
@@ -657,7 +715,91 @@ impl WindowCtx<'_> {
     pub(super) fn close_menu(&mut self) {
         self.win.tab_bar.menu_open = false;
         self.win.tab_bar.hovered_menu_item = None;
+        self.win.tab_bar.tab_menu = None;
         self.win.needs_redraw = true;
+    }
+
+    fn open_tab_menu(&mut self, tab_idx: usize, x: f32, y: f32) {
+        use ultty::tabs::{TabMenuAction, TabMenuItem, TabMenuState};
+
+        let Some(tab_id) = self
+            .app
+            .runtime
+            .manager
+            .window_tabs(self.win.key)
+            .get(tab_idx)
+            .map(|tab| tab.id)
+        else {
+            return;
+        };
+        let mut items = Vec::new();
+        let tab_count = self.app.runtime.manager.window_tab_count(self.win.key);
+        if tab_count > 1 {
+            items.push(TabMenuItem {
+                label: "Move tab to new window".to_string(),
+                action: TabMenuAction::MoveToNewWindow,
+            });
+        }
+        for other in self.app.runtime.manager.window_ids() {
+            if other != self.win.key {
+                items.push(TabMenuItem {
+                    label: format!("Move tab to window {}", other.raw()),
+                    action: TabMenuAction::MoveToWindow(other),
+                });
+            }
+        }
+        if tab_count > 1 {
+            items.push(TabMenuItem {
+                label: "Close tab".to_string(),
+                action: TabMenuAction::CloseTab,
+            });
+        }
+        if items.is_empty() {
+            return;
+        }
+        self.win.tab_bar.menu_open = false;
+        self.win.tab_bar.hovered_menu_item = None;
+        self.win.tab_bar.tab_menu = Some(TabMenuState {
+            tab_id,
+            anchor_x: x,
+            anchor_y: y,
+            items,
+            hovered: None,
+        });
+        self.win.needs_redraw = true;
+    }
+
+    fn perform_tab_menu_action(
+        &mut self,
+        tab_id: ultty::terminal_manager::TabId,
+        action: ultty::tabs::TabMenuAction,
+    ) {
+        use ultty::tabs::TabMenuAction;
+
+        match action {
+            TabMenuAction::MoveToNewWindow => {
+                self.app.pending_tab_moves.push(super::PendingTabMove {
+                    tab_id,
+                    destination: super::MoveDestination::NewWindow,
+                    position: None,
+                });
+            }
+            TabMenuAction::MoveToWindow(window) => {
+                self.app.pending_tab_moves.push(super::PendingTabMove {
+                    tab_id,
+                    destination: super::MoveDestination::Existing(window),
+                    position: None,
+                });
+            }
+            TabMenuAction::CloseTab => {
+                if self.app.runtime.manager.window_tab_count(self.win.key) > 1 {
+                    self.freeze_tab_width_after_close();
+                    self.app.runtime.manager.close_tab(tab_id);
+                    self.update_tab_bar();
+                    self.win.needs_redraw = true;
+                }
+            }
+        }
     }
 
     /// Run a main-menu entry.
@@ -973,7 +1115,7 @@ impl WindowCtx<'_> {
             }
         }
 
-        if self.win.tab_bar.menu_open {
+        if self.win.tab_bar.menu_open || self.win.tab_bar.tab_menu.is_some() {
             if let Key::Named(NamedKey::Escape) = &event.logical_key {
                 self.close_menu();
             }

@@ -522,6 +522,44 @@ impl App {
                 ControlResponse::Ok
             }
 
+            ControlRequest::MoveTab {
+                tab,
+                window,
+                new_window,
+            } => {
+                let destination = match (window, new_window) {
+                    (Some(id), false) => match self.resolve_window_target(Some(id), None) {
+                        Ok(key) => super::MoveDestination::Existing(key),
+                        Err(response) => return response,
+                    },
+                    (None, true) => super::MoveDestination::NewWindow,
+                    _ => {
+                        return ControlResponse::Error {
+                            code: 4,
+                            message: "move-tab requires either window or new_window".to_string(),
+                        };
+                    }
+                };
+                let Some(tab_id) = self.shared.runtime.manager.tabs().get(tab).map(|t| t.id) else {
+                    return ControlResponse::Error {
+                        code: 6,
+                        message: "No tab at this index".to_string(),
+                    };
+                };
+                match self.move_tab_to_window(event_loop, tab_id, destination, None) {
+                    Ok((dest_key, exit)) => {
+                        if exit {
+                            *should_exit = true;
+                        }
+                        ControlResponse::Data(ControlData::TabMoved {
+                            tab_index: tab,
+                            window: dest_key.raw() as u64,
+                        })
+                    }
+                    Err(message) => ControlResponse::Error { code: 4, message },
+                }
+            }
+
             ControlRequest::ListTabs => {
                 let active_tab_id = self.shared.runtime.manager.active_tab().map(|t| t.id);
                 let tabs: Vec<TabInfo> = self
@@ -2585,6 +2623,11 @@ mod tests {
         assert!(control_request_requires_auth(
             &ControlRequest::CloseWindow { window: 0 }
         ));
+        assert!(control_request_requires_auth(&ControlRequest::MoveTab {
+            tab: 1,
+            window: Some(1),
+            new_window: false,
+        }));
         assert!(control_request_requires_auth(&ControlRequest::RunCommand {
             command: "make".to_string(),
             args: vec!["test".to_string()],

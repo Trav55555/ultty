@@ -369,7 +369,7 @@ impl Renderer {
                 inner_cells.saturating_sub(key_cells + usize::from(key_cells > 0) * 2);
             let matched = row.matched;
             self.text_renderer.append_cell_text(
-                row.entry.label,
+                &row.entry.label,
                 inner_x,
                 text_y,
                 label_cells,
