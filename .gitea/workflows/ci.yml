@@ -1,13 +1,14 @@
 # CI on Gitea Actions (git.traversannan.com), the primary remote; GitHub is
 # a push mirror. Jobs run on the ultty pool: x86_64 on-demand Fargate tasks,
 # one job each, defined with their image in the gitea-server repository. The
-# image carries the toolchains (stable, MSRV, RUST_NIGHTLY), cargo-audit, cargo-fuzz,
-# the Wayland/X11 headers and Xvfb with lavapipe, so jobs install nothing.
+# image carries the toolchains (stable, MSRV, RUST_NIGHTLY), cargo-audit,
+# cargo-deny, cargo-fuzz, cargo-nextest, mold, valgrind, tmux, minisign, the
+# Wayland/X11 headers and Xvfb with lavapipe, so jobs install nothing.
 # Tasks start empty and run on the host (no docker); compiles are cached in S3
 # through sccache. Run steps go through scripts/ci-runner-step.sh, which also
 # keeps the pool's heartbeat: without it the scaler stops the task mid-job.
-# There is no macOS runner: macOS builds only run in the GitHub release
-# workflow.
+# macOS checks are dispatched to GitHub Actions (macos-latest) when
+# GH_MACOS_CI_TOKEN is configured.
 name: CI
 
 on:
@@ -98,22 +99,25 @@ jobs:
       - name: Workspace tests
         run: |
           if command -v cargo-nextest >/dev/null 2>&1; then
-            scripts/ci-runner-step.sh cargo nextest run --locked --workspace
-            scripts/ci-runner-step.sh cargo test --locked --doc -p ultty-vt -p ultty-protocol -p ultty-client -p ulttui
+            scripts/ci-runner-step.sh cargo nextest run --locked --profile ci --workspace
+            scripts/ci-runner-step.sh cargo test --locked --workspace --doc
           else
             scripts/ci-runner-step.sh cargo test --locked --workspace
           fi
+      # Keep --workspace across follow-up steps so Cargo preserves identical
+      # feature unification (tokio/test-util, ulttui/test-utils) and avoids
+      # recompiling workspace dependencies between steps.
       - name: Protocol roundtrip property tests
-        run: scripts/ci-runner-step.sh cargo test --locked -p ultty-protocol --test roundtrip -- --ignored
+        run: scripts/ci-runner-step.sh cargo test --locked --workspace --test roundtrip -- --ignored
         env:
           RUST_MIN_STACK: 8388608
       # Heap bytes from a counting allocator: deterministic, so it gates
       # without flaking. Fails when a case exceeds its budget (+5%).
       - name: Memory budgets
-        run: scripts/ci-runner-step.sh cargo test --locked -p ultty --bench memory
+        run: scripts/ci-runner-step.sh cargo test --locked --workspace --bench memory
       # The compatibility scorecard page must match its scorecard_ tests.
       - name: Compatibility scorecard
-        run: scripts/ci-runner-step.sh scripts/compat-scorecard.sh --check
+        run: scripts/ci-runner-step.sh scripts/compat-scorecard.sh --check --workspace
         env:
           CI_SCCACHE_STATS: "1"
 
@@ -184,7 +188,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # valgrind is not in the runner image yet; the script apt-installs it.
       - run: scripts/ci-runner-step.sh scripts/ci-icount.sh "$ICOUNT_BASE"
         env:
           ICOUNT_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
@@ -198,14 +201,12 @@ jobs:
       - uses: actions/checkout@v4
       # lavapipe (mesa-vulkan-drivers) renders without a GPU; Xvfb is the
       # display. Ultty runs for real and the live smokes drive it. The runner
-      # image carries the X11 client libraries winit loads at runtime.
+      # image carries the X11 client libraries winit loads at runtime and tmux
+      # for the agent-transcript suite.
       - run: scripts/ci-runner-step.sh cargo build --locked -p ultty -p hello-native -p counter-app -p agent-transcript -p agent-console -p ulttui-lua --bins
       - run: scripts/ci-runner-step.sh cargo build --locked -p ultty-client --example inline-surface --example session-frame-fixture
         env:
           CI_SCCACHE_STATS: "1"
-      # Jobs install nothing on this runner, so the tmux half of
-      # agent-transcript.sh runs only if the image (gitea-server repository)
-      # has tmux; otherwise it is skipped, loudly, and GitHub runs it.
       - run: scripts/ci-runner-step.sh scripts/ci-gui-smoke.sh "$RUNNER_TEMP/gui-smoke"
       # Upstream upload-artifact v4.2.0 with its GitHub-only host check
       # removed: Gitea's artifact API lists and serves only v4 uploads.

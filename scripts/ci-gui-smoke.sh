@@ -160,6 +160,25 @@ if [ "$SHARD" = all ] || [ "$SHARD" = core ]; then
       sleep 0.5
     done
     "$ULTTYCTL" ping >/dev/null || { echo "Ultty never answered ulttyctl ping" >&2; tail -40 "$OUT/ultty.log" >&2; exit 1; }
+    # With async GPU startup (ADR 0030), ulttyctl ping succeeds as soon as the
+    # control socket binds, before the wgpu renderer has drawn its first frame.
+    # Wait for the first screenshot to succeed so live-smoke-gate does not race
+    # the GPU startup thread.
+    gpu_ready=0
+    for _ in $(seq 1 120); do
+      if "$ULTTYCTL" screenshot "$OUT/startup-ready.png" >/dev/null 2>&1; then
+        gpu_ready=1
+        break
+      fi
+      if ! kill -0 "$shared_ultty_pid" 2>/dev/null; then
+        echo "Ultty exited while waiting for GPU startup:" >&2
+        tail -40 "$OUT/ultty.log" >&2
+        exit 1
+      fi
+      sleep 0.25
+    done
+    rm -f "$OUT/startup-ready.png"
+    [ "$gpu_ready" -eq 1 ] || { echo "Ultty GPU never became ready for screenshots" >&2; tail -40 "$OUT/ultty.log" >&2; exit 1; }
   )
   ULTTY_PID="$(cat "$OUT/shared-ultty.pid")"
 

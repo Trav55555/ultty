@@ -85,6 +85,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
+        with:
+          tool: cargo-nextest@0.9.152
       - run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev
       - name: Session deployment packaging
         run: python3 -S -m unittest discover -s scripts/deploy -p 'test_*.py'
@@ -98,15 +101,20 @@ jobs:
         run: scripts/install-sh-test.sh
       - name: Runner step wrapper
         run: scripts/ci-runner-step-test.sh
-      - run: cargo test --locked --workspace
+      - name: Workspace tests
+        run: |
+          cargo nextest run --locked --profile ci --workspace
+          cargo test --locked --workspace --doc
+      # Keep --workspace across follow-up steps so Cargo preserves identical
+      # feature unification and avoids recompiling workspace dependencies.
       - name: Protocol roundtrip property tests
-        run: cargo test --locked -p ultty-protocol --test roundtrip -- --ignored
+        run: cargo test --locked --workspace --test roundtrip -- --ignored
         env:
           RUST_MIN_STACK: 8388608
       - name: Memory budgets
-        run: cargo test --locked -p ultty --bench memory
+        run: cargo test --locked --workspace --bench memory
       - name: Compatibility scorecard
-        run: scripts/compat-scorecard.sh --check
+        run: scripts/compat-scorecard.sh --check --workspace
 
   msrv:
     name: MSRV
@@ -145,6 +153,8 @@ jobs:
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
         with:
           toolchain: nightly
@@ -156,7 +166,9 @@ jobs:
         with:
           tool: cargo-fuzz@0.12.0
       - name: Fuzz targets (parallel waves)
-        run: scripts/ci-fuzz-smoke.sh --mode smoke nightly
+        run: scripts/ci-fuzz-smoke.sh --mode smoke --base "$FUZZ_BASE" nightly
+        env:
+          FUZZ_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
       - name: Upload fuzz crash artifacts
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -673,7 +673,7 @@ mod tests {
         use std::os::fd::AsRawFd;
         let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
         reader.set_nonblocking(true).unwrap();
-        let burst = vec![b'a'; 10_000];
+        let burst = vec![b'a'; 6_000];
         writer.write_all(&burst).unwrap();
         let mut input = InputReader::default();
         assert!(input.read_available(reader.as_raw_fd()).unwrap());

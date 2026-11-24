@@ -84,8 +84,14 @@ for target in "${TARGETS[@]}"; do
   BEFORE_COUNTS["$target"]="$(count_files "corpus/$target")"
 done
 
+# Pass the host target explicitly: prebuilt musl cargo-fuzz binaries (such as
+# from taiki-e/install-action on Linux) otherwise default --target to
+# x86_64-unknown-linux-musl, which fails under AddressSanitizer.
+FUZZ_TARGET_TRIPLE="${FUZZ_TARGET_TRIPLE:-$(rustc "+$TOOLCHAIN" -vV | awk '/^host: /{print $2; exit}')}"
+[ -n "$FUZZ_TARGET_TRIPLE" ] || { echo "ci-fuzz-smoke: could not determine rustc host triple for +$TOOLCHAIN" >&2; exit 1; }
+
 # Build all targets in one parallel Cargo invocation.
-cargo "+$TOOLCHAIN" fuzz build
+cargo "+$TOOLCHAIN" fuzz build --target "$FUZZ_TARGET_TRIPLE"
 
 run_wave() {
   local log_a log_b pid_a pid_b status_a=0 status_b=0
@@ -125,21 +131,21 @@ fi
 
 echo "==> Wave 1 ($MODE): vt_terminal (${T_VT}s) || (decode_app ${T_DECODE}s + decode_terminal ${T_DECODE}s + in_band_split ${T_SPLIT}s)"
 run_wave \
-  "cargo +\"$TOOLCHAIN\" fuzz run vt_terminal -- -max_total_time=$T_VT -max_len=4096" \
-  "cargo +\"$TOOLCHAIN\" fuzz run decode_app -- -max_total_time=$T_DECODE && \
-   cargo +\"$TOOLCHAIN\" fuzz run decode_terminal -- -max_total_time=$T_DECODE && \
-   cargo +\"$TOOLCHAIN\" fuzz run in_band_split -- -max_total_time=$T_SPLIT -max_len=4096"
+  "cargo +\"$TOOLCHAIN\" fuzz run --target \"$FUZZ_TARGET_TRIPLE\" vt_terminal -- -max_total_time=$T_VT -max_len=4096" \
+  "cargo +\"$TOOLCHAIN\" fuzz run --target \"$FUZZ_TARGET_TRIPLE\" decode_app -- -max_total_time=$T_DECODE && \
+   cargo +\"$TOOLCHAIN\" fuzz run --target \"$FUZZ_TARGET_TRIPLE\" decode_terminal -- -max_total_time=$T_DECODE && \
+   cargo +\"$TOOLCHAIN\" fuzz run --target \"$FUZZ_TARGET_TRIPLE\" in_band_split -- -max_total_time=$T_SPLIT -max_len=4096"
 
 echo "==> Wave 2 ($MODE): kitty_graphics (${T_KITTY}s) || image_decode (${T_IMAGE}s)"
 run_wave \
-  "cargo +\"$TOOLCHAIN\" fuzz run kitty_graphics -- -max_total_time=$T_KITTY -max_len=8192" \
-  "cargo +\"$TOOLCHAIN\" fuzz run image_decode -- -max_total_time=$T_IMAGE -max_len=65536 -rss_limit_mb=4096"
+  "cargo +\"$TOOLCHAIN\" fuzz run --target \"$FUZZ_TARGET_TRIPLE\" kitty_graphics -- -max_total_time=$T_KITTY -max_len=8192" \
+  "cargo +\"$TOOLCHAIN\" fuzz run --target \"$FUZZ_TARGET_TRIPLE\" image_decode -- -max_total_time=$T_IMAGE -max_len=65536 -rss_limit_mb=4096"
 
 if [ "$MODE" = nightly ] && [ -n "$S3_CORPUS_PREFIX" ]; then
   echo "==> Minimizing and syncing corpus back to $S3_CORPUS_PREFIX"
   for target in "${TARGETS[@]}"; do
     merged="$(mktemp -d)"
-    if cargo "+$TOOLCHAIN" fuzz run "$target" "$merged" "corpus/$target" -- -merge=1 >/dev/null 2>&1; then
+    if cargo "+$TOOLCHAIN" fuzz run --target "$FUZZ_TARGET_TRIPLE" "$target" "$merged" "corpus/$target" -- -merge=1 >/dev/null 2>&1; then
       rm -rf "corpus/$target"
       mv "$merged" "corpus/$target"
     else
