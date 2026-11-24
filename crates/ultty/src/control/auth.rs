@@ -90,6 +90,9 @@ pub fn control_request_requires_auth(request: &ultty_protocol::control::ControlR
         ControlRequest::GetInfo
         | ControlRequest::Describe
         | ControlRequest::SubscribeV2 { .. }
+        | ControlRequest::ListWindows
+        | ControlRequest::NewWindow { .. }
+        | ControlRequest::CloseWindow { .. }
         | ControlRequest::ListTabs
         | ControlRequest::ListPanes
         | ControlRequest::WorkspaceList
@@ -120,8 +123,8 @@ pub fn control_request_requires_auth(request: &ultty_protocol::control::ControlR
         | ControlRequest::FocusPane { .. }
         | ControlRequest::ZoomPane { .. }
         | ControlRequest::SwapPanes { .. }
-        | ControlRequest::FocusWindow
-        | ControlRequest::ToggleFullscreen
+        | ControlRequest::FocusWindow { .. }
+        | ControlRequest::ToggleFullscreen { .. }
         | ControlRequest::Resize { .. }
         | ControlRequest::SetOpacity { .. }
         | ControlRequest::SetPaneStatus { .. }

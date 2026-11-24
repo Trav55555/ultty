@@ -168,6 +168,35 @@ pub enum ControlRequest {
         command: Option<String>,
         args: Vec<String>,
         working_dir: Option<String>,
+        /// Target window ID (`--window`). When omitted, falls back to the window holding `pane`, then the last focused window.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+        /// Pane ID whose window should be targeted (`--pane` or `ULTTY_PANE`). Ignored when `window` is set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane: Option<u64>,
+    },
+
+    /// List all open windows in this process.
+    ListWindows,
+
+    /// Open a new window in this process, running `command` or the default shell.
+    NewWindow {
+        /// Optional title for the new window's initial tab.
+        title: Option<String>,
+        /// Optional command to run instead of the default shell.
+        command: Option<String>,
+        /// Arguments for `command`.
+        #[serde(default)]
+        args: Vec<String>,
+        /// Optional working directory for `command`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_dir: Option<String>,
+    },
+
+    /// Close a window by ID.
+    CloseWindow {
+        /// Window ID (from `ListWindows`).
+        window: u64,
     },
 
     /// Type shell text plus Enter into the foreground PTY. `args` are
@@ -369,7 +398,14 @@ pub enum ControlRequest {
         target: Option<u64>,
     },
 
-    FocusWindow,
+    FocusWindow {
+        /// Target window ID (`--window`). When omitted, falls back to the window holding `pane`, then the last focused window.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+        /// Pane ID whose window should be targeted (`--pane` or `ULTTY_PANE`). Ignored when `window` is set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane: Option<u64>,
+    },
 
     SwitchTab {
         index: usize,
@@ -395,15 +431,34 @@ pub enum ControlRequest {
         second: u64,
     },
 
-    ToggleFullscreen,
+    ToggleFullscreen {
+        /// Target window ID (`--window`). When omitted, falls back to the window holding `pane`, then the last focused window.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+        /// Pane ID whose window should be targeted (`--pane` or `ULTTY_PANE`). Ignored when `window` is set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane: Option<u64>,
+    },
 
     Resize {
         width: u32,
         height: u32,
+        /// Target window ID (`--window`). When omitted, falls back to the window holding `pane`, then the last focused window.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+        /// Pane ID whose window should be targeted (`--pane` or `ULTTY_PANE`). Ignored when `window` is set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane: Option<u64>,
     },
 
     SetOpacity {
         opacity: f32,
+        /// Target window ID (`--window`). When omitted, falls back to the window holding `pane`, then the last focused window.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+        /// Pane ID whose window should be targeted (`--pane` or `ULTTY_PANE`). Ignored when `window` is set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane: Option<u64>,
     },
 
     /// Show what a pane is doing in the tab bar; `None` clears it.
@@ -417,6 +472,12 @@ pub enum ControlRequest {
 
     Screenshot {
         path: Option<String>,
+        /// Target window ID (`--window`). When omitted, falls back to the window holding `pane`, then the last focused window.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+        /// Pane ID whose window should be targeted (`--pane` or `ULTTY_PANE`). Ignored when `window` is set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane: Option<u64>,
     },
 
     Batch {
@@ -608,6 +669,19 @@ pub enum ControlResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlData {
     Info(TerminalInfo),
+    /// Open windows in this process.
+    Windows {
+        windows: Vec<WindowInfo>,
+    },
+    /// `NewWindow` opened a window; `window` is its ID and `pane` is its initial pane's ID.
+    WindowOpened {
+        window: u64,
+        tab_index: usize,
+        pane: u64,
+        /// The window opened, but a later presentation update failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        warning: Option<String>,
+    },
     Tabs {
         tabs: Vec<TabInfo>,
     },
@@ -749,31 +823,77 @@ pub enum ControlData {
     },
 }
 
-/// Something that happened in a pane, sent to subscribers one per line.
+/// Something that happened in a pane or window, sent to subscribers one per line.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum ControlEvent {
+    /// A new window opened in this process.
+    WindowOpened { window: u64 },
+    /// A window closed in this process.
+    WindowClosed { window: u64 },
     /// A pane was opened (a new tab or a split).
-    PaneOpened { pane: u64, tab_index: usize },
+    PaneOpened {
+        pane: u64,
+        tab_index: usize,
+        /// Owning window ID when emitted by a GUI instance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+    },
     /// A pane was closed.
-    PaneClosed { pane: u64 },
+    PaneClosed {
+        pane: u64,
+        /// Owning window ID when emitted by a GUI instance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+    },
     /// The shell started running a command (OSC 133;C).
-    CommandStarted { pane: u64 },
+    CommandStarted {
+        pane: u64,
+        /// Owning window ID when emitted by a GUI instance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+    },
     /// The command finished (OSC 133;D), with its exit code when the shell
     /// reported one.
-    CommandFinished { pane: u64, exit_code: Option<i32> },
+    CommandFinished {
+        pane: u64,
+        exit_code: Option<i32>,
+        /// Owning window ID when emitted by a GUI instance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+    },
     /// The bell rang.
-    Bell { pane: u64 },
+    Bell {
+        pane: u64,
+        /// Owning window ID when emitted by a GUI instance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+    },
     /// A program asked for a desktop notification (OSC 9/777).
     Notification {
         pane: u64,
         title: String,
         body: String,
+        /// Owning window ID when emitted by a GUI instance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
     },
     /// A program set the pane title (OSC 0/2).
-    TitleChanged { pane: u64, title: String },
+    TitleChanged {
+        pane: u64,
+        title: String,
+        /// Owning window ID when emitted by a GUI instance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+    },
     /// The pane's shell process exited.
-    ProcessExited { pane: u64, status: i32 },
+    ProcessExited {
+        pane: u64,
+        status: i32,
+        /// Owning window ID when emitted by a GUI instance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+    },
     /// Records changed; query `ProgramStatus` for the current snapshot.
     ProgramStatusChanged {
         /// Source pane, independent of current focus.
@@ -782,22 +902,44 @@ pub enum ControlEvent {
         generation: u64,
         /// Cause of the most recent change, not a complete history.
         reason: StatusChangeReason,
+        /// Owning window ID when emitted by a GUI instance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
     },
 }
 
 impl ControlEvent {
-    /// The pane the event is about.
-    pub fn pane(&self) -> u64 {
+    /// The pane the event is about, or `None` for window-lifecycle events.
+    pub fn pane(&self) -> Option<u64> {
         match self {
+            ControlEvent::WindowOpened { .. } | ControlEvent::WindowClosed { .. } => None,
             ControlEvent::PaneOpened { pane, .. }
-            | ControlEvent::PaneClosed { pane }
-            | ControlEvent::CommandStarted { pane }
+            | ControlEvent::PaneClosed { pane, .. }
+            | ControlEvent::CommandStarted { pane, .. }
             | ControlEvent::CommandFinished { pane, .. }
-            | ControlEvent::Bell { pane }
+            | ControlEvent::Bell { pane, .. }
             | ControlEvent::Notification { pane, .. }
             | ControlEvent::TitleChanged { pane, .. }
             | ControlEvent::ProgramStatusChanged { pane, .. }
-            | ControlEvent::ProcessExited { pane, .. } => *pane,
+            | ControlEvent::ProcessExited { pane, .. } => Some(*pane),
+        }
+    }
+
+    /// The window the event is about, if known.
+    pub fn window(&self) -> Option<u64> {
+        match self {
+            ControlEvent::WindowOpened { window } | ControlEvent::WindowClosed { window } => {
+                Some(*window)
+            }
+            ControlEvent::PaneOpened { window, .. }
+            | ControlEvent::PaneClosed { window, .. }
+            | ControlEvent::CommandStarted { window, .. }
+            | ControlEvent::CommandFinished { window, .. }
+            | ControlEvent::Bell { window, .. }
+            | ControlEvent::Notification { window, .. }
+            | ControlEvent::TitleChanged { window, .. }
+            | ControlEvent::ProgramStatusChanged { window, .. }
+            | ControlEvent::ProcessExited { window, .. } => *window,
         }
     }
 }
@@ -838,11 +980,31 @@ pub struct TerminalInfo {
     pub cwd: Option<String>,
 }
 
+/// Metadata describing a single window inside an Ultty process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowInfo {
+    /// Window ID (stable for the lifetime of the window within this process).
+    pub id: u64,
+    /// Current window title.
+    pub title: String,
+    /// Inner width in physical pixels.
+    pub width: u32,
+    /// Inner height in physical pixels.
+    pub height: u32,
+    /// Zero-based process-wide tab indices displayed in this window.
+    pub tabs: Vec<usize>,
+    /// Whether this window is currently focused.
+    pub focused: bool,
+}
+
 /// Metadata describing a single tab.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TabInfo {
     /// Tab index.
     pub index: usize,
+    /// ID of the window displaying this tab.
+    #[serde(default)]
+    pub window: u64,
     /// User-visible tab title.
     pub title: String,
     /// Whether this tab is currently active.
@@ -983,6 +1145,9 @@ pub struct PaneInfo {
     pub id: u64,
     /// Index of the tab holding the pane.
     pub tab_index: usize,
+    /// ID of the window displaying this pane's tab.
+    #[serde(default)]
+    pub window: u64,
     /// Whether this is the focused pane of its tab.
     pub active: bool,
     /// Whether this pane has keyboard focus: the active pane of the active tab.
@@ -1038,9 +1203,26 @@ mod tests {
                 focused: true,
                 cwd: Some("/home".to_string()),
             }),
+            ControlData::Windows {
+                windows: vec![WindowInfo {
+                    id: 0,
+                    title: "Ultty".to_string(),
+                    width: 800,
+                    height: 600,
+                    tabs: vec![0],
+                    focused: true,
+                }],
+            },
+            ControlData::WindowOpened {
+                window: 1,
+                tab_index: 1,
+                pane: 8,
+                warning: None,
+            },
             ControlData::Tabs {
                 tabs: vec![TabInfo {
                     index: 0,
+                    window: 0,
                     title: "zsh".to_string(),
                     active: true,
                     pid: Some(42),
@@ -1051,6 +1233,7 @@ mod tests {
                 panes: vec![PaneInfo {
                     id: 7,
                     tab_index: 0,
+                    window: 0,
                     active: true,
                     focused: false,
                     title: "vim".to_string(),
@@ -1103,6 +1286,7 @@ mod tests {
                 event: ControlEvent::CommandFinished {
                     pane: 1,
                     exit_code: Some(2),
+                    window: Some(0),
                 },
             },
             ControlData::WaitQuiet,
@@ -1226,6 +1410,7 @@ mod tests {
         let event = ControlEvent::CommandFinished {
             pane: 3,
             exit_code: Some(1),
+            window: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(
@@ -1233,7 +1418,35 @@ mod tests {
             r#"{"event":"command_finished","pane":3,"exit_code":1}"#
         );
         assert_eq!(serde_json::from_str::<ControlEvent>(&json).unwrap(), event);
-        assert_eq!(event.pane(), 3);
+        assert_eq!(event.pane(), Some(3));
+        assert_eq!(event.window(), None);
+
+        let with_window = ControlEvent::CommandFinished {
+            pane: 3,
+            exit_code: Some(1),
+            window: Some(2),
+        };
+        let with_window_json = serde_json::to_string(&with_window).unwrap();
+        assert_eq!(
+            with_window_json,
+            r#"{"event":"command_finished","pane":3,"exit_code":1,"window":2}"#
+        );
+        assert_eq!(with_window.window(), Some(2));
+
+        let opened = ControlEvent::WindowOpened { window: 4 };
+        assert_eq!(opened.pane(), None);
+        assert_eq!(opened.window(), Some(4));
+        assert_eq!(
+            serde_json::to_string(&opened).unwrap(),
+            r#"{"event":"window_opened","window":4}"#
+        );
+        let closed = ControlEvent::WindowClosed { window: 4 };
+        assert_eq!(closed.pane(), None);
+        assert_eq!(closed.window(), Some(4));
+        assert_eq!(
+            serde_json::to_string(&closed).unwrap(),
+            r#"{"event":"window_closed","window":4}"#
+        );
     }
 
     #[test]
@@ -1472,6 +1685,7 @@ mod tests {
                 pane: 4,
                 generation: 3,
                 reason: StatusChangeReason::Report,
+                window: None,
             },
         };
         assert_eq!(
@@ -1479,6 +1693,84 @@ mod tests {
                 .unwrap(),
             event
         );
+    }
+
+    #[test]
+    fn window_control_requests_are_additive_and_backward_compatible() {
+        let legacy_focus: ControlRequest =
+            serde_json::from_str(r#"{"type":"focus_window"}"#).unwrap();
+        assert_eq!(
+            legacy_focus,
+            ControlRequest::FocusWindow {
+                window: None,
+                pane: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&legacy_focus).unwrap(),
+            r#"{"type":"focus_window"}"#
+        );
+
+        let legacy_fullscreen: ControlRequest =
+            serde_json::from_str(r#"{"type":"toggle_fullscreen"}"#).unwrap();
+        assert_eq!(
+            legacy_fullscreen,
+            ControlRequest::ToggleFullscreen {
+                window: None,
+                pane: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&legacy_fullscreen).unwrap(),
+            r#"{"type":"toggle_fullscreen"}"#
+        );
+
+        let legacy_tab: ControlRequest = serde_json::from_str(
+            r#"{"type":"new_tab","title":null,"command":null,"args":[],"working_dir":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_tab,
+            ControlRequest::NewTab {
+                title: None,
+                command: None,
+                args: Vec::new(),
+                working_dir: None,
+                window: None,
+                pane: None,
+            }
+        );
+
+        let legacy_tab_info: TabInfo =
+            serde_json::from_str(r#"{"index":0,"title":"sh","active":true,"pid":null,"cwd":null}"#)
+                .unwrap();
+        assert_eq!(legacy_tab_info.window, 0);
+
+        for req in [
+            ControlRequest::ListWindows,
+            ControlRequest::NewWindow {
+                title: Some("logs".into()),
+                command: Some("tail".into()),
+                args: vec!["-f".into(), "log".into()],
+                working_dir: Some("/tmp".into()),
+            },
+            ControlRequest::CloseWindow { window: 2 },
+            ControlRequest::Resize {
+                width: 900,
+                height: 600,
+                window: Some(1),
+                pane: None,
+            },
+            ControlRequest::Screenshot {
+                path: None,
+                window: None,
+                pane: Some(5),
+            },
+        ] {
+            let json = serde_json::to_string(&req).unwrap();
+            let back: ControlRequest = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, req);
+        }
     }
 
     #[test]

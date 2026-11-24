@@ -7,6 +7,7 @@ use super::{App, WindowCtx, WindowState};
 use ultty::config::{BehaviorConfig, ClipboardWrite};
 use ultty::event_loop::TerminalEvent;
 use ultty::terminal_manager::{progress_status, WindowKey};
+use winit::event_loop::ActiveEventLoop;
 
 impl WindowState {
     fn sync_update_active(&self, manager: &ultty::terminal_manager::TerminalManager) -> bool {
@@ -161,7 +162,7 @@ impl App {
 
     /// Process terminal events across all windows and schedule redraws.
     /// Returns `true` if the application should exit.
-    pub(super) fn update(&mut self) -> bool {
+    pub(super) fn update(&mut self, event_loop: &ActiveEventLoop) -> bool {
         for win in self.windows.values_mut() {
             let letters = ultty::tabs::title_letters_at(win.launched_at.elapsed());
             if letters != win.tab_bar.title_letters {
@@ -211,7 +212,10 @@ impl App {
             if let Err(e) = server.poll(Some(Duration::ZERO)) {
                 tracing::warn!("Control server poll error: {}", e);
             }
-            self.handle_control_requests();
+            if self.handle_control_requests(event_loop) {
+                self.shared.publish_pane_changes();
+                return true;
+            }
         }
 
         self.shared.refresh_runtime_wakeup_fds();
@@ -271,7 +275,11 @@ impl App {
                         self.shared.observe_control_wait_event(terminal_id, &event);
                         if let (Some(server), Some(control_event)) = (
                             self.shared.control_server.as_mut(),
-                            super::control_events::control_event(terminal_id, &event),
+                            super::control_events::control_event(
+                                terminal_id,
+                                owner_window.map(|w| w.raw() as u64),
+                                &event,
+                            ),
                         ) {
                             server.publish(&control_event);
                         }

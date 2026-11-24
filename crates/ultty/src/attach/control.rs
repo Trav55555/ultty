@@ -80,7 +80,7 @@ pub struct HostControl {
     server: ControlServer,
     waits: Vec<PendingControlWait>,
     actions: Vec<PendingAction>,
-    panes: Vec<TerminalId>,
+    panes: Vec<(TerminalId, Option<u64>)>,
 }
 
 impl HostControl {
@@ -107,7 +107,7 @@ impl HostControl {
         self.server.poll(Some(Duration::ZERO))?;
         for (pane, events) in events {
             for event in events {
-                if let Some(event) = control_event(*pane, event) {
+                if let Some(event) = control_event(*pane, None, event) {
                     self.server.publish(&event);
                 }
             }
@@ -124,11 +124,17 @@ impl HostControl {
     }
 
     fn publish_panes(&mut self, host: &HostState) {
-        let now = open_panes(&host.runtime.manager);
+        let now: Vec<_> = open_panes(&host.runtime.manager)
+            .into_iter()
+            .map(|(pane, tab_index, _)| (pane, tab_index, None))
+            .collect();
         for event in pane_changes(&self.panes, &now) {
             self.server.publish(&event);
         }
-        self.panes = now.into_iter().map(|(pane, _)| pane).collect();
+        self.panes = now
+            .into_iter()
+            .map(|(pane, _, window)| (pane, window))
+            .collect();
     }
 
     fn authenticate(&mut self, client: usize, token: &str) -> bool {
@@ -257,6 +263,7 @@ impl HostControl {
                         .enumerate()
                         .map(|(index, tab)| TabInfo {
                             index,
+                            window: tab.window_id.raw() as u64,
                             title: manager.tab_display_title(tab.id),
                             active: Some(tab.id) == active,
                             pid: manager
@@ -460,6 +467,7 @@ impl HostControl {
                 command,
                 args,
                 working_dir,
+                ..
             } => {
                 validate_spawn(&command, &args, &working_dir)?;
                 let program = command.unwrap_or_else(crate::pty::default_shell);
@@ -745,7 +753,7 @@ impl HostControl {
                                 },
                             ))
                         } else {
-                            control_event(wait.pane(), event).map(|event| {
+                            control_event(wait.pane(), None, event).map(|event| {
                                 ControlResponse::Data(ControlData::WaitEvent { event })
                             })
                         };
@@ -1008,6 +1016,8 @@ mod tests {
                     command: Some("/bin/true".into()),
                     args: Vec::new(),
                     working_dir: None,
+                    window: None,
+                    pane: None,
                 }),
             }),
         };
@@ -1024,6 +1034,8 @@ mod tests {
                 command: Some("/bin/sh".into()),
                 args: vec!["-c".into(), "exit 7".into()],
                 working_dir: None,
+                window: None,
+                pane: None,
             }),
         );
         let ControlResponse::Data(ControlData::TabOpened { pane, .. }) = opened else {
@@ -1050,7 +1062,11 @@ mod tests {
             exchange(
                 &mut bridge,
                 &mut host,
-                authenticated(ControlRequest::Screenshot { path: None })
+                authenticated(ControlRequest::Screenshot {
+                    path: None,
+                    window: None,
+                    pane: None,
+                })
             ),
             ControlResponse::Error { code: 5, .. }
         ));
