@@ -284,8 +284,49 @@ impl AtlasLayout {
             atlas_size: self.size,
             cache_hits: self.cache_hits,
             cache_misses: self.cache_misses,
+            atlas_count: 1,
         }
     }
+}
+
+/// Create the shared sampler used by every glyph atlas on a GPU device.
+pub(super) fn create_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("glyph_sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    })
+}
+
+/// Create the shared bind group layout used by every glyph atlas and text
+/// pipeline on a GPU device.
+pub(super) fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("glyph_atlas_bind_group_layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
 }
 
 /// Glyph atlas for caching rendered glyphs.
@@ -293,11 +334,11 @@ pub struct GlyphAtlas {
     /// The texture atlas
     texture: wgpu::Texture,
     /// Bind group for the atlas
-    bind_group: wgpu::BindGroup,
+    bind_group: Arc<wgpu::BindGroup>,
     /// Bind group layout
-    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group_layout: Arc<wgpu::BindGroupLayout>,
     /// Sampler shared by every texture the atlas grows into
-    sampler: wgpu::Sampler,
+    sampler: Arc<wgpu::Sampler>,
     /// Device, to make a larger texture when the atlas grows
     device: Arc<wgpu::Device>,
     /// Slot allocation and glyph cache
@@ -309,48 +350,28 @@ pub struct GlyphAtlas {
 }
 
 impl GlyphAtlas {
-    /// Create a new glyph atlas.
+    /// Create a new glyph atlas with its own bind group layout and sampler.
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("glyph_sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
+        let sampler = Arc::new(create_sampler(&device));
+        let bind_group_layout = Arc::new(create_bind_group_layout(&device));
+        Self::with_shared_resources(device, queue, bind_group_layout, sampler)
+    }
 
-        // Create bind group layout
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("glyph_atlas_bind_group_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
+    /// Create a new glyph atlas sharing a device-wide bind group layout and
+    /// sampler so windows can switch between atlases without rebuilding
+    /// their text pipelines.
+    pub(super) fn with_shared_resources(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        bind_group_layout: Arc<wgpu::BindGroupLayout>,
+        sampler: Arc<wgpu::Sampler>,
+    ) -> Self {
         let layout = AtlasLayout::new();
         let (texture, bind_group) =
             create_texture(&device, &queue, &bind_group_layout, &sampler, layout.size);
         Self {
             texture,
-            bind_group,
+            bind_group: Arc::new(bind_group),
             bind_group_layout,
             sampler,
             device,
@@ -379,19 +400,26 @@ impl GlyphAtlas {
         &self.bind_group
     }
 
+    /// Clone a reference-counted handle to the current bind group.
+    pub(super) fn bind_group_arc(&self) -> Arc<wgpu::BindGroup> {
+        Arc::clone(&self.bind_group)
+    }
+
     /// Start a frame. Call before emitting any quad that samples the atlas;
     /// this is the only point at which slots are evicted.
     pub fn begin_frame(&mut self) {
         if self.layout.begin_frame() {
             let size = self.layout.size;
             tracing::debug!(size, "growing the glyph atlas");
-            (self.texture, self.bind_group) = create_texture(
+            let (texture, bind_group) = create_texture(
                 &self.device,
                 &self.queue,
                 &self.bind_group_layout,
                 &self.sampler,
                 size,
             );
+            self.texture = texture;
+            self.bind_group = Arc::new(bind_group);
         }
     }
 
@@ -419,16 +447,22 @@ impl GlyphAtlas {
         font_system: &mut cosmic_text::FontSystem,
         cache_key: CacheKey,
     ) -> Option<GlyphInfo> {
+        self.get_glyph_with(cache_key, |swash, key| {
+            swash.get_image_uncached(font_system, key)
+        })
+    }
+
+    /// Get a cached glyph, calling `rasterize` only on a cache miss.
+    pub(super) fn get_glyph_with(
+        &mut self,
+        cache_key: CacheKey,
+        rasterize: impl FnOnce(&mut SwashCache, CacheKey) -> Option<SwashImage>,
+    ) -> Option<GlyphInfo> {
         if let Some(info) = self.layout.get(cache_key) {
             return Some(info);
         }
 
-        // Rasterize the glyph using uncached method to get owned data
-        let image = self
-            .swash_cache
-            .get_image_uncached(font_system, cache_key)?;
-
-        // Process the image
+        let image = rasterize(&mut self.swash_cache, cache_key)?;
         self.process_image(cache_key, image)
     }
 
@@ -594,6 +628,8 @@ pub struct AtlasStats {
     pub cache_hits: u64,
     /// Number of cache misses
     pub cache_misses: u64,
+    /// Active glyph atlases in the device's shared [`super::FontGridSet`]
+    pub atlas_count: usize,
 }
 
 impl AtlasStats {

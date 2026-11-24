@@ -30,7 +30,7 @@ pub use atlas::{AtlasStats, GlyphAtlas};
 pub use color::{ColorScheme, Rgba};
 pub use cpu_frame::{shows_output, CpuFrame};
 pub use pipeline::RenderPipeline;
-pub use text::{Fonts, TextRenderer};
+pub use text::{FontGridKey, FontGridSet, Fonts, SharedFontSystem, TextRenderer};
 
 use crate::config::{ColorConfig, FontConfig};
 #[cfg(test)]
@@ -432,6 +432,11 @@ pub fn stepped_font_size(current: f32, increase: bool) -> f32 {
     }
 }
 
+enum FontSource<'a> {
+    Measured(Box<Fonts>),
+    Config(&'a FontConfig),
+}
+
 impl Renderer {
     /// Create a new renderer with configuration. `paced_by_frame_callbacks`
     /// is whether the window system paces frames (see [`present_mode`]).
@@ -494,14 +499,54 @@ impl Renderer {
         fonts: Fonts,
         paced_by_frame_callbacks: bool,
     ) -> anyhow::Result<Self> {
-        let mut renderer = Self::from_device(
+        let font_grids = FontGridSet::new(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            fonts.shared_font_system(),
+        );
+        let mut renderer = Self::from_device_with_font_grids(
             surface,
             adapter,
             device,
             queue,
             width,
             height,
-            fonts,
+            font_grids,
+            FontSource::Measured(Box::new(fonts)),
+            paced_by_frame_callbacks,
+        )?;
+        renderer.color_scheme = ColorScheme::from_config(color_config);
+        Ok(renderer)
+    }
+
+    /// Create a renderer on an existing shared GPU device, queue, and
+    /// ref-counted [`FontGridSet`] (ADR 0027 slice 2).
+    ///
+    /// When another window on the same device already uses `font_config`, this
+    /// reuses its glyph atlas and shaping caches without re-measuring fonts or
+    /// allocating a second atlas texture.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_shared_device_and_font_grids(
+        surface: &wgpu::Surface<'_>,
+        adapter: &wgpu::Adapter,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        font_grids: FontGridSet,
+        width: u32,
+        height: u32,
+        color_config: &ColorConfig,
+        font_config: &FontConfig,
+        paced_by_frame_callbacks: bool,
+    ) -> anyhow::Result<Self> {
+        let mut renderer = Self::from_device_with_font_grids(
+            surface,
+            adapter,
+            device,
+            queue,
+            width,
+            height,
+            font_grids,
+            FontSource::Config(font_config),
             paced_by_frame_callbacks,
         )?;
         renderer.color_scheme = ColorScheme::from_config(color_config);
@@ -516,6 +561,16 @@ impl Renderer {
     /// The shared wgpu queue this renderer submits to.
     pub fn queue(&self) -> &Arc<wgpu::Queue> {
         &self.queue
+    }
+
+    /// The per-device shared font grid pool backing this renderer.
+    pub fn font_grids(&self) -> &FontGridSet {
+        self.text_renderer.font_grids()
+    }
+
+    /// Glyph atlas and shared font-grid statistics for this renderer.
+    pub fn cache_stats(&self) -> AtlasStats {
+        self.text_renderer.cache_stats()
     }
 
     /// Create a new renderer drawing with `fonts`.
@@ -562,6 +617,36 @@ impl Renderer {
         width: u32,
         height: u32,
         fonts: Fonts,
+        paced_by_frame_callbacks: bool,
+    ) -> anyhow::Result<Self> {
+        let font_grids = FontGridSet::new(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            fonts.shared_font_system(),
+        );
+        Self::from_device_with_font_grids(
+            surface,
+            adapter,
+            device,
+            queue,
+            width,
+            height,
+            font_grids,
+            FontSource::Measured(Box::new(fonts)),
+            paced_by_frame_callbacks,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_device_with_font_grids(
+        surface: &wgpu::Surface<'_>,
+        adapter: &wgpu::Adapter,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        width: u32,
+        height: u32,
+        font_grids: FontGridSet,
+        font_source: FontSource<'_>,
         paced_by_frame_callbacks: bool,
     ) -> anyhow::Result<Self> {
         let (width, height) =
@@ -642,13 +727,24 @@ impl Renderer {
         tracing::debug!(target: "ultty::startup", "background pipeline ready");
 
         // Create text renderer
-        let text_renderer = TextRenderer::with_fonts(
-            device.clone(),
-            queue.clone(),
-            surface_format,
-            &uniform_bind_group_layout,
-            fonts,
-        )?;
+        let text_renderer = match font_source {
+            FontSource::Measured(fonts) => TextRenderer::with_fonts_and_grid_set(
+                device.clone(),
+                queue.clone(),
+                surface_format,
+                &uniform_bind_group_layout,
+                font_grids,
+                *fonts,
+            )?,
+            FontSource::Config(font_config) => TextRenderer::with_grid_set_and_config(
+                device.clone(),
+                queue.clone(),
+                surface_format,
+                &uniform_bind_group_layout,
+                font_grids,
+                font_config,
+            )?,
+        };
 
         // Get cell dimensions from text renderer
         tracing::debug!(target: "ultty::startup", "text renderer ready");
