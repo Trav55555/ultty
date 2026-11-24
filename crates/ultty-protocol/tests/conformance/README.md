@@ -1,7 +1,11 @@
 # Ultty Native Protocol v1 Wire Conformance Suite
 
 `v1.json` is the language-independent binary wire conformance corpus for
-Ultty Native Protocol v1 (see [docs/PROTOCOL_SPEC.md](../../../../docs/PROTOCOL_SPEC.md)).
+Ultty Native Protocol v1 (see [docs/PROTOCOL_SPEC.md](../../../../docs/PROTOCOL_SPEC.md),
+frozen at tag `protocol-v1`).
+
+Existing vectors in `v1.json` are immutable once frozen; new additive vectors
+for v1 coverage may be appended without altering existing hex encodings.
 
 ## Vector Format
 

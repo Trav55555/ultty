@@ -1,10 +1,13 @@
 # Ultimate Terminal Protocol Specification
 
-**Version**: 0.1.0-draft  
-**Status**: Draft  
-**Last Updated**: 2026-09-22
+**Version**: 1.0  
+**Status**: Frozen (wire protocol v1, tag `protocol-v1`)  
+**Last Updated**: 2026-11-23  
+**Conformance Suite**: `crates/ultty-protocol/tests/conformance/v1.json` (32 vectors; verified in Rust `ultty-protocol` and TypeScript `@ultty/client` in CI)
 
 `crates/ultty-protocol/src/codec.rs` is normative. Where this document and the code disagree, the code wins; a drift test in that crate checks the message-type codes and capability bits listed here.
+
+**Wire stability (v1 freeze):** Protocol version `1` wire framing, message type codes, payload encodings, and capability bits `0x0001`–`0x1000` are frozen as of `protocol-v1`. Future extensions must either be gated behind newly allocated capability bits (`negotiate_capabilities`) or increment `PROTOCOL_VERSION` (`negotiate_protocol_version`). Existing conformance vectors in `v1.json` must remain byte-for-byte compatible.
 
 ---
 
@@ -706,6 +709,7 @@ Supply row and column track vectors and place children with start/end `GridLine`
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.0 | 2026-11-23 | Protocol v1 wire freeze (tag `protocol-v1`): 32-vector conformance suite (`v1.json`) verified byte-for-byte in Rust (`ultty-protocol`) and TypeScript (`@ultty/client`) in CI; includes semantic actions (`0x0081`, `CAP_SEMANTIC_ACTIONS` `0x1000`) |
 | 0.1.0-draft | 2026-11-11 | `SetOverride` (terminal `0x0080`), `OverrideResult` (app `0x0080`) and `CAP_OVERRIDE_PUSH` (`0x0800`), section 10.7 (ADR 0023 §9) |
 | 0.1.0-draft | 2026-11-11 | Sessions belong to panes: drawn in, sized to and closed with their pane, section 1.2 (ADR 0025); no wire change |
 | 0.1.0-draft | 2026-11-10 | Roles `Table`, `Row`, `Cell`, `ColumnHeader`, `ComboBox` and `Option` (21 to 26), section 10.5 (ADR 0021) |
