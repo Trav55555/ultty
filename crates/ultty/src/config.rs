@@ -577,7 +577,7 @@ impl PaletteConfig {
 }
 
 /// Units and line-height basis used to size terminal cells.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FontMetricsMode {
     /// Typographic points and the font's natural line height.

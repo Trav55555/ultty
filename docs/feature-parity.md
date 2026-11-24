@@ -65,13 +65,13 @@ Ranked by how much a typical user would notice:
    appearance, which Ultty does not read. Themes whose licence is unknown or
    restrictive upstream are left out.
 9. **Multi-window (in progress), and no quick terminal.** *Partly fixed.*
-   "New window" now opens an in-process window sharing the GPU device
-   ([ADR 0027](adr/0027-multiple-windows-per-process.md) slice 1; opt-in
+   "New window" opens an in-process window sharing the GPU device, font
+   database, and ref-counted per-size glyph atlases with per-window zoom
+   ([ADR 0027](adr/0027-multiple-windows-per-process.md) slices 1–2; opt-in
    `behavior.window_per_process = true` keeps process isolation). Still
-   missing: shared font grids (slice 2), window-scoped `ulttyctl` commands
-   (slice 3), multi-window session restore (slice 4), moving tabs between
-   windows (slice 5), single-instance CLI (slice 6), and a quick terminal
-   ([ADR 0028](adr/0028-quick-terminal.md)).
+   missing: window-scoped `ulttyctl` commands (slice 3), multi-window session
+   restore (slice 4), moving tabs between windows (slice 5), single-instance
+   CLI (slice 6), and a quick terminal ([ADR 0028](adr/0028-quick-terminal.md)).
 10. **Linux x86_64 only in practice.** Release builds and CI cover Linux
     x86_64 only. macOS code exists but is not built or tested by CI. There
     is no Windows or BSD support. Alacritty runs on Linux, BSD, macOS and
@@ -193,7 +193,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 |---|---|---|---|---|
 | Tabs | yes | yes | no (native tabs on macOS only) | `tabs.rs`; `terminal_manager.rs` `create_tab` |
 | Splits | yes; nested | yes; draggable | no | `pane_layout.rs`; `terminal_manager.rs` `split_pane` |
-| Multiple windows | partial: in-process windows sharing the GPU device via "New window" (ADR 0027 slice 1; opt-in `behavior.window_per_process = true`); shared font grids, `ulttyctl --window`, session v2, moving tabs and single-instance pending | yes | yes; `CreateNewWindow`, `msg create-window` | `app/mod.rs` `App::open_new_window`; `app/gpu.rs` `SharedGpu`; `scripts/e2e/multi-window.sh` |
+| Multiple windows | partial: in-process windows sharing GPU device, font database, and ref-counted glyph atlases with per-window zoom (ADR 0027 slices 1–2; opt-in `behavior.window_per_process = true`); `ulttyctl --window`, session v2, moving tabs and single-instance pending | yes | yes; `CreateNewWindow`, `msg create-window` | `app/mod.rs` `App::open_new_window`; `app/gpu.rs` `SharedGpu`; `renderer/text.rs` `FontGridSet`; `scripts/e2e/multi-window.sh` |
 | Native vs self-drawn UI | self-drawn; no decorations, own tab bar | native GTK4/libadwaita and AppKit | native decorations, no chrome | `app/mod.rs` `with_decorations(false)`; `renderer/tabbar.rs` |
 | Quick terminal | no | yes; macOS and Wayland | no | none |
 | Search in scrollback | partial: in copy mode; smart case, optional regex, matches across wrapped lines, all matches highlighted with a count; no search bar | yes since 1.3 | yes; regex | `vim/search.rs`; `app/mod.rs` `perform_search` |

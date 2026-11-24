@@ -1,6 +1,6 @@
 //! Text rendering with cosmic-text and glyph atlas.
 
-use super::atlas::{GlyphAtlas, GlyphInfo};
+use super::atlas::{self, GlyphAtlas, GlyphInfo};
 use super::decoration::{strikethrough_quad, underline_quads, DecorationMetrics, Quad};
 use super::emoji::{emoji_presentation, pick_emoji_family};
 use super::pipeline::TextPipeline;
@@ -17,7 +17,7 @@ use cosmic_text::{
 };
 // Looked up for every drawn cell; SipHash was a third of a scrolling frame.
 use foldhash::{HashMap, HashMapExt};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 /// Character plus the shaping-relevant style bits (see [`shaping_cache_key`]).
 type ShapingCacheKey = (char, u8);
@@ -100,6 +100,7 @@ impl<G> TextShapeCache<G> {
         cache.insert(text, glyphs);
     }
 
+    #[cfg(test)]
     fn clear(&mut self) {
         self.faces.iter_mut().for_each(HashMap::clear);
     }
@@ -537,34 +538,301 @@ fn installed_emoji_family(db: &cosmic_text::fontdb::Database, configured: &str) 
     family.map(str::to_owned)
 }
 
-pub struct TextRenderer {
-    font_system: FontSystem,
+/// Process-wide `cosmic_text::FontSystem` shared across every window and
+/// [`FontGrid`] (ADR 0027 slice 2).
+///
+/// Built once (`FontSystem::new` scans the installed font database); windows
+/// reuse this instance rather than re-scanning system fonts.
+#[derive(Clone)]
+pub struct SharedFontSystem {
+    inner: Arc<Mutex<FontSystem>>,
+}
+
+impl SharedFontSystem {
+    /// Scan the system fonts once and wrap the database for process-wide reuse.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(FontSystem::new())),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, FontSystem> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Default for SharedFontSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn normalized_f32_bits(value: f32) -> u32 {
+    if value == 0.0 {
+        0.0f32.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+fn normalize_font_config(config: &FontConfig) -> FontConfig {
+    let mut normalized = config.clone();
+    normalized.size = crate::config::clamp_font_size(normalized.size);
+    normalized.clamp_line_height();
+    normalized
+}
+
+/// Cache key for a shared [`FontGrid`]: font families, OpenType features,
+/// codepoint map, metrics mode, line height, and scale-adjusted physical size.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FontGridKey {
+    family: String,
+    bold_family: String,
+    italic_family: String,
+    bold_italic_family: String,
+    emoji: String,
+    features: Vec<String>,
+    codepoint_map: Vec<(String, String)>,
+    metrics: FontMetricsMode,
+    line_height_bits: u32,
+    size_bits: u32,
+}
+
+impl FontGridKey {
+    /// Build a normalized key from a scaled [`FontConfig`].
+    pub fn from_config(config: &FontConfig) -> Self {
+        let normalized = normalize_font_config(config);
+        Self {
+            family: normalized.family,
+            bold_family: normalized.bold_family,
+            italic_family: normalized.italic_family,
+            bold_italic_family: normalized.bold_italic_family,
+            emoji: normalized.emoji,
+            features: normalized.features,
+            codepoint_map: normalized
+                .codepoint_map
+                .into_iter()
+                .map(|entry| (entry.range, entry.family))
+                .collect(),
+            metrics: normalized.metrics,
+            line_height_bits: normalized_f32_bits(normalized.line_height),
+            size_bits: normalized_f32_bits(normalized.size),
+        }
+    }
+}
+
+struct FontGridState {
     atlas: GlyphAtlas,
+    shaping_cache: HashMap<ShapingCacheKey, ShapedGlyph>,
+    /// Shaped runs for ligatures; see [`ligature_run_end`].
+    run_cache: TextShapeCache<(u16, ShapedGlyph)>,
+    /// Shaped multi-codepoint graphemes (combining marks, ZWJ emoji, flags).
+    cluster_cache: TextShapeCache<ShapedGlyph>,
+}
+
+/// Shared glyph atlas and shaping caches for one `(font config, physical size)`
+/// on one GPU device (ADR 0027 slice 2).
+struct FontGrid {
+    cell_width: f32,
+    cell_height: f32,
+    /// Configured size multiplied by the display scale.
+    font_size: f32,
+    metrics: Metrics,
+    decoration: DecorationMetrics,
+    fonts: FontSelection,
+    /// Installed color emoji family that emoji-presentation cells are
+    /// shaped with, if any (see [`emoji_presentation`]).
+    emoji_family: Option<String>,
+    state: Mutex<FontGridState>,
+}
+
+impl FontGrid {
+    fn from_fonts(
+        fonts: &Fonts,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        bind_group_layout: Arc<wgpu::BindGroupLayout>,
+        sampler: Arc<wgpu::Sampler>,
+    ) -> Self {
+        let mut atlas =
+            GlyphAtlas::with_shared_resources(device, queue, bind_group_layout, sampler);
+        let decoration = measure_decoration_metrics(
+            &fonts.font_system,
+            &mut atlas,
+            &fonts.selection,
+            fonts.emoji_family.as_deref(),
+            fonts.metrics,
+            fonts.cell_width,
+            fonts.cell_height,
+            fonts.baseline,
+        );
+        Self {
+            cell_width: fonts.cell_width,
+            cell_height: fonts.cell_height,
+            font_size: fonts.font_size,
+            metrics: fonts.metrics,
+            decoration,
+            fonts: fonts.selection.clone(),
+            emoji_family: fonts.emoji_family.clone(),
+            state: Mutex::new(FontGridState {
+                atlas,
+                shaping_cache: HashMap::with_capacity(256),
+                run_cache: Default::default(),
+                cluster_cache: TextShapeCache::default(),
+            }),
+        }
+    }
+
+    fn state_lock(&self) -> MutexGuard<'_, FontGridState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Per-device pool of ref-counted [`FontGrid`]s keyed by font configuration
+/// and physical size (ADR 0027 slice 2).
+///
+/// Entries are held as [`Weak`] references: a grid stays alive while at least
+/// one [`TextRenderer`] references it, and drops its GPU glyph atlas texture
+/// automatically when the last window stops using it.
+#[derive(Clone)]
+pub struct FontGridSet {
+    inner: Arc<FontGridSetInner>,
+}
+
+struct FontGridSetInner {
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    font_system: SharedFontSystem,
+    bind_group_layout: Arc<wgpu::BindGroupLayout>,
+    sampler: Arc<wgpu::Sampler>,
+    grids: Mutex<HashMap<FontGridKey, Weak<FontGrid>>>,
+}
+
+impl FontGridSet {
+    /// Create a new per-device font grid pool sharing `font_system`.
+    pub fn new(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        font_system: SharedFontSystem,
+    ) -> Self {
+        let sampler = Arc::new(atlas::create_sampler(&device));
+        let bind_group_layout = Arc::new(atlas::create_bind_group_layout(&device));
+        Self {
+            inner: Arc::new(FontGridSetInner {
+                device,
+                queue,
+                font_system,
+                bind_group_layout,
+                sampler,
+                grids: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// The process-wide font system shared by every grid in this pool.
+    pub fn font_system(&self) -> &SharedFontSystem {
+        &self.inner.font_system
+    }
+
+    /// The bind group layout shared by every glyph atlas in this pool.
+    pub fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.inner.bind_group_layout
+    }
+
+    /// Number of currently live [`FontGrid`]s (and therefore glyph atlases) in
+    /// this device pool.
+    pub fn active_grid_count(&self) -> usize {
+        let grids = self
+            .inner
+            .grids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        grids
+            .values()
+            .filter(|weak| weak.strong_count() > 0)
+            .count()
+    }
+
+    fn get_or_create(&self, config: &FontConfig) -> Arc<FontGrid> {
+        let key = FontGridKey::from_config(config);
+        {
+            let grids = self
+                .inner
+                .grids
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(grid) = grids.get(&key).and_then(Weak::upgrade) {
+                return grid;
+            }
+        }
+        let fonts = Fonts::load_with_shared(config, self.inner.font_system.clone());
+        let created = Arc::new(FontGrid::from_fonts(
+            &fonts,
+            Arc::clone(&self.inner.device),
+            Arc::clone(&self.inner.queue),
+            Arc::clone(&self.inner.bind_group_layout),
+            Arc::clone(&self.inner.sampler),
+        ));
+        self.insert_or_existing(key, created)
+    }
+
+    fn get_or_create_from_fonts(&self, fonts: &Fonts) -> Arc<FontGrid> {
+        let key = FontGridKey::from_config(&fonts.config);
+        {
+            let grids = self
+                .inner
+                .grids
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(grid) = grids.get(&key).and_then(Weak::upgrade) {
+                return grid;
+            }
+        }
+        let created = Arc::new(FontGrid::from_fonts(
+            fonts,
+            Arc::clone(&self.inner.device),
+            Arc::clone(&self.inner.queue),
+            Arc::clone(&self.inner.bind_group_layout),
+            Arc::clone(&self.inner.sampler),
+        ));
+        self.insert_or_existing(key, created)
+    }
+
+    fn insert_or_existing(&self, key: FontGridKey, created: Arc<FontGrid>) -> Arc<FontGrid> {
+        let mut grids = self
+            .inner
+            .grids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        grids.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(existing) = grids.get(&key).and_then(Weak::upgrade) {
+            return existing;
+        }
+        grids.insert(key, Arc::downgrade(&created));
+        created
+    }
+}
+
+pub struct TextRenderer {
+    font_grids: FontGridSet,
+    grid: Arc<FontGrid>,
+    atlas_bind_group: Arc<wgpu::BindGroup>,
+    config: FontConfig,
     pipeline: TextPipeline,
     cell_width: f32,
     cell_height: f32,
     /// Configured size multiplied by the display scale.
     font_size: f32,
-    font_metrics: FontMetrics,
     metrics: Metrics,
     decoration: DecorationMetrics,
     device: Arc<wgpu::Device>,
-    fonts: FontSelection,
-    /// Installed color emoji family that emoji-presentation cells are
-    /// shaped with, if any (see [`emoji_presentation`]).
-    emoji_family: Option<String>,
     ligatures: bool,
     /// Bumped whenever the fonts, size or features change, so cached row
     /// vertices built before are never reused.
     font_generation: u64,
-    shaping_cache: HashMap<ShapingCacheKey, ShapedGlyph>,
-    /// Shaped runs for ligatures; see [`ligature_run_end`].
-    run_cache: TextShapeCache<(u16, ShapedGlyph)>,
     /// Reused per run: the run's text, and a copy of its glyphs to draw.
     run_text: String,
     run_glyphs: RunGlyphs,
-    /// Shaped multi-codepoint graphemes (combining marks, ZWJ emoji, flags).
-    cluster_cache: TextShapeCache<ShapedGlyph>,
     /// Reused per grapheme: its text.
     cluster_text: String,
     styled_text_buffer: Buffer,
@@ -681,10 +949,10 @@ fn measure_natural_line_ratio(font_system: &mut FontSystem, font_family: &str) -
 /// renderer is then built from these same fonts, so its cell size is the one
 /// measured here.
 pub struct Fonts {
-    font_system: FontSystem,
+    font_system: SharedFontSystem,
+    config: FontConfig,
     /// Clamped size multiplied by the display scale.
     font_size: f32,
-    font_metrics: FontMetrics,
     metrics: Metrics,
     selection: FontSelection,
     emoji_family: Option<String>,
@@ -698,26 +966,49 @@ pub struct Fonts {
 impl Fonts {
     /// Load the system fonts and measure the cell for `font_config`.
     pub fn load(font_config: &FontConfig) -> Self {
-        let mut font_system = FontSystem::new();
-        let selection = FontSelection::new(font_system.db(), font_config);
-        let font_size = crate::config::clamp_font_size(font_config.size);
-        let font_metrics = FontMetrics::load(font_config, &mut font_system, selection.family());
-        let metrics = font_metrics.at_size(font_size);
-        let (cell_width, cell_height, baseline) =
-            TextRenderer::measure_cell_with_font(&mut font_system, metrics, selection.family());
-        let emoji_family = installed_emoji_family(font_system.db(), &font_config.emoji);
+        Self::load_with_shared(font_config, SharedFontSystem::new())
+    }
+
+    /// Measure the cell for `font_config` using an existing process-wide
+    /// [`SharedFontSystem`] without re-scanning system fonts.
+    pub fn load_with_shared(font_config: &FontConfig, font_system: SharedFontSystem) -> Self {
+        let config = normalize_font_config(font_config);
+        let (selection, font_size, metrics, cell_width, cell_height, baseline, emoji_family) = {
+            let mut fs = font_system.lock();
+            let selection = FontSelection::new(fs.db(), &config);
+            let font_size = config.size;
+            let font_metrics = FontMetrics::load(&config, &mut fs, selection.family());
+            let metrics = font_metrics.at_size(font_size);
+            let (cell_width, cell_height, baseline) =
+                TextRenderer::measure_cell_with_font(&mut fs, metrics, selection.family());
+            let emoji_family = installed_emoji_family(fs.db(), &config.emoji);
+            (
+                selection,
+                font_size,
+                metrics,
+                cell_width,
+                cell_height,
+                baseline,
+                emoji_family,
+            )
+        };
         Self {
             font_system,
+            ligatures: config.ligatures,
+            config,
             font_size,
-            font_metrics,
             metrics,
             selection,
             emoji_family,
-            ligatures: font_config.ligatures,
             cell_width,
             cell_height,
             baseline,
         }
+    }
+
+    /// Shared handle to the process-wide font system backing these fonts.
+    pub fn shared_font_system(&self) -> SharedFontSystem {
+        self.font_system.clone()
     }
 
     /// Cell width and height in pixels.
@@ -733,10 +1024,8 @@ impl Fonts {
     /// A font system over the same fonts, for the CPU frames. Copies the
     /// database's face list; no font file is read again.
     pub(super) fn font_system_copy(&self) -> FontSystem {
-        FontSystem::new_with_locale_and_db(
-            self.font_system.locale().to_owned(),
-            self.font_system.db().clone(),
-        )
+        let fs = self.font_system.lock();
+        FontSystem::new_with_locale_and_db(fs.locale().to_owned(), fs.db().clone())
     }
 
     pub(super) fn metrics(&self) -> Metrics {
@@ -752,6 +1041,113 @@ impl Fonts {
     pub(super) fn baseline(&self) -> f32 {
         self.baseline
     }
+}
+
+/// Measure the x-height (from the rasterized `x` glyph) and line thickness
+/// used to place underline and strikethrough quads.
+#[allow(clippy::too_many_arguments)]
+fn measure_decoration_metrics(
+    font_system: &SharedFontSystem,
+    atlas: &mut GlyphAtlas,
+    fonts: &FontSelection,
+    emoji_family: Option<&str>,
+    metrics: Metrics,
+    cell_width: f32,
+    cell_height: f32,
+    baseline: f32,
+) -> DecorationMetrics {
+    let mut fs = font_system.lock();
+    let mut buffer = Buffer::new(&mut fs, metrics);
+    buffer.set_size(Some(cell_width * 4.0), Some(cell_height * 2.0));
+    let x_height = shape_cell_with_fs(
+        &mut fs,
+        &mut buffer,
+        fonts,
+        emoji_family,
+        "x",
+        CellStyle::default(),
+    )
+    .and_then(|shaped| atlas.get_glyph(&mut fs, shaped.cache_key))
+    .map(|glyph| glyph.top)
+    .filter(|top| *top > 0.0)
+    .unwrap_or(metrics.font_size * 0.5);
+    let thickness = (metrics.font_size / 14.0).round().clamp(1.0, 2.0);
+
+    DecorationMetrics {
+        baseline,
+        x_height,
+        thickness,
+    }
+}
+
+fn shape_cell_with_fs(
+    font_system: &mut FontSystem,
+    buffer: &mut Buffer,
+    fonts: &FontSelection,
+    emoji_family: Option<&str>,
+    text: &str,
+    style: CellStyle,
+) -> Option<ShapedGlyph> {
+    shape_text_with_fs(
+        font_system,
+        buffer,
+        fonts,
+        emoji_family,
+        text,
+        style,
+        Shaping::Advanced,
+    )
+    .into_iter()
+    .next()
+}
+
+fn shape_text_with_fs(
+    font_system: &mut FontSystem,
+    buffer: &mut Buffer,
+    fonts: &FontSelection,
+    emoji_family: Option<&str>,
+    text: &str,
+    style: CellStyle,
+    shaping: Shaping,
+) -> Vec<ShapedGlyph> {
+    let (attrs, style) = cluster_attrs(text, style, fonts, emoji_family);
+    buffer.set_text(text, &attrs, shaping, None);
+    buffer.shape_until_scroll(font_system, false);
+
+    let Some(run) = buffer.layout_runs().next() else {
+        return Vec::new();
+    };
+    let line_y = run.line_y;
+    let mut shaped = Vec::with_capacity(run.glyphs.len());
+    let mut base_x = None;
+    for glyph in run.glyphs {
+        let face = font_system
+            .db()
+            .face(glyph.font_id)
+            .map(|face| (face.weight, face.style));
+        let (synthetic_bold, fake_italic) = synthesized_styles(style, face);
+
+        let mut physical = glyph.physical((0.0, 0.0), 1.0);
+        if fake_italic {
+            physical.cache_key.flags |= CacheKeyFlags::FAKE_ITALIC;
+        }
+
+        let unpositioned_mark =
+            glyph.w == 0.0 && glyph.y_offset == 0.0 && base_x == Some(physical.x);
+        if glyph.w != 0.0 {
+            base_x = Some(physical.x);
+        }
+
+        shaped.push(ShapedGlyph {
+            cache_key: physical.cache_key,
+            x_offset: physical.x as f32,
+            y_offset: physical.y as f32,
+            line_y,
+            synthetic_bold,
+            unpositioned_mark,
+        });
+    }
+    shaped
 }
 
 impl TextRenderer {
@@ -780,56 +1176,111 @@ impl TextRenderer {
         uniform_bind_group_layout: &wgpu::BindGroupLayout,
         fonts: Fonts,
     ) -> anyhow::Result<Self> {
-        let Fonts {
-            mut font_system,
-            font_size,
-            font_metrics,
-            metrics,
-            selection,
-            emoji_family,
+        let font_grids = FontGridSet::new(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            fonts.shared_font_system(),
+        );
+        Self::with_fonts_and_grid_set(
+            device,
+            queue,
+            format,
+            uniform_bind_group_layout,
+            font_grids,
+            fonts,
+        )
+    }
+
+    /// Create a text renderer backed by a shared [`FontGridSet`], reusing an
+    /// existing [`FontGrid`] when `fonts`'s config already has one.
+    pub fn with_fonts_and_grid_set(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        format: wgpu::TextureFormat,
+        uniform_bind_group_layout: &wgpu::BindGroupLayout,
+        font_grids: FontGridSet,
+        fonts: Fonts,
+    ) -> anyhow::Result<Self> {
+        let config = fonts.config.clone();
+        let ligatures = fonts.ligatures;
+        let grid = font_grids.get_or_create_from_fonts(&fonts);
+        Self::from_grid(
+            device,
+            queue,
+            format,
+            uniform_bind_group_layout,
+            font_grids,
+            grid,
+            config,
             ligatures,
-            cell_width,
-            cell_height,
-            baseline,
-        } = fonts;
+        )
+    }
 
-        // Create glyph atlas
-        let atlas = GlyphAtlas::new(device.clone(), Arc::clone(&queue));
+    /// Create a text renderer backed by a shared [`FontGridSet`] for
+    /// `font_config`, reusing any existing grid without re-measuring fonts.
+    pub fn with_grid_set_and_config(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        format: wgpu::TextureFormat,
+        uniform_bind_group_layout: &wgpu::BindGroupLayout,
+        font_grids: FontGridSet,
+        font_config: &FontConfig,
+    ) -> anyhow::Result<Self> {
+        let config = normalize_font_config(font_config);
+        let ligatures = config.ligatures;
+        let grid = font_grids.get_or_create(&config);
+        Self::from_grid(
+            device,
+            queue,
+            format,
+            uniform_bind_group_layout,
+            font_grids,
+            grid,
+            config,
+            ligatures,
+        )
+    }
 
-        // Create text pipeline
+    #[allow(clippy::too_many_arguments)]
+    fn from_grid(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        format: wgpu::TextureFormat,
+        uniform_bind_group_layout: &wgpu::BindGroupLayout,
+        font_grids: FontGridSet,
+        grid: Arc<FontGrid>,
+        config: FontConfig,
+        ligatures: bool,
+    ) -> anyhow::Result<Self> {
         let pipeline = TextPipeline::new(
             &device,
             format,
             uniform_bind_group_layout,
-            atlas.bind_group_layout(),
+            font_grids.bind_group_layout(),
         )?;
 
-        let styled_text_buffer = Buffer::new(&mut font_system, metrics);
+        let atlas_bind_group = grid.state_lock().atlas.bind_group_arc();
+        let styled_text_buffer = {
+            let mut fs = font_grids.font_system().lock();
+            Buffer::new(&mut fs, grid.metrics)
+        };
 
-        let mut renderer = Self {
-            font_system,
-            atlas,
+        Ok(Self {
+            cell_width: grid.cell_width,
+            cell_height: grid.cell_height,
+            font_size: grid.font_size,
+            metrics: grid.metrics,
+            decoration: grid.decoration,
+            font_grids,
+            grid,
+            atlas_bind_group,
+            config,
             pipeline,
-            cell_width,
-            cell_height,
-            font_size,
-            font_metrics,
-            metrics,
-            decoration: DecorationMetrics {
-                baseline,
-                x_height: 0.0,
-                thickness: 1.0,
-            },
             device,
-            fonts: selection,
-            emoji_family,
             ligatures,
             font_generation: 0,
-            shaping_cache: HashMap::with_capacity(256),
-            run_cache: Default::default(),
             run_text: String::new(),
             run_glyphs: Vec::new(),
-            cluster_cache: TextShapeCache::default(),
             cluster_text: String::new(),
             styled_text_buffer,
             byte_to_char_offsets: Vec::with_capacity(256),
@@ -840,9 +1291,7 @@ impl TextRenderer {
             grid_draws: 0,
             frame_quads: 0,
             quad_indices: Vec::new(),
-        };
-        renderer.decoration = renderer.measure_decoration_metrics(baseline);
-        Ok(renderer)
+        })
     }
 
     /// Create a new text renderer with default font.
@@ -858,6 +1307,11 @@ impl TextRenderer {
             ..Default::default()
         };
         Self::with_config(device, queue, format, uniform_bind_group_layout, &config)
+    }
+
+    /// The per-device shared [`FontGridSet`] backing this text renderer.
+    pub fn font_grids(&self) -> &FontGridSet {
+        &self.font_grids
     }
 
     /// Measure cell dimensions and baseline (px from the cell top) for a
@@ -887,184 +1341,27 @@ impl TextRenderer {
         )
     }
 
-    /// Measure the x-height (from the rasterized `x` glyph) and line
-    /// thickness used to place underline and strikethrough quads.
-    fn measure_decoration_metrics(&mut self, baseline: f32) -> DecorationMetrics {
-        let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
-        buffer.set_size(Some(self.cell_width * 4.0), Some(self.cell_height * 2.0));
-        let x_height = self
-            .shape_cell(&mut buffer, "x", CellStyle::default())
-            .and_then(|shaped| {
-                self.atlas
-                    .get_glyph(&mut self.font_system, shaped.cache_key)
-            })
-            .map(|glyph| glyph.top)
-            .filter(|top| *top > 0.0)
-            .unwrap_or(self.metrics.font_size * 0.5);
-        let thickness = (self.metrics.font_size / 14.0).round().clamp(1.0, 2.0);
-
-        DecorationMetrics {
-            baseline,
-            x_height,
-            thickness,
-        }
-    }
-
-    /// Shape a single cell's text with the given style.
-    ///
-    /// Requests a bold/italic face when asked; when the family has none, the
-    /// result is flagged for the synthetic fallbacks (emphasized color for
-    /// bold, skewed glyph for italic).
-    fn shape_cell(
-        &mut self,
-        buffer: &mut Buffer,
-        text: &str,
-        style: CellStyle,
-    ) -> Option<ShapedGlyph> {
-        // Always full shaping: a single character cannot form a ligature,
-        // and basic shaping does no font fallback, so with ligatures off
-        // CJK and emoji cells drew as missing-glyph boxes.
-        self.shape_text(buffer, text, style, Shaping::Advanced)
-            .into_iter()
-            .next()
-    }
-
-    /// Shape `text`, one grapheme cluster, and return every glyph of its
-    /// first layout run, each positioned relative to the start of the run.
-    /// Emoji are shaped with the color emoji family (see [`cluster_attrs`]).
-    fn shape_text(
-        &mut self,
-        buffer: &mut Buffer,
-        text: &str,
-        style: CellStyle,
-        shaping: Shaping,
-    ) -> Vec<ShapedGlyph> {
-        let (attrs, style) = cluster_attrs(text, style, &self.fonts, self.emoji_family.as_deref());
-        buffer.set_text(text, &attrs, shaping, None);
-        buffer.shape_until_scroll(&mut self.font_system, false);
-
-        let Some(run) = buffer.layout_runs().next() else {
-            return Vec::new();
-        };
-        let line_y = run.line_y;
-        let mut shaped = Vec::with_capacity(run.glyphs.len());
-        // Origin of the last glyph that advances the pen: the base an
-        // unpositioned mark falls back onto.
-        let mut base_x = None;
-        for glyph in run.glyphs {
-            let face = self
-                .font_system
-                .db()
-                .face(glyph.font_id)
-                .map(|face| (face.weight, face.style));
-            let (synthetic_bold, fake_italic) = synthesized_styles(style, face);
-
-            let mut physical = glyph.physical((0.0, 0.0), 1.0);
-            if fake_italic {
-                physical.cache_key.flags |= CacheKeyFlags::FAKE_ITALIC;
-            }
-
-            let unpositioned_mark =
-                glyph.w == 0.0 && glyph.y_offset == 0.0 && base_x == Some(physical.x);
-            if glyph.w != 0.0 {
-                base_x = Some(physical.x);
-            }
-
-            shaped.push(ShapedGlyph {
-                cache_key: physical.cache_key,
-                x_offset: physical.x as f32,
-                y_offset: physical.y as f32,
-                line_y,
-                synthetic_bold,
-                unpositioned_mark,
-            });
-        }
-        shaped
-    }
-
-    /// Shape `text`, one ASCII character per cell, as a single run so the
-    /// font can form ligatures across cells. Each glyph comes with the index
-    /// of the cell its cluster starts at, and an x offset relative to that
-    /// cell. `buffer` must not wrap.
-    fn shape_run(&mut self, buffer: &mut Buffer, text: &str, style: CellStyle) -> RunGlyphs {
-        shape_run_glyphs(&mut self.font_system, buffer, &self.fonts, text, style)
-    }
-
-    /// Put the glyphs of the run in `self.run_text` into `self.run_glyphs`,
-    /// shaping it only if this face has not seen the text before.
-    fn load_run_glyphs(&mut self, buffer: &mut Buffer, style: CellStyle) {
-        self.run_glyphs.clear();
-        if let Some(cached) = self.run_cache.get(style, &self.run_text) {
-            self.run_glyphs.extend_from_slice(cached);
-            return;
-        }
-        let text = std::mem::take(&mut self.run_text);
-        let glyphs = self.shape_run(buffer, &text, style);
-        self.run_glyphs.extend_from_slice(&glyphs);
-        self.run_cache.insert(style, text.clone(), glyphs);
-        self.run_text = text;
-    }
-
-    /// Put the glyphs of the grapheme in `self.cluster_text` into `out`,
-    /// shaping it only if this face has not seen it before. Always full
-    /// shaping, so the font's composition rules apply.
-    fn load_cluster_glyphs(
-        &mut self,
-        buffer: &mut Buffer,
-        style: CellStyle,
-        out: &mut Vec<ShapedGlyph>,
-    ) {
-        out.clear();
-        if let Some(cached) = self.cluster_cache.get(style, &self.cluster_text) {
-            out.extend_from_slice(cached);
-            return;
-        }
-        let text = std::mem::take(&mut self.cluster_text);
-        let glyphs = self.shape_text(buffer, &text, style, Shaping::Advanced);
-        out.extend_from_slice(&glyphs);
-        self.cluster_cache.insert(style, text.clone(), glyphs);
-        self.cluster_text = text;
-    }
-
-    /// Rasterize (or fetch) `shaped` and emit its quad for the cell at
-    /// `cell`, in `color` (emphasized against `background` for synthetic
-    /// bold unless the cell is under the block cursor).
-    #[allow(clippy::too_many_arguments)]
-    fn push_glyph(
-        &mut self,
-        vertices: &mut Vec<Vertex>,
-        shaped: ShapedGlyph,
-        cell: (u16, u16),
-        cell_size: (f32, f32),
-        render_offset: (f32, f32),
-        color: Rgba,
-        background: Rgba,
-        under_block_cursor: bool,
-    ) {
-        let Some(glyph_info) = self
-            .atlas
-            .get_glyph(&mut self.font_system, shaped.cache_key)
-        else {
-            return;
-        };
-        if glyph_info.width == 0.0 || glyph_info.height == 0.0 {
-            return;
-        }
-        let (x, y) = cell_glyph_origin(cell, cell_size, render_offset, shaped, &glyph_info);
-        // Under the cursor the color is already the inverted background;
-        // emphasizing it would reduce contrast.
-        let color = if shaped.synthetic_bold && !under_block_cursor {
-            emphasize(color, background)
-        } else {
-            color
-        };
-        Self::push_glyph_vertices(vertices, x, y, &glyph_info, color);
+    fn attach_grid(&mut self, grid: Arc<FontGrid>) {
+        self.atlas_bind_group = grid.state_lock().atlas.bind_group_arc();
+        self.cell_width = grid.cell_width;
+        self.cell_height = grid.cell_height;
+        self.font_size = grid.font_size;
+        self.metrics = grid.metrics;
+        self.decoration = grid.decoration;
+        self.styled_text_buffer.set_metrics(self.metrics);
+        self.grid = grid;
+        self.font_generation += 1;
+        self.grid_caches.iter_mut().for_each(GridTextCache::clear);
     }
 
     /// Start a frame. Must precede any quad that samples the glyph atlas,
     /// because this is the only point at which atlas slots are evicted.
     pub fn begin_frame(&mut self) {
-        self.atlas.begin_frame();
+        {
+            let mut state = self.grid.state_lock();
+            state.atlas.begin_frame();
+            self.atlas_bind_group = state.atlas.bind_group_arc();
+        }
         self.grid_buffers_used = 0;
         // Drop the caches of panes that are gone.
         self.grid_caches.truncate(self.grid_draws.max(1));
@@ -1145,7 +1442,7 @@ impl TextRenderer {
     /// Whether a glyph was skipped this frame because the atlas was full;
     /// the caller should schedule another frame so it gets drawn.
     pub fn frame_incomplete(&self) -> bool {
-        self.atlas.frame_incomplete()
+        self.grid.state_lock().atlas.frame_incomplete()
     }
 
     /// Get the shaping mode based on ligature settings.
@@ -1165,6 +1462,7 @@ impl TextRenderer {
     /// Enable or disable ligatures.
     pub fn set_ligatures(&mut self, enabled: bool) {
         self.ligatures = enabled;
+        self.config.ligatures = enabled;
         self.grid_caches.iter_mut().for_each(GridTextCache::clear);
     }
 
@@ -1174,38 +1472,17 @@ impl TextRenderer {
     }
 
     /// Switch to the families, size, line height, features and emoji font
-    /// of `config` without a restart. Everything derived from the old fonts
-    /// is dropped: the cell size and decoration metrics are measured again,
-    /// and the glyph atlas, the shaping caches and the cached rows are
-    /// emptied. Returns whether the cell size changed, in which case every
-    /// grid needs resizing.
+    /// of `config` without a restart. Switches this window onto the shared
+    /// [`FontGrid`] for `config`, keeping other windows' grids untouched.
+    /// Returns whether the cell size changed, in which case every grid needs
+    /// resizing.
     pub fn apply_font_config(&mut self, config: &FontConfig) -> bool {
         let old_cell = (self.cell_width, self.cell_height);
-        self.fonts = FontSelection::new(self.font_system.db(), config);
-        self.font_size = crate::config::clamp_font_size(config.size);
-        self.font_metrics = FontMetrics::load(config, &mut self.font_system, self.fonts.family());
-        self.metrics = self.font_metrics.at_size(self.font_size);
-        self.styled_text_buffer.set_metrics(self.metrics);
-        self.emoji_family = installed_emoji_family(self.font_system.db(), &config.emoji);
-        self.ligatures = config.ligatures;
-        self.font_generation += 1;
-
-        let (width, height, baseline) =
-            Self::measure_cell_with_font(&mut self.font_system, self.metrics, self.fonts.family());
-        self.cell_width = width;
-        self.cell_height = height;
-        self.drop_font_caches();
-        self.decoration = self.measure_decoration_metrics(baseline);
+        self.config = normalize_font_config(config);
+        self.ligatures = self.config.ligatures;
+        let grid = self.font_grids.get_or_create(&self.config);
+        self.attach_grid(grid);
         (self.cell_width, self.cell_height) != old_cell
-    }
-
-    /// Empty everything keyed by the fonts in use.
-    fn drop_font_caches(&mut self) {
-        self.atlas.clear();
-        self.shaping_cache.clear();
-        self.run_cache.clear();
-        self.cluster_cache.clear();
-        self.grid_caches.iter_mut().for_each(GridTextCache::clear);
     }
 
     /// Get the current size in the selected units after display scaling.
@@ -1214,26 +1491,13 @@ impl TextRenderer {
     }
 
     /// Set the size in the selected units after display scaling and recalculate
-    /// cell dimensions.
+    /// cell dimensions by switching this window onto the corresponding shared
+    /// [`FontGrid`].
     pub fn set_font_size(&mut self, size: f32) {
-        // Clamp to reasonable range
         let size = crate::config::clamp_font_size(size);
-
-        // Calculate new metrics with same line height ratio
-        self.font_size = size;
-        self.metrics = self.font_metrics.at_size(size);
-        self.styled_text_buffer.set_metrics(self.metrics);
-
-        // Recalculate cell dimensions
-        let (width, height, baseline) =
-            Self::measure_cell_with_font(&mut self.font_system, self.metrics, self.fonts.family());
-        self.cell_width = width;
-        self.cell_height = height;
-
-        // Clear caches since metrics changed
-        self.font_generation += 1;
-        self.drop_font_caches();
-        self.decoration = self.measure_decoration_metrics(baseline);
+        self.config.size = size;
+        let grid = self.font_grids.get_or_create(&self.config);
+        self.attach_grid(grid);
     }
 
     /// Build vertices for a simple text string at a given position.
@@ -1247,12 +1511,14 @@ impl TextRenderer {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
 
-        let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
-        buffer.set_size(Some(10000.0), Some(self.cell_height * 2.0));
-
         let shaping = self.get_shaping();
-        buffer.set_text(text, &self.fonts.attrs(false, false), shaping, None);
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        let font_system = self.font_grids.font_system();
+        let mut state = self.grid.state_lock();
+        let mut fs = font_system.lock();
+        let mut buffer = Buffer::new(&mut fs, self.metrics);
+        buffer.set_size(Some(10000.0), Some(self.cell_height * 2.0));
+        buffer.set_text(text, &self.grid.fonts.attrs(false, false), shaping, None);
+        buffer.shape_until_scroll(&mut fs, false);
 
         // Build a char-index lookup from byte offsets so spaces (which produce
         // no glyphs in cosmic-text) are accounted for in positioning.
@@ -1269,10 +1535,7 @@ impl TextRenderer {
 
                 let physical = glyph.physical((0.0, 0.0), 1.0);
 
-                if let Some(glyph_info) = self
-                    .atlas
-                    .get_glyph(&mut self.font_system, physical.cache_key)
-                {
+                if let Some(glyph_info) = state.atlas.get_glyph(&mut fs, physical.cache_key) {
                     if glyph_info.width == 0.0 || glyph_info.height == 0.0 {
                         continue;
                     }
@@ -1380,12 +1643,14 @@ impl TextRenderer {
             .set_size(Some(10000.0), Some(self.cell_height * 2.0));
 
         let shaping = self.get_shaping();
-        let attrs = self.fonts.attrs(bold, italic);
+        let attrs = self.grid.fonts.attrs(bold, italic);
+        let font_system = self.font_grids.font_system();
+        let mut state = self.grid.state_lock();
+        let mut fs = font_system.lock();
 
         self.styled_text_buffer
             .set_text(text, &attrs, shaping, None);
-        self.styled_text_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+        self.styled_text_buffer.shape_until_scroll(&mut fs, false);
 
         let clusters = by_cluster.then(|| cluster_columns(text));
         let total_cells = match &clusters {
@@ -1409,10 +1674,7 @@ impl TextRenderer {
 
                 let physical = glyph.physical((0.0, 0.0), 1.0);
 
-                if let Some(glyph_info) = self
-                    .atlas
-                    .get_glyph(&mut self.font_system, physical.cache_key)
-                {
+                if let Some(glyph_info) = state.atlas.get_glyph(&mut fs, physical.cache_key) {
                     if glyph_info.width == 0.0 || glyph_info.height == 0.0 {
                         continue;
                     }
@@ -1516,7 +1778,7 @@ impl TextRenderer {
 
             render_pass.set_pipeline(self.pipeline.pipeline());
             render_pass.set_bind_group(0, uniform_bind_group, &[]);
-            render_pass.set_bind_group(1, self.atlas.bind_group(), &[]);
+            render_pass.set_bind_group(1, self.atlas_bind_group.as_ref(), &[]);
             render_pass.set_vertex_buffer(0, buffers.vertex.slice(..vertex_bytes));
             render_pass.set_index_buffer(
                 buffers.index.slice(..index_bytes),
@@ -1551,12 +1813,13 @@ impl TextRenderer {
 
         let term_buffer = terminal.buffer();
         let dims = terminal.dimensions();
+        let atlas_epoch = self.grid.state_lock().atlas.epoch();
         cache.begin(
             GridTextKey {
                 scheme: color_scheme.clone(),
                 cell_size: (cell_width, cell_height),
                 origin: (x_offset, y_offset),
-                atlas_epoch: self.atlas.epoch(),
+                atlas_epoch,
                 ligatures: self.ligatures,
                 font_generation: self.font_generation,
             },
@@ -1564,6 +1827,9 @@ impl TextRenderer {
         );
         let block_cursor = block_cursor_cell(terminal, cursor_blink_visible);
         let selection = terminal.selection();
+        let grid = Arc::clone(&self.grid);
+        let font_system = self.font_grids.font_system().clone();
+        let mut grid_state: Option<MutexGuard<'_, FontGridState>> = None;
         let mut buffers: Option<(Buffer, Buffer)> = None;
 
         for row_idx in 0..dims.rows {
@@ -1578,10 +1844,16 @@ impl TextRenderer {
             if cache.is_current(row_idx, &row, cursor_col, selected) {
                 continue;
             }
-            let (buffer, run_buffer) = buffers
-                .get_or_insert_with(|| self.shaping_buffers(cell_width, cell_height, dims.cols));
+            let state = grid_state.get_or_insert_with(|| grid.state_lock());
+            let (buffer, run_buffer) = buffers.get_or_insert_with(|| {
+                let mut fs = font_system.lock();
+                shaping_buffers(&mut fs, self.metrics, cell_width, cell_height, dims.cols)
+            });
             let mut vertices = cache.take_vertices(row_idx);
             self.build_row_vertices(
+                &grid,
+                state,
+                &font_system,
                 &mut vertices,
                 buffer,
                 run_buffer,
@@ -1603,29 +1875,13 @@ impl TextRenderer {
         draw
     }
 
-    /// Scratch buffers for shaping single cells and ligature runs (which
-    /// span up to a whole row, so that buffer must not wrap).
-    fn shaping_buffers(
-        &mut self,
-        cell_width: f32,
-        cell_height: f32,
-        cols: u16,
-    ) -> (Buffer, Buffer) {
-        let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
-        buffer.set_size(Some(cell_width * 4.0), Some(cell_height * 2.0));
-        let mut run_buffer = Buffer::new(&mut self.font_system, self.metrics);
-        run_buffer.set_wrap(cosmic_text::Wrap::None);
-        run_buffer.set_size(
-            Some(cell_width * (f32::from(cols) + 1.0)),
-            Some(cell_height * 2.0),
-        );
-        (buffer, run_buffer)
-    }
-
     /// Append the glyph and decoration quads of screen row `row_idx`.
     #[allow(clippy::too_many_arguments)]
     fn build_row_vertices(
         &mut self,
+        grid: &FontGrid,
+        state: &mut FontGridState,
+        font_system: &SharedFontSystem,
         vertices: &mut Vec<Vertex>,
         buffer: &mut Buffer,
         run_buffer: &mut Buffer,
@@ -1639,7 +1895,7 @@ impl TextRenderer {
         cols: u16,
     ) {
         let block_cursor = cursor_col.map(|col| (col, row_idx));
-        let solid_uv = self.atlas.solid_uv();
+        let solid_uv = state.atlas.solid_uv();
         let mut quads: Vec<Quad> = Vec::new();
         let mut cluster_glyphs: Vec<ShapedGlyph> = Vec::new();
         let mut cluster_inks: Vec<Option<GlyphInfo>> = Vec::new();
@@ -1706,7 +1962,7 @@ impl TextRenderer {
             // the font can join them (`=>`, `!=`). Each glyph is drawn
             // at, and in the color of, the cell its cluster starts at.
             if self.ligatures {
-                let mut end = ligature_run_end(row, col_idx, cols, &self.fonts);
+                let mut end = ligature_run_end(row, col_idx, cols, &grid.fonts);
                 // The block cursor's cell is drawn on its own, in the
                 // inverted color, so a ligature never straddles it.
                 if let Some(cursor_col) = cursor_col {
@@ -1723,7 +1979,23 @@ impl TextRenderer {
                         (col_idx..end).filter_map(|col| row.cell(col).map(|cell| cell.char())),
                     );
                     if could_ligate(&self.run_text) {
-                        self.load_run_glyphs(run_buffer, style);
+                        self.run_glyphs.clear();
+                        if let Some(cached) = state.run_cache.get(style, &self.run_text) {
+                            self.run_glyphs.extend_from_slice(cached);
+                        } else {
+                            let glyphs = {
+                                let mut fs = font_system.lock();
+                                shape_run_glyphs(
+                                    &mut fs,
+                                    run_buffer,
+                                    &grid.fonts,
+                                    &self.run_text,
+                                    style,
+                                )
+                            };
+                            self.run_glyphs.extend_from_slice(&glyphs);
+                            state.run_cache.insert(style, self.run_text.clone(), glyphs);
+                        }
                         let glyphs = std::mem::take(&mut self.run_glyphs);
                         for &(offset, shaped) in &glyphs {
                             let col = col_idx + offset;
@@ -1736,7 +2008,9 @@ impl TextRenderer {
                             } else {
                                 text_color(&glyph_cell, color_scheme, is_selected(selected, col))
                             };
-                            self.push_glyph(
+                            push_glyph_from_atlas(
+                                &mut state.atlas,
+                                font_system,
                                 vertices,
                                 shaped,
                                 (col, row_idx),
@@ -1762,11 +2036,33 @@ impl TextRenderer {
                 self.cluster_text.clear();
                 self.cluster_text.push(ch);
                 self.cluster_text.extend(extra);
-                self.load_cluster_glyphs(buffer, style, &mut cluster_glyphs);
+                cluster_glyphs.clear();
+                if let Some(cached) = state.cluster_cache.get(style, &self.cluster_text) {
+                    cluster_glyphs.extend_from_slice(cached);
+                } else {
+                    let shaped = {
+                        let mut fs = font_system.lock();
+                        shape_text_with_fs(
+                            &mut fs,
+                            buffer,
+                            &grid.fonts,
+                            grid.emoji_family.as_deref(),
+                            &self.cluster_text,
+                            style,
+                            Shaping::Advanced,
+                        )
+                    };
+                    cluster_glyphs.extend_from_slice(&shaped);
+                    state
+                        .cluster_cache
+                        .insert(style, self.cluster_text.clone(), shaped);
+                }
                 if cluster_glyphs.iter().any(|glyph| glyph.unpositioned_mark) {
                     cluster_inks.clear();
                     for glyph in &cluster_glyphs {
-                        let ink = self.atlas.get_glyph(&mut self.font_system, glyph.cache_key);
+                        let ink = state.atlas.get_glyph_with(glyph.cache_key, |swash, key| {
+                            swash.get_image_uncached(&mut font_system.lock(), key)
+                        });
                         cluster_inks.push(ink);
                     }
                     stack_unpositioned_marks(&mut cluster_glyphs, &cluster_inks);
@@ -1774,12 +2070,24 @@ impl TextRenderer {
                 &cluster_glyphs
             } else {
                 let cache_key_lookup = shaping_cache_key(ch, self.ligatures, style);
-                single_glyph = match self.shaping_cache.get(&cache_key_lookup) {
+                single_glyph = match state.shaping_cache.get(&cache_key_lookup) {
                     Some(&cached) => Some(cached),
                     None => {
-                        let shaped = self.shape_cell(buffer, &ch.to_string(), style);
+                        let mut ch_buf = [0u8; 4];
+                        let ch_str = ch.encode_utf8(&mut ch_buf);
+                        let shaped = {
+                            let mut fs = font_system.lock();
+                            shape_cell_with_fs(
+                                &mut fs,
+                                buffer,
+                                &grid.fonts,
+                                grid.emoji_family.as_deref(),
+                                ch_str,
+                                style,
+                            )
+                        };
                         if let Some(shaped) = shaped {
-                            self.shaping_cache.insert(cache_key_lookup, shaped);
+                            state.shaping_cache.insert(cache_key_lookup, shaped);
                         }
                         shaped
                     }
@@ -1788,7 +2096,9 @@ impl TextRenderer {
             };
 
             for &shaped in glyphs {
-                self.push_glyph(
+                push_glyph_from_atlas(
+                    &mut state.atlas,
+                    font_system,
                     vertices,
                     shaped,
                     (col_idx, row_idx),
@@ -1900,6 +2210,8 @@ impl TextRenderer {
         indices: &mut Vec<u32>,
     ) -> usize {
         let style = CellStyle::default();
+        let font_system = self.font_grids.font_system();
+        let mut state = self.grid.state_lock();
         let mut buffer: Option<Buffer> = None;
         let mut col = 0usize;
         for (index, ch) in text.chars().enumerate() {
@@ -1912,29 +2224,37 @@ impl TextRenderer {
             }
             if ch != ' ' {
                 let key = shaping_cache_key(ch, self.ligatures, style);
-                let shaped = match self.shaping_cache.get(&key) {
+                let shaped = match state.shaping_cache.get(&key) {
                     Some(&cached) => Some(cached),
                     None => {
+                        let mut fs = font_system.lock();
                         let buffer = buffer.get_or_insert_with(|| {
-                            let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
+                            let mut buffer = Buffer::new(&mut fs, self.metrics);
                             buffer.set_size(
                                 Some(self.cell_width * 4.0),
                                 Some(self.cell_height * 2.0),
                             );
                             buffer
                         });
-                        let shaped = self.shape_cell(buffer, &ch.to_string(), style);
+                        let mut ch_buf = [0u8; 4];
+                        let shaped = shape_cell_with_fs(
+                            &mut fs,
+                            buffer,
+                            &self.grid.fonts,
+                            self.grid.emoji_family.as_deref(),
+                            ch.encode_utf8(&mut ch_buf),
+                            style,
+                        );
                         if let Some(shaped) = shaped {
-                            self.shaping_cache.insert(key, shaped);
+                            state.shaping_cache.insert(key, shaped);
                         }
                         shaped
                     }
                 };
                 if let Some(shaped) = shaped {
-                    if let Some(glyph) = self
-                        .atlas
-                        .get_glyph(&mut self.font_system, shaped.cache_key)
-                    {
+                    if let Some(glyph) = state.atlas.get_glyph_with(shaped.cache_key, |swash, k| {
+                        swash.get_image_uncached(&mut font_system.lock(), k)
+                    }) {
                         if glyph.width > 0.0 && glyph.height > 0.0 {
                             let cell = (u16::try_from(col).unwrap_or(u16::MAX), 0);
                             let (gx, gy) = cell_glyph_origin(
@@ -1972,12 +2292,15 @@ impl TextRenderer {
             return (vertices, indices);
         }
 
-        let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
+        let shaping = self.get_shaping();
+        let font_system = self.font_grids.font_system();
+        let mut state = self.grid.state_lock();
+        let mut fs = font_system.lock();
+        let mut buffer = Buffer::new(&mut fs, self.metrics);
         // Set buffer size to allow layout
         buffer.set_size(Some(max_width), Some(self.cell_height * 2.0));
-        let shaping = self.get_shaping();
-        buffer.set_text(text, &self.fonts.attrs(false, false), shaping, None);
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer.set_text(text, &self.grid.fonts.attrs(false, false), shaping, None);
+        buffer.shape_until_scroll(&mut fs, false);
 
         let max_x = x + max_width;
 
@@ -1992,17 +2315,28 @@ impl TextRenderer {
                     // Add ellipsis if there's room
                     if max_width > self.cell_width {
                         let ellipsis_x = (max_x - self.cell_width).max(x);
-                        self.render_char_at(&mut vertices, &mut indices, '…', ellipsis_x, y, color);
+                        render_char_at_with(
+                            &mut fs,
+                            &mut state.atlas,
+                            &self.grid.fonts,
+                            self.metrics,
+                            self.cell_width,
+                            self.cell_height,
+                            shaping,
+                            &mut vertices,
+                            &mut indices,
+                            '…',
+                            ellipsis_x,
+                            y,
+                            color,
+                        );
                     }
                     break;
                 }
 
                 let physical = glyph.physical((0.0, 0.0), 1.0);
 
-                if let Some(glyph_info) = self
-                    .atlas
-                    .get_glyph(&mut self.font_system, physical.cache_key)
-                {
+                if let Some(glyph_info) = state.atlas.get_glyph(&mut fs, physical.cache_key) {
                     if glyph_info.width > 0.0 && glyph_info.height > 0.0 {
                         let gx = (x + glyph_info.left + physical.x as f32).round();
                         let gy = (y + run.line_y + physical.y as f32 - glyph_info.top).round();
@@ -2023,55 +2357,14 @@ impl TextRenderer {
         (vertices, indices)
     }
 
-    /// Render a single character at a position (helper for ellipsis, etc.).
-    fn render_char_at(
-        &mut self,
-        vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u32>,
-        ch: char,
-        x: f32,
-        y: f32,
-        color: Rgba,
-    ) {
-        let mut buffer = Buffer::new(&mut self.font_system, self.metrics);
-        // Set buffer size to allow layout
-        buffer.set_size(Some(self.cell_width * 4.0), Some(self.cell_height * 2.0));
-        let shaping = self.get_shaping();
-        buffer.set_text(
-            &ch.to_string(),
-            &self.fonts.attrs(false, false),
-            shaping,
-            None,
-        );
-        buffer.shape_until_scroll(&mut self.font_system, false);
-
-        if let Some(run) = buffer.layout_runs().next() {
-            if let Some(glyph) = run.glyphs.first() {
-                let physical = glyph.physical((0.0, 0.0), 1.0);
-
-                if let Some(glyph_info) = self
-                    .atlas
-                    .get_glyph(&mut self.font_system, physical.cache_key)
-                {
-                    if glyph_info.width > 0.0 && glyph_info.height > 0.0 {
-                        let gx = (x + glyph_info.left + physical.x as f32).round();
-                        let gy = (y + run.line_y + physical.y as f32 - glyph_info.top).round();
-
-                        Self::emit_glyph_quad(vertices, indices, gx, gy, &glyph_info, color);
-                    }
-                }
-            }
-        }
-    }
-
     /// The glyph atlas epoch; see [`super::atlas::GlyphAtlas::epoch`].
     pub fn atlas_epoch(&self) -> u64 {
-        self.atlas.epoch()
+        self.grid.state_lock().atlas.epoch()
     }
 
     /// Get the atlas bind group for rendering labels.
     pub fn atlas_bind_group(&self) -> &wgpu::BindGroup {
-        self.atlas.bind_group()
+        &self.atlas_bind_group
     }
 
     /// Get the text pipeline for rendering labels.
@@ -2081,13 +2374,111 @@ impl TextRenderer {
 
     /// Clear the glyph cache.
     pub fn clear_cache(&mut self) {
-        self.atlas.clear();
+        {
+            let mut state = self.grid.state_lock();
+            state.atlas.clear();
+            self.atlas_bind_group = state.atlas.bind_group_arc();
+        }
         self.grid_caches.iter_mut().for_each(GridTextCache::clear);
     }
 
-    /// Get cache statistics.
+    /// Get cache statistics, including the active atlas count in the shared
+    /// [`FontGridSet`].
     pub fn cache_stats(&self) -> super::atlas::AtlasStats {
-        self.atlas.stats()
+        let mut stats = self.grid.state_lock().atlas.stats();
+        stats.atlas_count = self.font_grids.active_grid_count();
+        stats
+    }
+}
+
+fn shaping_buffers(
+    font_system: &mut FontSystem,
+    metrics: Metrics,
+    cell_width: f32,
+    cell_height: f32,
+    cols: u16,
+) -> (Buffer, Buffer) {
+    let mut buffer = Buffer::new(font_system, metrics);
+    buffer.set_size(Some(cell_width * 4.0), Some(cell_height * 2.0));
+    let mut run_buffer = Buffer::new(font_system, metrics);
+    run_buffer.set_wrap(cosmic_text::Wrap::None);
+    run_buffer.set_size(
+        Some(cell_width * (f32::from(cols) + 1.0)),
+        Some(cell_height * 2.0),
+    );
+    (buffer, run_buffer)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_glyph_from_atlas(
+    atlas: &mut GlyphAtlas,
+    font_system: &SharedFontSystem,
+    vertices: &mut Vec<Vertex>,
+    shaped: ShapedGlyph,
+    cell: (u16, u16),
+    cell_size: (f32, f32),
+    render_offset: (f32, f32),
+    color: Rgba,
+    background: Rgba,
+    under_block_cursor: bool,
+) {
+    let Some(glyph_info) = atlas.get_glyph_with(shaped.cache_key, |swash, key| {
+        swash.get_image_uncached(&mut font_system.lock(), key)
+    }) else {
+        return;
+    };
+    if glyph_info.width == 0.0 || glyph_info.height == 0.0 {
+        return;
+    }
+    let (x, y) = cell_glyph_origin(cell, cell_size, render_offset, shaped, &glyph_info);
+    // Under the cursor the color is already the inverted background;
+    // emphasizing it would reduce contrast.
+    let color = if shaped.synthetic_bold && !under_block_cursor {
+        emphasize(color, background)
+    } else {
+        color
+    };
+    TextRenderer::push_glyph_vertices(vertices, x, y, &glyph_info, color);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_char_at_with(
+    font_system: &mut FontSystem,
+    atlas: &mut GlyphAtlas,
+    fonts: &FontSelection,
+    metrics: Metrics,
+    cell_width: f32,
+    cell_height: f32,
+    shaping: Shaping,
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    ch: char,
+    x: f32,
+    y: f32,
+    color: Rgba,
+) {
+    let mut buffer = Buffer::new(font_system, metrics);
+    buffer.set_size(Some(cell_width * 4.0), Some(cell_height * 2.0));
+    let mut ch_buf = [0u8; 4];
+    buffer.set_text(
+        ch.encode_utf8(&mut ch_buf),
+        &fonts.attrs(false, false),
+        shaping,
+        None,
+    );
+    buffer.shape_until_scroll(font_system, false);
+
+    if let Some(run) = buffer.layout_runs().next() {
+        if let Some(glyph) = run.glyphs.first() {
+            let physical = glyph.physical((0.0, 0.0), 1.0);
+            if let Some(glyph_info) = atlas.get_glyph(font_system, physical.cache_key) {
+                if glyph_info.width > 0.0 && glyph_info.height > 0.0 {
+                    let gx = (x + glyph_info.left + physical.x as f32).round();
+                    let gy = (y + run.line_y + physical.y as f32 - glyph_info.top).round();
+                    TextRenderer::emit_glyph_quad(vertices, indices, gx, gy, &glyph_info, color);
+                }
+            }
+        }
     }
 }
 
@@ -3436,5 +3827,127 @@ mod tests {
         assert_eq!(end(&selection("Mono")), 4);
         // `=` is mapped to another family: the run stops before it.
         assert_eq!(end(&fonts), 1);
+    }
+
+    #[test]
+    fn font_grid_key_normalizes_size_and_line_height_and_ignores_ligatures() {
+        let base = FontConfig::default();
+        let mut with_no_ligs = base.clone();
+        with_no_ligs.ligatures = !base.ligatures;
+        assert_eq!(
+            FontGridKey::from_config(&base),
+            FontGridKey::from_config(&with_no_ligs)
+        );
+
+        let mut zoomed = base.clone();
+        zoomed.size = base.size + 2.0;
+        assert_ne!(
+            FontGridKey::from_config(&base),
+            FontGridKey::from_config(&zoomed)
+        );
+
+        let mut huge_a = base.clone();
+        huge_a.size = 500.0;
+        let mut huge_b = base.clone();
+        huge_b.size = 900.0;
+        assert_eq!(
+            FontGridKey::from_config(&huge_a),
+            FontGridKey::from_config(&huge_b),
+            "clamped font sizes map to the same FontGridKey"
+        );
+    }
+
+    #[test]
+    fn same_scale_windows_share_one_atlas_and_zoom_is_per_window() {
+        let Ok(renderer) = pollster::block_on(super::super::Renderer::new_headless(400, 200))
+        else {
+            eprintln!("no GPU adapter; skipped");
+            return;
+        };
+        let device = Arc::clone(renderer.device());
+        let queue = Arc::clone(renderer.queue());
+        let font_grids = renderer.font_grids().clone();
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("test_uniform_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let config = FontConfig::default();
+        let mut win1 = TextRenderer::with_grid_set_and_config(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            format,
+            &uniform_layout,
+            font_grids.clone(),
+            &config,
+        )
+        .unwrap();
+        let mut win2 = TextRenderer::with_grid_set_and_config(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            format,
+            &uniform_layout,
+            font_grids.clone(),
+            &config,
+        )
+        .unwrap();
+
+        assert!(
+            Arc::ptr_eq(&win1.grid, &win2.grid),
+            "same-scale windows must share one FontGrid"
+        );
+        assert_eq!(
+            win1.cache_stats().atlas_count,
+            1,
+            "atlas count stays 1 for two same-scale windows"
+        );
+        assert_eq!(win2.cache_stats().atlas_count, 1);
+
+        // Rasterizing glyphs in window 1 populates the shared atlas for window 2.
+        let color = Rgba::new(1.0, 1.0, 1.0, 1.0);
+        let _ = win1.build_simple_text_vertices("SharedAtlasXYZ", 0.0, 0.0, color);
+        let hits_before = win2.cache_stats().cache_hits;
+        let misses_before = win2.cache_stats().cache_misses;
+        let _ = win2.build_simple_text_vertices("SharedAtlasXYZ", 0.0, 0.0, color);
+        let stats_after = win2.cache_stats();
+        assert!(
+            stats_after.cache_hits > hits_before,
+            "window 2 should hit glyphs already rasterized by window 1"
+        );
+        assert_eq!(
+            stats_after.cache_misses, misses_before,
+            "window 2 should incur no new atlas misses for already-cached glyphs"
+        );
+
+        // Zooming window 2 gives it its own FontGrid without changing window 1.
+        let win1_cell_before = win1.cell_dimensions();
+        win2.set_font_size(config.size * 2.0);
+        assert!(!Arc::ptr_eq(&win1.grid, &win2.grid));
+        assert_eq!(win1.cell_dimensions(), win1_cell_before);
+        assert!(win2.cell_dimensions().0 > win1_cell_before.0);
+        assert_eq!(win1.cache_stats().atlas_count, 2);
+        assert_eq!(win2.cache_stats().atlas_count, 2);
+
+        // Resetting window 2's zoom re-attaches to window 1's grid and drops
+        // the zoomed atlas automatically.
+        win2.set_font_size(config.size);
+        assert!(Arc::ptr_eq(&win1.grid, &win2.grid));
+        assert_eq!(win1.cache_stats().atlas_count, 1);
+
+        // Dropping a zoomed window also frees its FontGrid.
+        win2.set_font_size(config.size * 1.5);
+        assert_eq!(win1.cache_stats().atlas_count, 2);
+        drop(win2);
+        assert_eq!(win1.cache_stats().atlas_count, 1);
     }
 }

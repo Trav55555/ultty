@@ -163,6 +163,7 @@ struct TabWidthFreeze {
 /// Process-wide application state shared across every open window (ADR 0027).
 struct ProcessState {
     proxy: EventLoopProxy<AppEvent>,
+    font_system: ultty::renderer::SharedFontSystem,
     shared_gpu: Option<gpu::SharedGpu>,
     runtime: ultty::runtime::SessionRuntime,
     session_file: Option<std::path::PathBuf>,
@@ -259,6 +260,7 @@ impl WindowState {
         event_loop: &ActiveEventLoop,
         event_proxy: EventLoopProxy<AppEvent>,
         config: &Config,
+        font_system: &ultty::renderer::SharedFontSystem,
         shared_gpu: Option<&gpu::SharedGpu>,
     ) -> Result<Self> {
         let create_start = Instant::now();
@@ -291,12 +293,6 @@ impl WindowState {
 
         let mut scaled_font = config.font.clone();
         scaled_font.size *= scale_factor;
-        let fonts = ultty::renderer::Fonts::load(&scaled_font);
-        tracing::debug!(
-            target: "ultty::startup",
-            window = key.raw(),
-            "cell metrics ready"
-        );
 
         let mut tab_bar = TabBarState::new();
         tab_bar.scale = scale_factor;
@@ -309,7 +305,7 @@ impl WindowState {
                 Arc::clone(&window),
                 size,
                 &config.colors,
-                fonts,
+                &scaled_font,
                 paced_by_frame_callbacks,
             ) {
                 gpu::SharedGpuSetup::Ready(mut gpu) => {
@@ -324,10 +320,17 @@ impl WindowState {
                     gpu::RendererState::Ready(gpu)
                 }
                 gpu::SharedGpuSetup::Failed(error) => return Err(error),
-                gpu::SharedGpuSetup::Incompatible(fonts) => {
+                gpu::SharedGpuSetup::Incompatible => {
                     tracing::info!(
                         "Window {} is incompatible with shared GPU adapter; creating dedicated GPU setup",
                         key.raw()
+                    );
+                    let fonts =
+                        ultty::renderer::Fonts::load_with_shared(&scaled_font, font_system.clone());
+                    tracing::debug!(
+                        target: "ultty::startup",
+                        window = key.raw(),
+                        "cell metrics ready"
                     );
                     Self::start_async_gpu(
                         key,
@@ -335,7 +338,7 @@ impl WindowState {
                         &window,
                         size,
                         config,
-                        *fonts,
+                        fonts,
                         paced_by_frame_callbacks,
                         event_proxy.clone(),
                         &mut cpu_frames,
@@ -343,6 +346,12 @@ impl WindowState {
                 }
             }
         } else {
+            let fonts = ultty::renderer::Fonts::load_with_shared(&scaled_font, font_system.clone());
+            tracing::debug!(
+                target: "ultty::startup",
+                window = key.raw(),
+                "cell metrics ready"
+            );
             Self::start_async_gpu(
                 key,
                 event_loop,
@@ -546,8 +555,15 @@ impl App {
         tracing::info!("Loaded configuration");
 
         let primary_key = WindowKey::PRIMARY;
-        let first_window =
-            WindowState::create(primary_key, event_loop, event_proxy.clone(), &config, None)?;
+        let font_system = ultty::renderer::SharedFontSystem::new();
+        let first_window = WindowState::create(
+            primary_key,
+            event_loop,
+            event_proxy.clone(),
+            &config,
+            &font_system,
+            None,
+        )?;
         let (cols, rows) = first_window.renderer.terminal_dimensions();
         tracing::info!("Terminal size: {}x{}", cols, rows);
 
@@ -607,6 +623,7 @@ impl App {
 
         let shared = ProcessState {
             proxy: event_proxy,
+            font_system,
             shared_gpu: None,
             runtime,
             session_file: session_file(
@@ -700,6 +717,7 @@ impl App {
             event_loop,
             self.shared.proxy.clone(),
             &self.shared.config,
+            &self.shared.font_system,
             self.shared.shared_gpu.as_ref(),
         ) {
             Ok(win) => win,
