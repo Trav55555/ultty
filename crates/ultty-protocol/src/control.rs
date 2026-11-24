@@ -199,6 +199,18 @@ pub enum ControlRequest {
         window: u64,
     },
 
+    /// Move a tab to an existing window (`window`) or detach it into a new window (`new_window`).
+    MoveTab {
+        /// Zero-based process-wide tab index (matching `ListTabs`, `SwitchTab`, `CloseTab`).
+        tab: usize,
+        /// Destination window ID, or `None` when `new_window` is `true`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+        /// Open a new window and move the tab into it.
+        #[serde(default)]
+        new_window: bool,
+    },
+
     /// Type shell text plus Enter into the foreground PTY. `args` are
     /// joined with spaces without escaping; this does not preserve argv.
     /// Success means queue acceptance, not execution or completion. Use
@@ -681,6 +693,13 @@ pub enum ControlData {
         /// The window opened, but a later presentation update failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         warning: Option<String>,
+    },
+    /// `MoveTab` moved a tab to `window`.
+    TabMoved {
+        /// Zero-based process-wide tab index.
+        tab_index: usize,
+        /// Destination window ID.
+        window: u64,
     },
     Tabs {
         tabs: Vec<TabInfo>,
@@ -1219,6 +1238,10 @@ mod tests {
                 pane: 8,
                 warning: None,
             },
+            ControlData::TabMoved {
+                tab_index: 1,
+                window: 2,
+            },
             ControlData::Tabs {
                 tabs: vec![TabInfo {
                     index: 0,
@@ -1755,6 +1778,16 @@ mod tests {
                 working_dir: Some("/tmp".into()),
             },
             ControlRequest::CloseWindow { window: 2 },
+            ControlRequest::MoveTab {
+                tab: 1,
+                window: Some(2),
+                new_window: false,
+            },
+            ControlRequest::MoveTab {
+                tab: 1,
+                window: None,
+                new_window: true,
+            },
             ControlRequest::Resize {
                 width: 900,
                 height: 600,
