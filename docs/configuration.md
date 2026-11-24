@@ -266,13 +266,23 @@ that run a command rather than a shell.
 ```toml
 [behavior]
 window_per_process = false
+single_instance = false
 ```
 
-By default (`false`), "New window" opens another window inside the running
-Ultty process, sharing the GPU device and avoiding a second driver startup.
-Set `window_per_process = true` to spawn a separate OS process per window for
-process-level crash isolation (at the cost of a separate GPU context per
-window). A config reload applies this to the next "New window" action.
+By default (`window_per_process = false`), "New window" opens another window
+inside the running Ultty process, sharing the GPU device and avoiding a second
+driver startup. Set `window_per_process = true` to spawn a separate OS process
+per window for process-level crash isolation (at the cost of a separate GPU
+context per window). A config reload applies this to the next "New window"
+action.
+
+With `single_instance = true` (off by default), launching `ultty` (with or
+without `-e COMMAND`) connects to the newest running Ultty instance's control
+socket, opens a window there in the caller's working directory, and exits once
+the window opens. If no instance answers within a short timeout, `ultty` starts
+normally. Pass `ultty --new-process` to force a new process even when
+`single_instance = true` (`--profile` and `--workspace` always start a new
+process).
 
 ## Restoring the last session
 

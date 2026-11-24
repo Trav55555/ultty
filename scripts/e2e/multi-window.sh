@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# ADR 0027 slices 1, 3, 4, and 5 GUI smoke: open windows in a single Ultty
+# ADR 0027 slices 1, 3, 4, 5, and 6 GUI smoke: open windows in a single Ultty
 # process via the main menu ("New window") and `ulttyctl new-window`, verify
 # X11 input isolation, `describe`, `windows`, `--window` / `--pane` targeting
 # (`new-tab`, `resize`, `screenshot`), `move-tab` (`--window` and `--new-window`,
 # preserving PTY PID and resizing), tab drag-out to a new window,
-# `window_opened`/`window_closed` subscribe events, closing windows, and
-# SessionData v2 multi-window save/restore with logical window sizes.
+# `window_opened`/`window_closed` subscribe events, closing windows,
+# SessionData v2 multi-window save/restore with logical window sizes, and
+# single-instance CLI handoff (`behavior.single_instance` + `--new-process`).
 #
 #   scripts/e2e/multi-window.sh [artifact-dir]
 set -euo pipefail
@@ -29,7 +30,7 @@ rm -f "$out/ultty.log" "$out/xvfb.log" "$out/display" "$out/startup.png"
 runtime=$(mktemp -d "${TMPDIR:-/tmp}/mw.XXXXXX")
 chmod 700 "$runtime"
 cleanup() {
-    kill "${sub_pid-}" "${ultty_pid-}" "${xvfb_pid-}" 2>/dev/null || true
+    kill "${sub_pid-}" "${second_pid-}" "${ultty_pid-}" "${xvfb_pid-}" 2>/dev/null || true
     wait 2>/dev/null || true
     rm -rf "$runtime"
 }
@@ -469,5 +470,114 @@ assert len(data["windows"][0]["tabs"]) == 2 and len(data["windows"][1]["tabs"]) 
 ' "$out/config/ultty/sessions/last.json" || fail "ShutdownSignal did not preserve both windows in last.json"
 
 ! grep -q "panicked at" "$out/ultty-restore.log" || fail "Restored Ultty logged a panic"
+
+# Slice 6: single-instance CLI handoff (`behavior.single_instance = true`).
+# Launching a second `ultty` opens a window in the running process with its
+# working directory (and optional `-e` command) and exits 0; `--new-process`
+# starts a separate Ultty process.
+printf '[behavior]\ncursor_blink = false\nsingle_instance = true\n' >"$out/config/ultty/config.toml"
+sub_cwd="$out/single-instance-cwd"
+mkdir -p "$sub_cwd"
+sub_cwd="$(cd "$sub_cwd" && pwd -P)"
+
+env -u WAYLAND_DISPLAY \
+    DISPLAY="$display" \
+    XDG_RUNTIME_DIR="$runtime" \
+    XDG_CONFIG_HOME="$out/config" \
+    SHELL=/bin/sh \
+    PS1='$ ' \
+    RUST_LOG="info,ultty::startup=debug,wgpu_core=warn,wgpu_hal=warn" \
+    "$ULTTY" >"$out/ultty-single.log" 2>&1 &
+ultty_pid=$!
+export ULTTY_PID="$ultty_pid"
+
+for _ in $(seq 600); do
+    [ -S "$runtime/ultty-ctl-$ultty_pid.sock" ] && "$ULTTYCTL" ping >/dev/null 2>&1 && break
+    kill -0 "$ultty_pid" 2>/dev/null || fail "Single-instance Ultty exited during startup"
+    sleep 0.1
+done
+"$ULTTYCTL" ping >/dev/null 2>&1 || fail "Single-instance Ultty never answered on control socket"
+
+# Bare `ultty` launched from `$sub_cwd` hands off and exits 0.
+(
+    cd "$sub_cwd"
+    env -u WAYLAND_DISPLAY -u ULTTY_PID \
+        DISPLAY="$display" \
+        XDG_RUNTIME_DIR="$runtime" \
+        XDG_CONFIG_HOME="$out/config" \
+        "$ULTTY"
+) || fail "second ultty handoff exited non-zero"
+
+ctl_count=$(ls "$runtime"/ultty-ctl-*.sock 2>/dev/null | wc -l)
+[ "$ctl_count" -eq 1 ] || fail "single-instance handoff spawned a second process ($ctl_count sockets)"
+
+si_win1_pane=$("$ULTTYCTL" --json panes | python3 -c '
+import json, sys
+panes = json.load(sys.stdin)["panes"]
+wins = sorted({p["window"] for p in panes})
+assert len(wins) == 2, panes
+w1 = [p for p in panes if p["window"] == wins[1]]
+assert len(w1) == 1, w1
+print(w1[0]["id"])
+') || fail "single-instance handoff did not add a second window"
+
+"$ULTTYCTL" --pane "$si_win1_pane" send-text $'pwd -P\r' || fail "send-text to single-instance window failed"
+"$ULTTYCTL" --pane "$si_win1_pane" wait-for --timeout 5000 "$sub_cwd" >/dev/null \
+    || fail "single-instance window did not start in caller working directory ($sub_cwd)"
+
+# `ultty -e ...` hands off and runs the command in a third window of the same process.
+env -u WAYLAND_DISPLAY -u ULTTY_PID \
+    DISPLAY="$display" \
+    XDG_RUNTIME_DIR="$runtime" \
+    XDG_CONFIG_HOME="$out/config" \
+    "$ULTTY" -e /bin/sh -c 'echo SLICE6_EXEC_OK; sleep 30' \
+    || fail "single-instance -e handoff exited non-zero"
+
+si_win2_pane=$("$ULTTYCTL" --json panes | python3 -c '
+import json, sys
+panes = json.load(sys.stdin)["panes"]
+wins = sorted({p["window"] for p in panes})
+assert len(wins) == 3, panes
+w2 = [p for p in panes if p["window"] == wins[2]]
+assert len(w2) == 1, w2
+print(w2[0]["id"])
+') || fail "single-instance -e handoff did not add a third window"
+
+"$ULTTYCTL" --pane "$si_win2_pane" wait-for --timeout 5000 "SLICE6_EXEC_OK" >/dev/null \
+    || fail "single-instance -e window did not run command"
+
+# `ultty --new-process` bypasses single-instance and starts a second process.
+env -u WAYLAND_DISPLAY -u ULTTY_PID \
+    DISPLAY="$display" \
+    XDG_RUNTIME_DIR="$runtime" \
+    XDG_CONFIG_HOME="$out/config" \
+    SHELL=/bin/sh \
+    PS1='$ ' \
+    "$ULTTY" --new-process >"$out/ultty-newproc.log" 2>&1 &
+second_pid=$!
+
+second_ready=0
+for _ in $(seq 600); do
+    if [ -S "$runtime/ultty-ctl-$second_pid.sock" ] && "$ULTTYCTL" --pid "$second_pid" ping >/dev/null 2>&1; then
+        second_ready=1
+        break
+    fi
+    kill -0 "$second_pid" 2>/dev/null || fail "--new-process Ultty exited during startup"
+    sleep 0.1
+done
+[ "$second_ready" -eq 1 ] || fail "--new-process Ultty never bound its own control socket"
+
+ctl_count=$(ls "$runtime"/ultty-ctl-*.sock 2>/dev/null | wc -l)
+[ "$ctl_count" -eq 2 ] || fail "expected 2 control sockets after --new-process, found $ctl_count"
+
+kill -TERM "$second_pid" 2>/dev/null || true
+wait "$second_pid" 2>/dev/null || true
+second_pid=""
+kill -TERM "$ultty_pid" 2>/dev/null || true
+wait "$ultty_pid" 2>/dev/null || true
+ultty_pid=""
+
+! grep -q "panicked at" "$out/ultty-single.log" || fail "Single-instance Ultty logged a panic"
+! grep -q "panicked at" "$out/ultty-newproc.log" || fail "--new-process Ultty logged a panic"
 
 echo "multi-window: ok ($out)"
