@@ -737,13 +737,13 @@ impl App {
             .windows
             .iter()
             .map(|(&key, win)| {
-                let physical = win.window.inner_size();
+                let (width, height) = win.renderer.surface_size();
                 let scale = f64::from(win.scale_factor.max(f32::EPSILON));
                 (
                     key,
                     ultty::session::WindowSize {
-                        width: f64::from(physical.width) / scale,
-                        height: f64::from(physical.height) / scale,
+                        width: f64::from(width) / scale,
+                        height: f64::from(height) / scale,
                     },
                 )
             })

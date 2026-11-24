@@ -66,6 +66,10 @@ CHILD_PIDS=()
 stop_shared_ultty() {
   if [ -n "$ULTTY_PID" ]; then
     kill "$ULTTY_PID" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+      kill -0 "$ULTTY_PID" 2>/dev/null || break
+      sleep 0.1
+    done
     wait "$ULTTY_PID" 2>/dev/null || true
     ULTTY_PID=""
   fi
