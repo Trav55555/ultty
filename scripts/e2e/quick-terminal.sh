@@ -28,7 +28,7 @@ rm -f "$out/ultty.log" "$out/ultty-cold.log" "$out/xvfb.log" "$out/display"
 runtime=$(mktemp -d "${TMPDIR:-/tmp}/qt.XXXXXX")
 chmod 700 "$runtime"
 cleanup() {
-    kill "${ultty_pid-}" "${xvfb_pid-}" 2>/dev/null || true
+    kill "${second_pid-}" "${ultty_pid-}" "${xvfb_pid-}" 2>/dev/null || true
     wait 2>/dev/null || true
     rm -rf "$runtime"
 }
@@ -36,7 +36,7 @@ trap cleanup EXIT
 
 fail() {
     echo "quick-terminal: $*" >&2
-    for log in "$out/ultty.log" "$out/ultty-cold.log"; do
+    for log in "$out/ultty.log" "$out/ultty-cold.log" "$out/ultty-hotkey.log" "$out/ultty-hotkey-conflict.log"; do
         [ -s "$log" ] && { echo "--- $log ---" >&2; tail -40 "$log" >&2; }
     done
     exit 1
@@ -258,5 +258,131 @@ kill -TERM "$ultty_pid"
 wait "$ultty_pid" || fail "Cold-start quick Ultty exited non-zero on SIGTERM"
 ultty_pid=""
 ! grep -q "panicked at" "$out/ultty-cold.log" || fail "Cold-start quick Ultty logged a panic"
+
+# Slice 3: X11 global hotkey (`quick_terminal.hotkey = "ctrl+grave"`).
+# Verify `xdotool key ctrl+grave` toggles the quick terminal on, off, and on
+# again while preserving its shell PID, and that a second instance conflicting
+# on the same grab logs a clear error without crashing.
+cat >"$out/config/ultty/config.toml" <<'EOF'
+[behavior]
+cursor_blink = false
+
+[quick_terminal]
+position = "top"
+size = "40%"
+autohide = false
+hotkey = "ctrl+grave"
+EOF
+
+env -u WAYLAND_DISPLAY -u ULTTY_PID \
+    DISPLAY="$display" \
+    XDG_RUNTIME_DIR="$runtime" \
+    XDG_CONFIG_HOME="$out/config" \
+    SHELL=/bin/sh \
+    PS1='$ ' \
+    RUST_LOG="info,ultty::startup=debug,wgpu_core=warn,wgpu_hal=warn" \
+    "$ULTTY" >"$out/ultty-hotkey.log" 2>&1 &
+ultty_pid=$!
+export ULTTY_PID="$ultty_pid"
+
+for _ in $(seq 600); do
+    [ -S "$runtime/ultty-ctl-$ultty_pid.sock" ] && "$ULTTYCTL" ping >/dev/null 2>&1 && break
+    kill -0 "$ultty_pid" 2>/dev/null || fail "Hotkey Ultty exited during startup"
+    sleep 0.1
+done
+"$ULTTYCTL" ping >/dev/null 2>&1 || fail "Hotkey Ultty never answered on control socket"
+
+grep -q "Registered X11 global hotkey for quick terminal" "$out/ultty-hotkey.log" \
+    || fail "Hotkey Ultty did not log X11 global hotkey registration"
+
+# Press ctrl+grave via X11 root input: quick terminal appears.
+xdotool_on key --clearmodifiers ctrl+grave
+hk_quick_win=""
+for _ in $(seq 80); do
+    hk_quick_win=$("$ULTTYCTL" --json windows 2>/dev/null | python3 -c '
+import json, sys
+wins = [w for w in json.load(sys.stdin)["windows"] if w.get("quick") and w.get("visible")]
+if wins:
+    print(wins[0]["id"])
+' 2>/dev/null || true)
+    [ -n "$hk_quick_win" ] && break
+    sleep 0.1
+done
+[ -n "$hk_quick_win" ] || fail "xdotool key ctrl+grave did not open quick terminal"
+
+hk_shell_pid=$("$ULTTYCTL" --json panes | python3 -c "
+import json, sys
+panes = [p for p in json.load(sys.stdin)['panes'] if p['window'] == $hk_quick_win]
+assert len(panes) == 1, panes
+print(panes[0]['pid'])
+") || fail "hotkey quick terminal pane not found"
+
+# Second ctrl+grave hides the quick terminal without killing its shell.
+xdotool_on key --clearmodifiers ctrl+grave
+hk_hidden=0
+for _ in $(seq 80); do
+    if "$ULTTYCTL" --json windows 2>/dev/null | python3 -c "
+import json, sys
+wins = {w['id']: w for w in json.load(sys.stdin)['windows']}
+sys.exit(0 if wins[$hk_quick_win]['visible'] is False else 1)
+" 2>/dev/null; then
+        hk_hidden=1
+        break
+    fi
+    sleep 0.1
+done
+[ "$hk_hidden" -eq 1 ] || fail "second ctrl+grave did not hide quick terminal"
+kill -0 "$hk_shell_pid" 2>/dev/null || fail "quick shell died on hotkey hide"
+
+# Third ctrl+grave shows it again with the exact same shell PID.
+xdotool_on key --clearmodifiers ctrl+grave
+hk_reshown=0
+for _ in $(seq 80); do
+    if "$ULTTYCTL" --json windows 2>/dev/null | python3 -c "
+import json, sys
+wins = {w['id']: w for w in json.load(sys.stdin)['windows']}
+sys.exit(0 if wins[$hk_quick_win]['visible'] is True else 1)
+" 2>/dev/null; then
+        hk_reshown=1
+        break
+    fi
+    sleep 0.1
+done
+[ "$hk_reshown" -eq 1 ] || fail "third ctrl+grave did not re-show quick terminal"
+"$ULTTYCTL" --json panes | python3 -c "
+import json, sys
+panes = [p for p in json.load(sys.stdin)['panes'] if p['window'] == $hk_quick_win]
+assert len(panes) == 1 and panes[0]['pid'] == $hk_shell_pid, panes
+" || fail "hotkey quick terminal PID changed across toggle"
+
+# A second process requesting the same hotkey must report a clear grab conflict
+# without crashing.
+env -u WAYLAND_DISPLAY -u ULTTY_PID \
+    DISPLAY="$display" \
+    XDG_RUNTIME_DIR="$runtime" \
+    XDG_CONFIG_HOME="$out/config" \
+    SHELL=/bin/sh \
+    PS1='$ ' \
+    RUST_LOG="info,wgpu_core=warn,wgpu_hal=warn" \
+    "$ULTTY" --new-process >"$out/ultty-hotkey-conflict.log" 2>&1 &
+second_pid=$!
+
+for _ in $(seq 600); do
+    [ -S "$runtime/ultty-ctl-$second_pid.sock" ] && "$ULTTYCTL" --pid "$second_pid" ping >/dev/null 2>&1 && break
+    kill -0 "$second_pid" 2>/dev/null || fail "Conflict-test Ultty exited during startup"
+    sleep 0.1
+done
+grep -q "already grabbed" "$out/ultty-hotkey-conflict.log" \
+    || fail "Second Ultty did not report hotkey grab conflict"
+
+kill -TERM "$second_pid" 2>/dev/null || true
+wait "$second_pid" 2>/dev/null || true
+second_pid=""
+kill -TERM "$ultty_pid" 2>/dev/null || true
+wait "$ultty_pid" 2>/dev/null || true
+ultty_pid=""
+
+! grep -q "panicked at" "$out/ultty-hotkey.log" || fail "Hotkey Ultty logged a panic"
+! grep -q "panicked at" "$out/ultty-hotkey-conflict.log" || fail "Conflict-test Ultty logged a panic"
 
 echo "quick-terminal: ok ($out)"

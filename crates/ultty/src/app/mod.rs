@@ -146,6 +146,9 @@ enum AppEvent {
     ShutdownSignal,
     /// The GPU setup finished, or failed; see `gpu`.
     Renderer(gpu::Handoff),
+    /// Global hotkey pressed to toggle the quick terminal (ADR 0028).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    ToggleQuickHotkey,
 }
 
 impl From<accesskit_winit::Event> for AppEvent {
@@ -198,6 +201,9 @@ struct ProcessState {
     pending_restored_windows: Vec<(WindowKey, Option<LogicalSize<f64>>)>,
     pending_reload_config: bool,
     pending_cycle_theme: bool,
+    #[cfg(all(unix, not(target_os = "macos")))]
+    quick_hotkey: Option<ultty::platform::x11_hotkey::X11GlobalHotkey>,
+    quick_hotkey_binding: Option<String>,
 }
 
 /// Per-window surface, renderer, accessibility bridge, and UI state (ADR 0027).
@@ -806,6 +812,9 @@ impl App {
             pending_restored_windows,
             pending_reload_config: false,
             pending_cycle_theme: false,
+            #[cfg(all(unix, not(target_os = "macos")))]
+            quick_hotkey: None,
+            quick_hotkey_binding: None,
         };
 
         let mut windows = BTreeMap::new();
@@ -828,8 +837,70 @@ impl App {
             ctx.update_tab_bar();
         });
         app.shared.refresh_runtime_wakeup_fds();
+        app.sync_quick_hotkey();
 
         Ok(app)
+    }
+
+    /// Synchronize the process-wide quick-terminal global hotkey with
+    /// `config.quick_terminal.hotkey` (X11 `XGrabKey`; ADR 0028 Slice 3).
+    pub(super) fn sync_quick_hotkey(&mut self) {
+        let desired = self
+            .shared
+            .config
+            .quick_terminal
+            .hotkey
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if desired == self.shared.quick_hotkey_binding {
+            return;
+        }
+        self.shared.quick_hotkey_binding = desired.clone();
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            self.shared.quick_hotkey = None;
+            let Some(binding) = desired else {
+                return;
+            };
+            if self.is_wayland {
+                tracing::info!(
+                    hotkey = %binding,
+                    "quick_terminal.hotkey is not active on Wayland yet; bind `ultty --quick` in your compositor"
+                );
+                return;
+            }
+            let proxy = self.shared.proxy.clone();
+            match ultty::platform::x11_hotkey::X11GlobalHotkey::register(&binding, move || {
+                let _ = proxy.send_event(AppEvent::ToggleQuickHotkey);
+            }) {
+                Ok(guard) => {
+                    self.shared.quick_hotkey = Some(guard);
+                    tracing::info!(
+                        hotkey = %binding,
+                        "Registered X11 global hotkey for quick terminal"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        hotkey = %binding,
+                        "Failed to register quick_terminal.hotkey: {err}"
+                    );
+                }
+            }
+        }
+
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        {
+            if let Some(binding) = desired {
+                tracing::info!(
+                    hotkey = %binding,
+                    "quick_terminal.hotkey is not yet supported on this platform"
+                );
+            }
+        }
     }
 
     /// Run `f` with a disjoint mutable view of `key`'s window and process state.
@@ -2830,6 +2901,15 @@ impl ApplicationHandler<AppEvent> for AppHandler {
                     app.save_session();
                 }
                 event_loop.exit();
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            AppEvent::ToggleQuickHotkey => {
+                if let Some(app) = self.app.as_mut() {
+                    if let Err(error) = app.toggle_quick_window(event_loop, None) {
+                        tracing::warn!("Failed to toggle quick terminal via hotkey: {error:#}");
+                    }
+                    app.update_and_schedule(event_loop);
+                }
             }
             AppEvent::Renderer(gpu::Handoff { window_key, result }) => {
                 let Some(app) = self.app.as_mut() else {

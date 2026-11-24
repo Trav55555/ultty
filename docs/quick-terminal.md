@@ -35,14 +35,17 @@ while a quick terminal exists (even when hidden).
 position = "top"     # top, bottom, left, right, center
 size = "40%"         # percentage of the monitor axis (10%-100%) or pixels (e.g. "420px")
 autohide = true      # hide when the quick terminal loses focus
-# hotkey = "ctrl+grave"  # reserved for built-in global hotkey slices
+hotkey = "ctrl+grave" # built-in global hotkey on X11 (uses [keybindings] syntax)
 ```
 
 ## Platform behavior & compositor snippets
 
 - **X11:** Ultty positions and sizes the quick window on the active monitor
-  according to `position` and `size`, sets always-on-top, and hides/shows the
-  same window (`WM_CLASS` `ultty-quick`).
+  according to `position` and `size`, sets always-on-top, hides/shows the same
+  window (`WM_CLASS` `ultty-quick`), and registers `quick_terminal.hotkey`
+  directly via `XGrabKey` (updating live on config reload and logging a clear
+  warning if another client already holds the grab). You can still bind
+  `ultty --quick` in your WM if you prefer.
 - **Wayland (Slice 1):** Ultty creates an `xdg_toplevel` with app ID
   `ultty-quick` (dropped on hide, recreated on show while keeping tabs/PTYs
   alive). Because Wayland clients cannot self-position ordinary toplevels

@@ -202,6 +202,7 @@ impl App {
         }
 
         self.shared.config = new_config;
+        self.sync_quick_hotkey();
         tracing::info!("Configuration reloaded");
     }
 

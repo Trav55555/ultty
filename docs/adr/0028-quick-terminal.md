@@ -2,18 +2,22 @@
 
 ## Status
 
-**In progress** — Slice 1 landed (2026-11-24):
-- Quick window role (`WindowRole::Quick`, app ID / `WM_CLASS` `ultty-quick`),
-  `[quick_terminal]` config (`position`, `size`, `autohide`, `hotkey`),
-  `ultty --quick` (handoff to running instance or cold-start quick-only
-  process), `ulttyctl toggle-quick` / `show-quick` / `hide-quick` with
-  `XDG_ACTIVATION_TOKEN` / `DESKTOP_STARTUP_ID` forwarding, X11
+**In progress** — Slices 1 and 3 landed (2026-11-24):
+- Slice 1: Quick window role (`WindowRole::Quick`, app ID / `WM_CLASS`
+  `ultty-quick`), `[quick_terminal]` config (`position`, `size`, `autohide`,
+  `hotkey`), `ultty --quick` (handoff to running instance or cold-start
+  quick-only process), `ulttyctl toggle-quick` / `show-quick` / `hide-quick`
+  with `XDG_ACTIVATION_TOKEN` / `DESKTOP_STARTUP_ID` forwarding, X11
   position/size/always-on-top/hide-show, Wayland drop-and-recreate while
   preserving tabs and PTYs, focus-loss autohide, session exclusion, and
   compositor setup snippets in [docs/quick-terminal.md](../quick-terminal.md).
+- Slice 3: X11 global hotkey via `x11rb` (`XGrabKey` on the root window across
+  CapsLock/NumLock modifier variants, live re-registration on config reload,
+  clear `AlreadyGrabbed` conflict reporting, zero-polling wakeup loop),
+  verified under Xvfb with `xdotool key`.
 
-Slices 2–5 are not yet implemented. Original proposal and decisions are from
-2026-11-17 (code references in "What Ultty has today" were to `main` at
+Slices 2, 4, and 5 are not yet implemented. Original proposal and decisions are
+from 2026-11-17 (code references in "What Ultty has today" were to `main` at
 252c082; winit references are to 0.30.13).
 
 ## Context
@@ -264,7 +268,7 @@ Estimates for one engineer who knows the codebase, after ADR 0027 slices
 |---|---|---|---|
 | 1 (**Done**, 2026-11-24) | Quick role; `ultty --quick`; `toggle-quick`, `show-quick`, `hide-quick`; X11 position, size, always-on-top, hide/show; Wayland toplevel `ultty-quick` dropped and recreated, activation token forwarded; autohide; docs with sway, Hyprland, niri, KDE, GNOME and X11 binding snippets | 4–6 days | `config::tests::test_quick_terminal_config_defaults_parsing_and_geometry`, `control::single_instance::tests::quick_handoff_forwards_activation_token_and_reports_visibility`, and `scripts/e2e/quick-terminal.sh` (toggles twice under Xvfb, shell PID unchanged, X11 mapped state flips, hidden quick excluded from default targets/session save, keeps process alive when last normal window closes) |
 | 2 | Wayland layer shell: prototype SCTK path (keyboard, frame callbacks), then either finish it or adopt winit's | 2–3 days prototype; 8–12 days to finish | Prototype report with a go/no-go |
-| 3 | X11 global hotkey from `quick_terminal.hotkey` (keybinding syntax) | 2–3 days | Integration test under Xvfb with `xdotool key` |
+| 3 (**Done**, 2026-11-24) | X11 global hotkey from `quick_terminal.hotkey` (keybinding syntax) | 2–3 days | `platform::x11_hotkey::tests::*` and `scripts/e2e/quick-terminal.sh` under Xvfb with `xdotool key ctrl+grave` (toggles on/off/on keeping PID, plus second-instance grab conflict warning) |
 | 4 | Wayland `GlobalShortcuts` portal | 2–4 days | Manual on KDE and GNOME 48+; graceful message elsewhere |
 | 5 | macOS: level, Spaces, activation, Carbon hotkey | 4–6 days on a Mac | macOS CI build (ADR 0029); manual check recorded |
 | 6 | Slide animation | not planned | |
