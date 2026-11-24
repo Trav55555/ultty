@@ -2,7 +2,7 @@
 
 ## Status
 
-**In progress** — Slices 1–5 have landed:
+**Implemented** — Slices 1–6 have landed:
 - Slice 1 (2026-11-23): `App` split into process state and `WindowState`,
   shared GPU device/adapter/instance/queue, per-window tab lists and relayout
   in `TerminalManager`, in-process "New window" with opt-in
@@ -25,10 +25,15 @@
   entries ("Move tab to new window" / "Move tab to window N"), and tab drag-out
   to a new window, preserving PTYs/PIDs and updating both windows' AccessKit
   trees.
+- Slice 6 (2026-11-24): opt-in `behavior.single_instance` (default `false`),
+  `ultty --new-process`, single-instance CLI handoff over the newest running
+  instance's authenticated control socket forwarding working directory and `-e`
+  commands with short-timeout fallback, and `NewWindow` working-directory
+  support for shell launches.
 
-Slice 6 is not yet implemented. Original proposal and decisions are from
-2026-11-17 (code references in "What Ultty has today" were to `main` at
-252c082).
+Slice 7 (drop a tab onto another window) remains unscheduled by decision 4.
+Original proposal and decisions are from 2026-11-17 (code references in "What
+Ultty has today" were to `main` at 252c082).
 
 ## Context
 
@@ -378,7 +383,7 @@ Each slice also needs `cargo test --workspace`, clippy with
 | 3 (**Done**, 2026-11-24) | Control: `--window`, `windows`, `new-window`, `close-window`, window field in events; target rules | 3–4 days | `ulttyctl` tests; `describe` lists `list_windows`, `new_window`, `close_window`; existing control tests pass unchanged; `scripts/e2e/multi-window.sh` exercises `windows`, `new-window`, `--window`/`--pane` targeting, `close-window`, and window subscribe events |
 | 4 (**Done**, 2026-11-24) | Session v2 with windows; restore opens N windows; v1 compatibility | 2–3 days | Round-trip tests for v1 and v2 files (`session::tests::*`, `terminal_manager::tests::multi_window_session_round_trips_windows_tabs_and_sizes`); `scripts/e2e/multi-window.sh` saves a 2-window v2 workspace, restores both windows with logical sizes, and verifies `SIGTERM` preserves both windows |
 | 5 (**Done**, 2026-11-24) | Move tab: commands, menu, palette, `move-tab`; drag-out to a new window | 4–6 days | `terminal_manager::tests::move_tab_to_window_preserves_pid_and_resizes_to_destination_area`, `app::accessibility::tests::moving_a_tab_updates_both_windows_accesskit_trees` (AccessKit consumer test), and `scripts/e2e/multi-window.sh` (`move-tab --window`/`--new-window` + X11 drag-out) |
-| 6 | Single instance (`behavior.single_instance`), off by default until stable, then on | 2–3 days | Second `ultty` exits after opening a window in the first |
+| 6 (**Done**, 2026-11-24) | Single instance (`behavior.single_instance`), off by default until stable, then on; `ultty --new-process` | 2–3 days | `control::single_instance::tests::*`, `terminal_manager::tests::create_window_in_dir_starts_shell_in_requested_directory`, and `scripts/e2e/multi-window.sh` (second `ultty` with cwd & `-e` opens a window in the first and exits 0; `--new-process` starts a second process) |
 | 7 | Drop a tab onto another window, X11 and macOS only | 3–5 days, after a prototype | Not planned; reconsider after slice 5 ships and an X11 prototype |
 
 Slices 1 to 4 make "New window" in-process and are the minimum to close

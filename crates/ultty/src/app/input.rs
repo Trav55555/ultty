@@ -816,8 +816,9 @@ impl WindowCtx<'_> {
             },
             MenuItem::NewWindow => {
                 if self.app.config.behavior.window_per_process {
-                    let spawned = std::env::current_exe()
-                        .and_then(|exe| std::process::Command::new(exe).spawn());
+                    let spawned = std::env::current_exe().and_then(|exe| {
+                        std::process::Command::new(exe).arg("--new-process").spawn()
+                    });
                     if let Err(e) = spawned {
                         tracing::warn!("Failed to open a new window: {}", e);
                     }

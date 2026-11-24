@@ -699,10 +699,22 @@ impl TerminalManager {
         rows: u16,
         tab_env: TabEnvFn,
     ) -> io::Result<(WindowKey, TabId)> {
+        self.create_window_in_dir(cols, rows, None, tab_env)
+    }
+
+    /// Allocate a new window with one initial shell tab, starting in
+    /// `working_dir` when given, and focus it.
+    pub fn create_window_in_dir(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        working_dir: Option<&str>,
+        tab_env: TabEnvFn,
+    ) -> io::Result<(WindowKey, TabId)> {
         let window_id = WindowKey(self.next_window_id);
         self.next_window_id += 1;
         self.windows.push(WindowRecord::new(window_id, cols, rows));
-        match self.create_tab_in_window(window_id, tab_env) {
+        match self.create_tab_in_window_with_dir(window_id, working_dir, tab_env) {
             Ok(tab_id) => {
                 self.focused_window = window_id;
                 Ok((window_id, tab_id))
@@ -859,6 +871,17 @@ impl TerminalManager {
         window: WindowKey,
         tab_env: TabEnvFn,
     ) -> io::Result<TabId> {
+        self.create_tab_in_window_with_dir(window, None, tab_env)
+    }
+
+    /// Create a new tab in `window` whose shell starts in `working_dir` when
+    /// given (otherwise inheriting from the focused pane).
+    pub fn create_tab_in_window_with_dir(
+        &mut self,
+        window: WindowKey,
+        working_dir: Option<&str>,
+        tab_env: TabEnvFn,
+    ) -> io::Result<TabId> {
         self.ensure_window_record(window);
         let tab_id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
@@ -868,7 +891,8 @@ impl TerminalManager {
             .window_focused_terminal(window)
             .or_else(|| self.focused_terminal())
             .map(|t| t.id);
-        let terminal_id = self.create_terminal_with_env(window, tab_id, &env, source)?;
+        let terminal_id =
+            self.create_terminal_with_env_and_dir(window, tab_id, &env, source, working_dir)?;
 
         let mut tab = Tab::new_in_window(tab_id, terminal_id, window);
         tab.shell_env = env;
@@ -1059,6 +1083,17 @@ impl TerminalManager {
         env: &[(OsString, OsString)],
         source: Option<TerminalId>,
     ) -> io::Result<TerminalId> {
+        self.create_terminal_with_env_and_dir(window, tab_id, env, source, None)
+    }
+
+    fn create_terminal_with_env_and_dir(
+        &mut self,
+        window: WindowKey,
+        tab_id: TabId,
+        env: &[(OsString, OsString)],
+        source: Option<TerminalId>,
+        explicit_dir: Option<&str>,
+    ) -> io::Result<TerminalId> {
         let terminal_id = TerminalId(self.next_terminal_id);
         self.next_terminal_id += 1;
 
@@ -1072,7 +1107,10 @@ impl TerminalManager {
                 )
             })
             .unwrap_or((self.default_cols, self.default_rows, None));
-        let terminal = match self.inherited_directory(source) {
+        let chosen_dir = explicit_dir
+            .map(str::to_owned)
+            .or_else(|| self.inherited_directory(source));
+        let terminal = match chosen_dir {
             Some(dir) => {
                 ManagedTerminal::new_with_dir(terminal_id, tab_id, cols, rows, cell_px, &dir, env)?
             }
@@ -3797,5 +3835,37 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.to_string(), "no socket");
         assert_eq!(manager.tab_count(), 1, "failed tab is not added");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn create_window_in_dir_starts_shell_in_requested_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let expected = std::fs::canonicalize(dir.path()).unwrap();
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        manager.set_inherit_working_directory(false);
+
+        let (win_key, _tab_id) = manager
+            .create_window_in_dir(80, 24, Some(expected.to_str().unwrap()), &mut no_tab_env)
+            .unwrap();
+        let pid = manager
+            .window_focused_terminal(win_key)
+            .unwrap()
+            .event_loop
+            .child_pid();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut observed = None;
+        while std::time::Instant::now() < deadline {
+            if let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
+                if cwd == expected {
+                    observed = Some(cwd);
+                    break;
+                }
+                observed = Some(cwd);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(observed, Some(expected));
     }
 }

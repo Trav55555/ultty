@@ -20,13 +20,16 @@ const DEFAULT_LOG_FILTER: &str = "ultty=info,wgpu=warn";
 static GLOBAL: ultty::heap_stats::Counting = ultty::heap_stats::Counting;
 
 fn main() -> Result<ExitCode> {
-    let command = match invocation(std::env::args().skip(1)) {
+    let (command, new_process) = match invocation(std::env::args().skip(1)) {
         Ok(Invocation::Attach { args }) => {
             initialize_logging();
             ultty::viewer::cli::run(args)?;
             return Ok(ExitCode::SUCCESS);
         }
-        Ok(Invocation::Run { command }) => command,
+        Ok(Invocation::Run {
+            command,
+            new_process,
+        }) => (command, new_process),
         Ok(Invocation::Version) => {
             println!("{}", version_output());
             return Ok(ExitCode::SUCCESS);
@@ -58,15 +61,49 @@ fn main() -> Result<ExitCode> {
 
     initialize_logging();
 
+    let config = ultty::config::Config::load();
+    if config.behavior.single_instance && !new_process {
+        if let Some(launch) = single_instance_launch(&command) {
+            if let ultty::control::single_instance::HandoffOutcome::Opened { pid, window } =
+                ultty::control::single_instance::try_open_in_existing_instance(&launch)
+            {
+                tracing::info!(pid, window, "Opened new window in running Ultty instance");
+                return Ok(ExitCode::SUCCESS);
+            }
+        }
+    }
+
     tracing::info!("Starting Ultty");
 
-    let config = ultty::config::Config::load();
     if config.behavior.narrow_vulkan_icd {
         ultty::platform::vulkan_icd::narrow_to_detected_gpu();
     }
 
     app::App::run(command, config)?;
     Ok(ExitCode::SUCCESS)
+}
+
+fn single_instance_launch(
+    command: &Option<StartupCommand>,
+) -> Option<ultty::control::single_instance::NewWindowLaunch> {
+    let working_dir = std::env::current_dir()
+        .ok()
+        .and_then(|path| path.into_os_string().into_string().ok());
+    match command {
+        None => Some(ultty::control::single_instance::NewWindowLaunch {
+            command: None,
+            args: Vec::new(),
+            working_dir,
+        }),
+        Some(StartupCommand::Exec { program, args }) => {
+            Some(ultty::control::single_instance::NewWindowLaunch {
+                command: Some(program.clone()),
+                args: args.clone(),
+                working_dir,
+            })
+        }
+        Some(StartupCommand::Profile(_) | StartupCommand::Workspace(_)) => None,
+    }
 }
 
 fn initialize_logging() {
@@ -90,6 +127,7 @@ enum Invocation {
     /// when there is none.
     Run {
         command: Option<StartupCommand>,
+        new_process: bool,
     },
     Version,
     /// Print the theme names (with colour swatches on a terminal).
@@ -107,6 +145,7 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
     let mut args = args.into_iter().peekable();
     let mut version = false;
     let mut list_themes = false;
+    let mut new_process = false;
     let mut unknown = None;
     let mut command = None;
     let mut selection_error = None;
@@ -120,6 +159,7 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
             "--help" | "-h" => return Ok(Invocation::Help),
             "--version" | "-V" => version = true,
             "--list-themes" => list_themes = true,
+            "--new-process" => new_process = true,
             "--profile" | "--workspace" => {
                 if command.is_some() {
                     selection_error =
@@ -177,6 +217,7 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
     }
     Ok(Invocation::Run {
         command: command.transpose()?,
+        new_process,
     })
 }
 
@@ -195,6 +236,7 @@ Options:
   -h, --help            Print this help and exit
   -V, --version         Print the version and exit
   --list-themes         Print the available colour themes and exit
+  --new-process         Always start a new process even with behavior.single_instance.
   --profile NAME        Launch configured tabs and panes instead of restoring.
   --workspace NAME      Open a saved layout in fresh shells; does not resume jobs.
   --attach NAME         Attach to a live session host; close the window to detach.
@@ -216,7 +258,9 @@ fn version_output() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{invocation, usage, version_output, Invocation, StartupCommand};
+    use super::{
+        invocation, single_instance_launch, usage, version_output, Invocation, StartupCommand,
+    };
 
     fn args(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| (*arg).to_owned()).collect()
@@ -228,12 +272,67 @@ mod tests {
                 program: program.to_owned(),
                 args: args(command_args),
             }),
+            new_process: false,
         })
     }
 
     #[test]
     fn no_arguments_run_the_shell() {
-        assert_eq!(invocation(args(&[])), Ok(Invocation::Run { command: None }));
+        assert_eq!(
+            invocation(args(&[])),
+            Ok(Invocation::Run {
+                command: None,
+                new_process: false,
+            })
+        );
+    }
+
+    #[test]
+    fn test_new_process_flag_parses_and_combines_with_exec() {
+        assert_eq!(
+            invocation(args(&["--new-process"])),
+            Ok(Invocation::Run {
+                command: None,
+                new_process: true,
+            })
+        );
+        assert_eq!(
+            invocation(args(&["--new-process", "-e", "sh", "-c", "true"])),
+            Ok(Invocation::Run {
+                command: Some(StartupCommand::Exec {
+                    program: "sh".to_owned(),
+                    args: args(&["-c", "true"]),
+                }),
+                new_process: true,
+            })
+        );
+        assert_eq!(
+            invocation(args(&["-e", "echo", "--new-process"])),
+            run_command("echo", &["--new-process"])
+        );
+    }
+
+    #[test]
+    fn single_instance_launch_maps_shell_and_exec_but_skips_profile_and_workspace() {
+        let shell = single_instance_launch(&None).expect("bare launch hands off");
+        assert!(shell.command.is_none());
+        assert!(shell.args.is_empty());
+        assert!(shell.working_dir.is_some());
+
+        let exec = single_instance_launch(&Some(StartupCommand::Exec {
+            program: "htop".to_owned(),
+            args: args(&["-d", "5"]),
+        }))
+        .expect("-e launch hands off");
+        assert_eq!(exec.command.as_deref(), Some("htop"));
+        assert_eq!(exec.args, args(&["-d", "5"]));
+
+        assert!(
+            single_instance_launch(&Some(StartupCommand::Profile("work".to_owned()))).is_none()
+        );
+        assert!(
+            single_instance_launch(&Some(StartupCommand::Workspace("dev".to_owned()))).is_none()
+        );
     }
 
     #[test]
@@ -242,6 +341,7 @@ mod tests {
             invocation(args(&["--profile", "remote"])),
             Ok(Invocation::Run {
                 command: Some(StartupCommand::Profile("remote".to_owned())),
+                new_process: false,
             })
         );
         assert!(invocation(args(&["--profile"])).is_err());
@@ -363,6 +463,7 @@ mod tests {
             "-h, --help",
             "-V, --version",
             "--list-themes",
+            "--new-process",
         ] {
             assert!(usage.contains(flag), "{usage}");
         }

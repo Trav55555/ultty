@@ -49,14 +49,13 @@ impl ControlEndpoint {
     }
 }
 
-/// The most recently started instance in `dir` that is still listening.
-///
-/// Sockets left behind by a crashed instance, and anything not owned by
-/// this user, are skipped.
-pub fn find_running_instance(dir: &Path) -> Option<ControlEndpoint> {
+/// All user-owned Ultty control socket endpoints in `dir`, newest first.
+pub fn running_instance_candidates(dir: &Path) -> Vec<ControlEndpoint> {
     let uid = current_uid();
-    let mut candidates: Vec<(i64, i64, u32)> = fs::read_dir(dir)
-        .ok()?
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<(i64, i64, u32)> = entries
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let pid = pid_from_socket_name(entry.file_name().to_str()?)?;
@@ -70,6 +69,16 @@ pub fn find_running_instance(dir: &Path) -> Option<ControlEndpoint> {
     candidates
         .into_iter()
         .map(|(_, _, pid)| ControlEndpoint::for_pid(dir, pid))
+        .collect()
+}
+
+/// The most recently started instance in `dir` that is still listening.
+///
+/// Sockets left behind by a crashed instance, and anything not owned by
+/// this user, are skipped.
+pub fn find_running_instance(dir: &Path) -> Option<ControlEndpoint> {
+    running_instance_candidates(dir)
+        .into_iter()
         .find(|endpoint| UnixStream::connect(&endpoint.socket).is_ok())
 }
 

@@ -6,6 +6,7 @@ pub mod events;
 pub mod mcp;
 pub mod paths;
 mod server;
+pub mod single_instance;
 pub mod wait;
 
 pub use server::{format_response, ControlServer};

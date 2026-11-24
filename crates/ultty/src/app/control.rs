@@ -479,7 +479,7 @@ impl App {
                 args,
                 working_dir,
             } => {
-                if command.is_none() && (!args.is_empty() || working_dir.is_some()) {
+                if command.is_none() && !args.is_empty() {
                     return invalid_spawn_options();
                 }
                 match self.open_new_window_with_command(

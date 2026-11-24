@@ -1117,6 +1117,11 @@ pub struct BehaviorConfig {
     /// one process and GPU device). Set to `true` for per-window crash
     /// isolation.
     pub window_per_process: bool,
+    /// When `true`, launching `ultty` connects to the newest running Ultty
+    /// instance and opens a window inside it instead of starting a second
+    /// process (ADR 0027). Defaults to `false`; pass `--new-process` to force
+    /// a new process even when enabled.
+    pub single_instance: bool,
 }
 
 impl Default for BehaviorConfig {
@@ -1137,6 +1142,7 @@ impl Default for BehaviorConfig {
             narrow_vulkan_icd: true,
             cpu_first_frames: cfg!(target_os = "linux"),
             window_per_process: false,
+            single_instance: false,
         }
     }
 }
@@ -1991,5 +1997,12 @@ copy = "ctrl+c"
         assert!(!BehaviorConfig::default().window_per_process);
         let config: Config = toml::from_str("[behavior]\nwindow_per_process = true\n").unwrap();
         assert!(config.behavior.window_per_process);
+    }
+
+    #[test]
+    fn test_single_instance_defaults_false_and_parses() {
+        assert!(!BehaviorConfig::default().single_instance);
+        let config: Config = toml::from_str("[behavior]\nsingle_instance = true\n").unwrap();
+        assert!(config.behavior.single_instance);
     }
 }
