@@ -192,8 +192,7 @@ fn run_hotkey_loop<F>(
     };
     let x11_fd = conn.stream().as_raw_fd();
     let stop_fd = stop_rx.as_raw_fd();
-    // SAFETY: `conn` and `stop_rx` remain alive for the entire loop and are
-    // removed from `poller` before returning.
+    // SAFETY: `conn` and `stop_rx` outlive the poller and are deleted before returning.
     unsafe {
         if poller.add(x11_fd, PollEvent::readable(X11_FD_KEY)).is_err()
             || poller
@@ -334,8 +333,8 @@ fn detect_modifier_masks(conn: &RustConnection) -> DetectedModifiers {
     let mut found_alt = false;
     let mut found_super = false;
     let mut found_num = false;
-    // Modifier rows 3..8 correspond to Mod1..Mod5 (bits 3..7).
-    for row in 3..8usize {
+    const MOD1_TO_MOD5_ROWS: std::ops::Range<usize> = 3..8;
+    for row in MOD1_TO_MOD5_ROWS {
         let bit = 1u16 << row;
         let slice = mod_reply
             .keycodes
@@ -425,8 +424,8 @@ fn find_keycodes_for_keysym(
         let start = offset * per;
         let end = (start + per).min(reply.keysyms.len());
         if let Some(syms) = reply.keysyms.get(start..end) {
-            // Check unshifted and shifted levels (columns 0..2).
-            let check_len = syms.len().min(2);
+            const UNSHIFTED_AND_SHIFTED_LEVELS: usize = 2;
+            let check_len = syms.len().min(UNSHIFTED_AND_SHIFTED_LEVELS);
             if syms[..check_len].contains(&target) {
                 out.push(min_kc + offset as u8);
             }
@@ -516,7 +515,6 @@ mod tests {
         assert!(variants.contains(&(mask | detected.num_lock)));
         assert!(variants.contains(&(mask | u16::from(ModMask::LOCK) | detected.num_lock)));
 
-        // Deduplicates when NumLock is unavailable (0).
         let no_num = expand_lock_variants(mask, 0);
         assert_eq!(no_num.len(), 2);
     }
