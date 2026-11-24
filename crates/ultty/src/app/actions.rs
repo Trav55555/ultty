@@ -1,7 +1,7 @@
 //! User-triggered actions: config reload, font sizing, screenshots, debug dumps,
 //! theme cycling, and desktop notifications.
 
-use super::App;
+use super::{App, ProcessState, WindowCtx};
 use ultty::config::Config;
 use ultty::protocol::ProtocolServer;
 use ultty::renderer::OverlayState;
@@ -40,68 +40,7 @@ impl ScreenshotOverlayState {
     }
 }
 
-impl App {
-    pub(super) fn build_screenshot_overlay_state(&self) -> ScreenshotOverlayState {
-        ScreenshotOverlayState {
-            copy_mode: if self.copy_mode.is_active() {
-                Some(self.copy_mode.clone())
-            } else {
-                None
-            },
-            urls: self.url_detector.urls().to_vec(),
-            tab_bar: if self.tab_bar.visible {
-                Some(self.tab_bar.clone())
-            } else {
-                None
-            },
-            bell_active: self
-                .bell_active_until
-                .map(|until| std::time::Instant::now() < until)
-                .unwrap_or(false),
-            shortcuts_visible: self.shortcuts_visible,
-            keybindings: self.shortcuts_list.clone(),
-            cursor_blink_visible: self.cursor_blink.visible(),
-            command_palette: self
-                .command_palette
-                .is_open()
-                .then(|| self.command_palette.clone()),
-        }
-    }
-
-    /// Capture every pane of the active tab to `path`, as the window shows
-    /// them. The caller must not hold any pane's terminal lock.
-    pub(super) fn capture_panes_screenshot(
-        &mut self,
-        path: &std::path::Path,
-    ) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let overlay_state = self.build_screenshot_overlay_state();
-        let overlay = overlay_state.as_overlay();
-        let locked = super::render::lock_active_panes(
-            &self.runtime.manager,
-            self.renderer.surface_size().into(),
-            self.tab_bar.content_top(),
-        );
-        let panes = super::render::pane_draws(&locked, self.runtime.protocol.as_ref());
-        self.renderer
-            .for_screenshot()?
-            .capture_panes_screenshot(&panes, &overlay, path)
-    }
-
-    fn notify_screenshot_saved(&self, path: &std::path::Path) {
-        tracing::info!("Screenshot saved to {}", path.display());
-        // Show notification if possible
-        if let Ok(notif) = notify_rust::Notification::new()
-            .summary("Screenshot Saved")
-            .body(&format!("Saved to {}", path.display()))
-            .show()
-        {
-            drop(notif);
-        }
-    }
-
+impl ProcessState {
     /// The keyboard shortcuts overlay's rows: each bound action's key and
     /// label, from the same table as the command palette.
     pub(super) fn build_shortcuts_list(
@@ -117,7 +56,16 @@ impl App {
 
     /// Build native protocol status rows for the in-terminal status overlay.
     pub(super) fn build_protocol_status_rows(&self) -> Vec<(String, String)> {
-        Self::format_protocol_status_rows(self.runtime.protocol.as_ref())
+        App::format_protocol_status_rows(self.runtime.protocol.as_ref())
+    }
+}
+
+impl App {
+    #[cfg(test)]
+    pub(super) fn build_shortcuts_list(
+        keybindings: &ultty::config::KeybindingConfig,
+    ) -> Vec<(String, String)> {
+        ProcessState::build_shortcuts_list(keybindings)
     }
 
     pub(super) fn format_protocol_status_rows(
@@ -200,287 +148,93 @@ impl App {
         rows
     }
 
-    /// Reload configuration from disk.
+    /// Reload configuration from disk and apply it across every open window.
     pub(super) fn reload_config(&mut self) {
         let mut new_config = Config::load();
-        if new_config.behavior.keep_start_only(&self.config.behavior) {
+        if new_config
+            .behavior
+            .keep_start_only(&self.shared.config.behavior)
+        {
             tracing::info!(
                 "start-only behavior settings changed; they take effect after Ultty restarts"
             );
         }
 
-        // Update color scheme
-        self.renderer
-            .set_color_scheme(ultty::renderer::ColorScheme::from_config(
-                &new_config.colors,
-            ));
-        self.runtime
+        let font_changed = new_config.font != self.shared.config.font;
+        let old_font = self.shared.config.font.clone();
+        self.shared
+            .runtime
             .manager
             .set_theme_colors(new_config.colors.theme_colors());
-        self.runtime
+        self.shared
+            .runtime
             .manager
             .set_scrollback_lines(new_config.behavior.scrollback_lines);
-        self.runtime
+        self.shared
+            .runtime
             .manager
             .set_image_storage_limit(new_config.images.storage_limit_bytes());
-        self.runtime
+        self.shared
+            .runtime
             .manager
             .set_close_on_exit(new_config.behavior.close_on_exit);
-        self.runtime
+        self.shared
+            .runtime
             .manager
             .set_inherit_working_directory(new_config.behavior.inherit_working_directory);
+        self.shared.shortcuts_list = ProcessState::build_shortcuts_list(&new_config.keybindings);
 
-        // Update opacity
-        self.renderer.set_opacity(new_config.behavior.opacity);
-
-        // Fonts: families, size, line height, features, ligatures, emoji.
-        if new_config.font != self.config.font {
-            self.apply_font_config(&new_config.font);
+        let scheme = ultty::renderer::ColorScheme::from_config(&new_config.colors);
+        for win in self.windows.values_mut() {
+            let mut ctx = WindowCtx {
+                app: &mut self.shared,
+                win,
+            };
+            ctx.win.renderer.set_color_scheme(scheme.clone());
+            ctx.win.renderer.set_opacity(new_config.behavior.opacity);
+            if font_changed {
+                ctx.apply_font_config(&old_font, &new_config.font);
+            }
+            ctx.win
+                .url_detector
+                .set_enabled(new_config.behavior.url_detection);
+            ctx.win.needs_redraw = true;
         }
 
-        // Update URL detection setting
-        self.url_detector
-            .set_enabled(new_config.behavior.url_detection);
-
-        self.shortcuts_list = Self::build_shortcuts_list(&new_config.keybindings);
-        self.config = new_config;
-        self.needs_redraw = true;
-
+        self.shared.config = new_config;
         tracing::info!("Configuration reloaded");
     }
 
-    /// Switch fonts without restarting. Keep keyboard zoom while the
-    /// configured size and its units stay the same.
-    fn apply_font_config(&mut self, font: &ultty::config::FontConfig) {
-        let mut scaled = font.clone();
-        scaled.size =
-            if font.size == self.config.font.size && font.metrics == self.config.font.metrics {
-                self.renderer.font_size()
-            } else {
-                font.size * self.scale_factor
-            };
-        if self.renderer.apply_font_config(&scaled) {
-            // Cell size changed: re-size every pane's grid.
-            self.relayout_terminals();
-        }
-    }
-
-    /// Change font size (increase or decrease).
-    pub(super) fn change_font_size(&mut self, increase: bool) {
-        let new_size = self.renderer.step_font_size(increase);
-
-        tracing::info!(
-            "Font size: {:.1}{}",
-            new_size / self.scale_factor,
-            self.config.font.metrics.size_unit()
-        );
-
-        // Cell size changed: re-size every pane's grid.
-        self.relayout_terminals();
-
-        self.needs_redraw = true;
-    }
-
-    /// Reset font size to default.
-    pub(super) fn reset_font_size(&mut self) {
-        let default_size = self.config.font.size * self.scale_factor;
-        let new_size = self.renderer.set_font_size(default_size);
-
-        tracing::info!(
-            "Font size reset to: {:.1}{}",
-            new_size / self.scale_factor,
-            self.config.font.metrics.size_unit()
-        );
-
-        // Cell size changed: re-size every pane's grid.
-        self.relayout_terminals();
-
-        self.needs_redraw = true;
-    }
-
-    /// Take a screenshot of the terminal.
-    pub(super) fn take_screenshot(&mut self) {
-        // Generate filename with timestamp
-        let timestamp = ultty::local_time::file_stamp(std::time::SystemTime::now());
-        let filename = format!("ultty-screenshot-{}.png", timestamp);
-
-        // Try Pictures directory first, then current directory
-        let path = dirs::picture_dir()
-            .map(|p| p.join("Screenshots").join(&filename))
-            .unwrap_or_else(|| std::path::PathBuf::from(&filename));
-
-        // Ensure directory exists
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        if self.runtime.manager.pane_count() > 1 {
-            match self.capture_panes_screenshot(&path) {
-                Ok(()) => self.notify_screenshot_saved(&path),
-                Err(e) => tracing::error!("Failed to capture screenshot: {}", e),
-            }
-            return;
-        }
-
-        // Get terminal reference
-        let Some(terminal) = self
-            .runtime
-            .manager
-            .focused_terminal()
-            .map(|t| t.event_loop.terminal())
-        else {
-            tracing::warn!("Cannot take screenshot: no focused terminal");
-            return;
-        };
-
-        let overlay_state = self.build_screenshot_overlay_state();
-        let overlay = overlay_state.as_overlay();
-
-        let native_sessions: Vec<&dyn ultty::scene::view::NativeRenderSource> = self
-            .runtime
-            .protocol
-            .as_ref()
-            .map(|s| {
-                s.active_tab_sessions()
-                    .map(|session| session as &dyn ultty::scene::view::NativeRenderSource)
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        match self.renderer.for_screenshot().and_then(|renderer| {
-            renderer.capture_screenshot_with_native(&terminal, &overlay, &path, &native_sessions)
-        }) {
-            Ok(()) => self.notify_screenshot_saved(&path),
-            Err(e) => {
-                tracing::error!("Failed to capture screenshot: {}", e);
-            }
-        }
-    }
-
-    /// Dump terminal state to a file for debugging.
-    pub(super) fn debug_dump_terminal(&self) {
-        use std::io::Write;
-
-        let timestamp = ultty::local_time::file_stamp(std::time::SystemTime::now());
-        let filename = format!("/tmp/ultty-debug-{}.txt", timestamp);
-
-        let Some(terminal) = self.terminal() else {
-            return;
-        };
-        let grid = terminal.grid();
-        let dims = grid.dimensions();
-        let cursor = grid.cursor();
-
-        let mut output = String::new();
-
-        // Header
-        output.push_str("=== Ultty Terminal Debug Dump ===\n");
-        output.push_str(&format!("Timestamp: {}\n", timestamp));
-        output.push_str(&format!(
-            "Dimensions: {}x{} (cols x rows)\n",
-            dims.cols, dims.rows
-        ));
-        output.push_str(&format!(
-            "Cursor: row={}, col={}\n",
-            cursor.position.row, cursor.position.col
-        ));
-        output.push_str(&format!(
-            "Modes: origin={}, autowrap={}\n",
-            terminal.modes().origin_mode,
-            terminal.modes().auto_wrap
-        ));
-        if let Some(region) = grid.scroll_region() {
-            output.push_str(&format!(
-                "Scroll region: top={}, bottom={}\n",
-                region.top, region.bottom
-            ));
-        }
-        output.push_str("\n=== Grid Content ===\n");
-
-        // Dump grid content with row numbers
-        for row_idx in 0..dims.rows {
-            output.push_str(&format!("{:3}|", row_idx));
-            if let Some(row) = grid.row(row_idx) {
-                for col_idx in 0..dims.cols {
-                    if let Some(cell) = row.cell(col_idx) {
-                        let ch = cell.char();
-                        // Replace control characters with visible representation
-                        let display_char = if ch.is_control() || ch == '\0' {
-                            '·'
-                        } else if ch == ' ' {
-                            ' '
-                        } else {
-                            ch
-                        };
-                        output.push(display_char);
-                    } else {
-                        output.push('·');
-                    }
-                }
-            }
-            output.push_str("|\n");
-        }
-
-        output.push_str("\n=== End of Dump ===\n");
-
-        // Write to file
-        match std::fs::File::create(&filename) {
-            Ok(mut file) => {
-                if let Err(e) = file.write_all(output.as_bytes()) {
-                    tracing::error!("Failed to write debug dump: {}", e);
-                } else {
-                    tracing::info!("Debug dump saved to {}", filename);
-                    // Also show notification
-                    let _ = notify_rust::Notification::new()
-                        .summary("Debug Dump Saved")
-                        .body(&format!("Saved to {}", filename))
-                        .show();
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to create debug dump file: {}", e);
-            }
-        }
-    }
-
-    /// Cycle through available color themes.
+    /// Cycle through available color themes across every open window.
     pub(super) fn cycle_theme(&mut self) {
-        let theme_names: Vec<String> = self.config.colors.theme_names();
+        let theme_names: Vec<String> = self.shared.config.colors.theme_names();
         if theme_names.is_empty() {
             return;
         }
 
-        // Find current theme index
-        let current = self.config.colors.theme.as_deref().unwrap_or("");
+        let current = self.shared.config.colors.theme.as_deref().unwrap_or("");
         let current_idx = theme_names.iter().position(|n| n == current).unwrap_or(0);
-
-        // Move to next theme (wrap around)
         let next_idx = (current_idx + 1) % theme_names.len();
         let next_name = &theme_names[next_idx];
 
-        // Apply the theme
-        if let Some(theme) = self.config.colors.get_theme(next_name).cloned() {
-            self.config.colors.apply_theme(&theme);
-            self.config.colors.theme = Some(next_name.clone());
+        if let Some(theme) = self.shared.config.colors.get_theme(next_name).cloned() {
+            self.shared.config.colors.apply_theme(&theme);
+            self.shared.config.colors.theme = Some(next_name.clone());
 
-            // Update renderer
-            self.renderer
-                .set_color_scheme(ultty::renderer::ColorScheme::from_config(
-                    &self.config.colors,
-                ));
-            self.runtime
+            let scheme = ultty::renderer::ColorScheme::from_config(&self.shared.config.colors);
+            self.shared
+                .runtime
                 .manager
-                .set_theme_colors(self.config.colors.theme_colors());
-
-            self.needs_redraw = true;
+                .set_theme_colors(self.shared.config.colors.theme_colors());
+            for win in self.windows.values_mut() {
+                win.renderer.set_color_scheme(scheme.clone());
+                win.needs_redraw = true;
+            }
             tracing::info!("Switched to theme: {}", theme.name);
         }
     }
 
     /// Show a desktop notification via a dedicated background thread.
-    ///
-    /// Uses a single long-lived thread with a channel to avoid spawning
-    /// a new thread per notification.
     pub(super) fn show_notification(title: &str, body: &str) {
         use std::sync::{mpsc, OnceLock};
 
@@ -512,6 +266,262 @@ impl App {
 
         let title = if title.is_empty() { "Ultty" } else { title };
         let _ = sender.send((title.to_string(), body.to_string()));
+    }
+}
+
+impl WindowCtx<'_> {
+    pub(super) fn build_screenshot_overlay_state(&self) -> ScreenshotOverlayState {
+        ScreenshotOverlayState {
+            copy_mode: if self.win.copy_mode.is_active() {
+                Some(self.win.copy_mode.clone())
+            } else {
+                None
+            },
+            urls: self.win.url_detector.urls().to_vec(),
+            tab_bar: if self.win.tab_bar.visible {
+                Some(self.win.tab_bar.clone())
+            } else {
+                None
+            },
+            bell_active: self
+                .win
+                .bell_active_until
+                .map(|until| std::time::Instant::now() < until)
+                .unwrap_or(false),
+            shortcuts_visible: self.win.shortcuts_visible,
+            keybindings: self.app.shortcuts_list.clone(),
+            cursor_blink_visible: self.win.cursor_blink.visible(),
+            command_palette: self
+                .win
+                .command_palette
+                .is_open()
+                .then(|| self.win.command_palette.clone()),
+        }
+    }
+
+    /// Capture every pane of this window's active tab to `path`.
+    pub(super) fn capture_panes_screenshot(
+        &mut self,
+        path: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let overlay_state = self.build_screenshot_overlay_state();
+        let overlay = overlay_state.as_overlay();
+        let active_tab = self
+            .app
+            .runtime
+            .manager
+            .window_active_tab(self.win.key)
+            .map(|tab| tab.id);
+        let locked = super::render::lock_window_active_panes(
+            &self.app.runtime.manager,
+            self.win.key,
+            self.win.renderer.surface_size().into(),
+            self.win.tab_bar.content_top(),
+        );
+        let panes =
+            super::render::pane_draws(&locked, active_tab, self.app.runtime.protocol.as_ref());
+        self.win
+            .renderer
+            .for_screenshot()?
+            .capture_panes_screenshot(&panes, &overlay, path)
+    }
+
+    fn notify_screenshot_saved(&self, path: &std::path::Path) {
+        tracing::info!("Screenshot saved to {}", path.display());
+        if let Ok(notif) = notify_rust::Notification::new()
+            .summary("Screenshot Saved")
+            .body(&format!("Saved to {}", path.display()))
+            .show()
+        {
+            drop(notif);
+        }
+    }
+
+    /// Switch fonts for this window without restarting. Keep keyboard zoom while
+    /// the configured size and its units stay the same.
+    pub(super) fn apply_font_config(
+        &mut self,
+        old_font: &ultty::config::FontConfig,
+        font: &ultty::config::FontConfig,
+    ) {
+        let mut scaled = font.clone();
+        scaled.size = if font.size == old_font.size && font.metrics == old_font.metrics {
+            self.win.renderer.font_size()
+        } else {
+            font.size * self.win.scale_factor
+        };
+        if self.win.renderer.apply_font_config(&scaled) {
+            self.relayout_terminals();
+        }
+    }
+
+    /// Change font size (increase or decrease) for this window.
+    pub(super) fn change_font_size(&mut self, increase: bool) {
+        let new_size = self.win.renderer.step_font_size(increase);
+
+        tracing::info!(
+            "Font size: {:.1}{}",
+            new_size / self.win.scale_factor,
+            self.app.config.font.metrics.size_unit()
+        );
+
+        self.relayout_terminals();
+        self.win.needs_redraw = true;
+    }
+
+    /// Reset font size to default for this window.
+    pub(super) fn reset_font_size(&mut self) {
+        let default_size = self.app.config.font.size * self.win.scale_factor;
+        let new_size = self.win.renderer.set_font_size(default_size);
+
+        tracing::info!(
+            "Font size reset to: {:.1}{}",
+            new_size / self.win.scale_factor,
+            self.app.config.font.metrics.size_unit()
+        );
+
+        self.relayout_terminals();
+        self.win.needs_redraw = true;
+    }
+
+    /// Take a screenshot of this window.
+    pub(super) fn take_screenshot(&mut self) {
+        let timestamp = ultty::local_time::file_stamp(std::time::SystemTime::now());
+        let filename = format!("ultty-screenshot-{}.png", timestamp);
+
+        let path = dirs::picture_dir()
+            .map(|p| p.join("Screenshots").join(&filename))
+            .unwrap_or_else(|| std::path::PathBuf::from(&filename));
+
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        if self.app.runtime.manager.window_pane_count(self.win.key) > 1 {
+            match self.capture_panes_screenshot(&path) {
+                Ok(()) => self.notify_screenshot_saved(&path),
+                Err(e) => tracing::error!("Failed to capture screenshot: {}", e),
+            }
+            return;
+        }
+
+        let Some((tab_id, terminal)) = self
+            .app
+            .runtime
+            .manager
+            .window_focused_terminal(self.win.key)
+            .map(|t| (t.tab_id, t.event_loop.terminal()))
+        else {
+            tracing::warn!("Cannot take screenshot: no focused terminal");
+            return;
+        };
+
+        let overlay_state = self.build_screenshot_overlay_state();
+        let overlay = overlay_state.as_overlay();
+
+        let native_sessions: Vec<&dyn ultty::scene::view::NativeRenderSource> = self
+            .app
+            .runtime
+            .protocol
+            .as_ref()
+            .map(|s| {
+                s.tab_sessions(tab_id)
+                    .map(|session| session as &dyn ultty::scene::view::NativeRenderSource)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        match self.win.renderer.for_screenshot().and_then(|renderer| {
+            renderer.capture_screenshot_with_native(&terminal, &overlay, &path, &native_sessions)
+        }) {
+            Ok(()) => self.notify_screenshot_saved(&path),
+            Err(e) => {
+                tracing::error!("Failed to capture screenshot: {}", e);
+            }
+        }
+    }
+
+    /// Dump this window's focused terminal state to a file for debugging.
+    pub(super) fn debug_dump_terminal(&self) {
+        use std::io::Write;
+
+        let timestamp = ultty::local_time::file_stamp(std::time::SystemTime::now());
+        let filename = format!("/tmp/ultty-debug-{}.txt", timestamp);
+
+        let Some(terminal) = self.terminal() else {
+            return;
+        };
+        let grid = terminal.grid();
+        let dims = grid.dimensions();
+        let cursor = grid.cursor();
+
+        let mut output = String::new();
+        output.push_str("=== Ultty Terminal Debug Dump ===\n");
+        output.push_str(&format!("Timestamp: {}\n", timestamp));
+        output.push_str(&format!(
+            "Dimensions: {}x{} (cols x rows)\n",
+            dims.cols, dims.rows
+        ));
+        output.push_str(&format!(
+            "Cursor: row={}, col={}\n",
+            cursor.position.row, cursor.position.col
+        ));
+        output.push_str(&format!(
+            "Modes: origin={}, autowrap={}\n",
+            terminal.modes().origin_mode,
+            terminal.modes().auto_wrap
+        ));
+        if let Some(region) = grid.scroll_region() {
+            output.push_str(&format!(
+                "Scroll region: top={}, bottom={}\n",
+                region.top, region.bottom
+            ));
+        }
+        output.push_str("\n=== Grid Content ===\n");
+
+        for row_idx in 0..dims.rows {
+            output.push_str(&format!("{:3}|", row_idx));
+            if let Some(row) = grid.row(row_idx) {
+                for col_idx in 0..dims.cols {
+                    if let Some(cell) = row.cell(col_idx) {
+                        let ch = cell.char();
+                        let display_char = if ch.is_control() || ch == '\0' {
+                            '·'
+                        } else if ch == ' ' {
+                            ' '
+                        } else {
+                            ch
+                        };
+                        output.push(display_char);
+                    } else {
+                        output.push('·');
+                    }
+                }
+            }
+            output.push_str("|\n");
+        }
+
+        output.push_str("\n=== End of Dump ===\n");
+
+        match std::fs::File::create(&filename) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(output.as_bytes()) {
+                    tracing::error!("Failed to write debug dump: {}", e);
+                } else {
+                    tracing::info!("Debug dump saved to {}", filename);
+                    let _ = notify_rust::Notification::new()
+                        .summary("Debug Dump Saved")
+                        .body(&format!("Saved to {}", filename))
+                        .show();
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to create debug dump file: {}", e);
+            }
+        }
     }
 }
 

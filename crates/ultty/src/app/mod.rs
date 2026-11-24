@@ -19,6 +19,7 @@ mod update;
 mod wakeup;
 use anyhow::Result;
 use arboard::Clipboard;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use ultty::config::{Config, ShellIntegration, TerminalConfig};
@@ -26,7 +27,7 @@ use ultty::config_watcher::ConfigWatcher;
 use ultty::control::ControlServer;
 use ultty::protocol::ProtocolServer;
 use ultty::tabs::TabBarState;
-use ultty::terminal_manager::{TabId, TerminalId, TerminalManager};
+use ultty::terminal_manager::{TabId, TerminalId, TerminalManager, WindowKey};
 use ultty::url::UrlDetector;
 use ultty::vim::{CopyMode, Selection as VimSelection};
 use winit::application::ApplicationHandler;
@@ -159,267 +160,404 @@ struct TabWidthFreeze {
     until: Instant,
 }
 
-/// Terminal application.
-pub struct App {
-    /// Window
-    window: Arc<Window>,
-    /// Bridge to assistive technology; `None` with `accessibility = false`.
-    accessibility: Option<ultty::a11y::Adapter>,
-    /// The GPU renderer and its surface, once the GPU is up; see `gpu`.
-    renderer: gpu::RendererState,
-    /// Frames drawn on the CPU until the renderer arrives, when enabled by
-    /// `behavior.cpu_first_frames` or `ULTTY_CPU_FIRST_FRAMES`; see
-    /// `cpu_frames`.
-    cpu_frames: Option<cpu_frames::CpuFrames>,
-    /// Whether a frame has shown the shell's output yet (startup log).
-    output_shown: bool,
-    /// Terminal manager (handles multiple tabs/panes)
+/// Process-wide application state shared across every open window (ADR 0027).
+struct ProcessState {
+    proxy: EventLoopProxy<AppEvent>,
+    shared_gpu: Option<gpu::SharedGpu>,
     runtime: ultty::runtime::SessionRuntime,
-    /// Where the session is saved on exit; `None` for an `ultty -e` window,
-    /// whose one tab must not replace the user's saved tabs.
     session_file: Option<std::path::PathBuf>,
-    /// Tab bar state for rendering
-    tab_bar: TabBarState,
-    /// Temporarily fixed tab width after a close, so close buttons stay aligned.
-    tab_width_freeze: Option<TabWidthFreeze>,
-    /// Last render time for frame limiting
-    last_render: Instant,
-    /// When input was last sent to the focused terminal, until a frame has
-    /// drawn the output that followed it.
-    input_sent_at: Option<Instant>,
-    /// The focused terminal produced output after `input_sent_at`.
-    output_since_input: bool,
-    /// Last time best-effort tab display titles were refreshed.
-    last_tab_title_refresh: Instant,
-    /// The latest PTY output not yet followed by a settled tab title
-    /// refresh; see `update::title_activity_after_refresh`.
-    tab_title_activity: Option<Instant>,
-    /// Whether we need to redraw
-    needs_redraw: bool,
-    /// Redraw requests in flight and the window's occlusion.
-    frame_pacing: pacing::FramePacing,
-    /// Pending close request (from window control button).
-    pending_close: bool,
-    /// Current modifier state
-    modifiers: ModifiersState,
-    /// Clipboard
+    config: Config,
+    config_watcher: Option<ConfigWatcher>,
     clipboard: Option<Clipboard>,
-    /// Current mouse position in pixels
+    shortcuts_list: Vec<(String, String)>,
+    control_server: Option<ControlServer>,
+    pending_control_waits: Vec<control_wait::PendingControlWait>,
+    pending_override_pushes: Vec<control::PendingOverridePush>,
+    pending_semantic_actions: Vec<control::PendingSemanticAction>,
+    pending_resizes: Vec<(WindowKey, control_resize::PendingResize)>,
+    next_override_request: u32,
+    published_panes: Vec<ultty::terminal_manager::TerminalId>,
+    socket_wakeup: wakeup::SocketWakeup,
+    auto_dump_frames: u32,
+    pending_new_windows: usize,
+    pending_reload_config: bool,
+    pending_cycle_theme: bool,
+}
+
+/// Per-window surface, renderer, accessibility bridge, and UI state (ADR 0027).
+struct WindowState {
+    key: WindowKey,
+    accessibility: Option<ultty::a11y::Adapter>,
+    renderer: gpu::RendererState,
+    cpu_frames: Option<cpu_frames::CpuFrames>,
+    window: Arc<Window>,
+    output_shown: bool,
+    tab_bar: TabBarState,
+    tab_width_freeze: Option<TabWidthFreeze>,
+    last_render: Instant,
+    input_sent_at: Option<Instant>,
+    output_since_input: bool,
+    last_tab_title_refresh: Instant,
+    tab_title_activity: Option<Instant>,
+    needs_redraw: bool,
+    frame_pacing: pacing::FramePacing,
+    pending_close: bool,
+    modifiers: ModifiersState,
     mouse_pos: PhysicalPosition<f64>,
-    /// Whether left mouse button is pressed (for selection drag)
     mouse_pressed: bool,
     native_selection: native_selection::NativeSelectionState,
-    /// The button held down while the program reports the mouse: drags are
-    /// reported with it and its release names it.
     reported_button: Option<ultty::grid::MouseButton>,
-    /// Last click time for double/triple click detection
     last_click_time: Instant,
-    /// Click count (1=single, 2=double, 3=triple)
     click_count: u8,
-    /// Last click position for multi-click detection
     last_click_pos: (u16, u16),
-    /// Last click time in the title band's maximize/restore toggle area.
     last_title_bar_toggle_click_time: Instant,
-    /// Configuration
-    config: Config,
-    /// Vim-style copy mode
     copy_mode: CopyMode,
-    /// The scrollback scan a copy-mode search is running, a slice per frame.
     search_job: Option<ultty::vim::search::SearchJob>,
-    /// Pane whose grid the copy-mode cursor, scan and matches describe.
     copy_mode_pane: Option<TerminalId>,
-    /// URL detector
     url_detector: UrlDetector,
-    /// Config file watcher for hot-reload
-    config_watcher: Option<ConfigWatcher>,
-    /// Visual bell state (time when bell was triggered, None if not active)
     bell_active_until: Option<Instant>,
-    /// Pane divider dragging state: (divider_index, last_position)
     divider_dragging: Option<(ultty::pane_layout::Divider, f32)>,
-    /// Keyboard shortcuts overlay visible
     shortcuts_visible: bool,
-    /// The command palette; open, it takes every key.
     command_palette: ultty::command_palette::CommandPalette,
-    /// Native protocol status overlay visible
     protocol_status_visible: bool,
-    /// Cached list of keybindings for display
-    shortcuts_list: Vec<(String, String)>,
-    /// The focused cursor's blink phase.
     cursor_blink: blink::CursorBlink,
-    /// Auto-dump countdown (frames remaining until dump, 0 = disabled)
-    auto_dump_frames: u32,
-    /// Frames drawn so far (saturating); marks the first in the startup log.
     frames_drawn: u32,
-    /// The pane whose native sessions took the last mouse press, while the
-    /// button is held: moves and the release go to it, wherever they are.
     native_mouse_capture: native_panes::MouseCapture,
-    /// Control server for CLI automation (ulttyctl)
-    control_server: Option<ControlServer>,
-    /// Control wait requests that are checked after terminal output is drained.
-    pending_control_waits: Vec<control_wait::PendingControlWait>,
-    /// Override pushes relayed to a native app and waiting for its answer
-    /// (ADR 0023 §9).
-    pending_override_pushes: Vec<control::PendingOverridePush>,
-    /// Semantic actions waiting for an application acknowledgement.
-    pending_semantic_actions: Vec<control::PendingSemanticAction>,
-    /// `resize` requests waiting for the window to reach their size.
-    pending_resizes: Vec<control_resize::PendingResize>,
-    /// The `request_id` of the next override push.
-    next_override_request: u32,
-    /// Panes subscribers were last told about, for pane opened/closed events.
-    published_panes: Vec<ultty::terminal_manager::TerminalId>,
-    /// Cross-thread wakeups from PTY readiness into winit.
-    socket_wakeup: wakeup::SocketWakeup,
-    /// Search matches for native protocol regions
     native_search_matches: Vec<ultty::scene::SearchMatch>,
-    /// Whether native search overlay is active
     native_search_active: bool,
-    /// Current search query for native sessions
     native_search_query: String,
-    /// Current highlighted match index
     native_search_index: usize,
-    /// Reusable buffer for URL detection row text (avoids per-frame allocation)
     url_row_buf: Vec<String>,
-    /// Reusable buffer for URL detection hyperlink grid
     url_hyperlink_grid: Vec<Vec<u32>>,
-    /// Reusable buffer for URL detection hyperlink map
     url_hyperlink_map: std::collections::HashMap<u32, String>,
-    /// Accumulated pixel scroll delta for smooth scrolling on Wayland/HiDPI
     scroll_pixel_accum: f64,
     scroll_line_accum: f64,
-    /// HiDPI scale factor (physical pixels / logical pixels); kept in step
-    /// with the window by `WindowEvent::ScaleFactorChanged`.
     scale_factor: f32,
-    /// The minimum inner size last sent to the window.
     min_window_size: Option<PhysicalSize<u32>>,
-    /// When the window opened; drives the title's typing animation.
     launched_at: Instant,
-    /// Text the input method is composing (empty when it is not). While
-    /// it is non-empty, keys belong to the input method.
     ime_preedit: String,
-    /// The cursor rectangle last given to the input method, in window
-    /// pixels, so it is only sent again when the cursor moves.
     ime_cursor_area: Option<[i32; 4]>,
 }
 
-impl App {
-    /// Create a new application with window.
-    fn new(
+/// Disjoint mutable view pairing process-wide state with one open window.
+struct WindowCtx<'a> {
+    app: &'a mut ProcessState,
+    win: &'a mut WindowState,
+}
+
+/// Terminal application owning one shared runtime and any number of windows.
+pub struct App {
+    shared: ProcessState,
+    windows: BTreeMap<WindowKey, WindowState>,
+    window_ids: HashMap<WindowId, WindowKey>,
+    focused_window: Option<WindowKey>,
+}
+
+impl WindowState {
+    fn create(
+        key: WindowKey,
         event_loop: &ActiveEventLoop,
         event_proxy: EventLoopProxy<AppEvent>,
-        startup_command: Option<&StartupCommand>,
-        config: Config,
+        config: &Config,
+        shared_gpu: Option<&gpu::SharedGpu>,
     ) -> Result<Self> {
-        // Load configuration
-        tracing::info!("Loaded configuration");
-
-        // Create window with transparency support if opacity < 1
+        let create_start = Instant::now();
         let attributes = Window::default_attributes()
             .with_title(WINDOW_TITLE)
             .with_inner_size(LogicalSize::new(DEFAULT_WIDTH, DEFAULT_HEIGHT))
             .with_min_inner_size(LogicalSize::new(200.0, 100.0))
             .with_transparent(true)
             .with_decorations(false)
-            // AccessKit must see the window before it is first shown.
             .with_visible(!config.behavior.accessibility);
-        // The Wayland app id and X11 WM_CLASS: desktops match it to
-        // ultty.desktop (StartupWMClass=ultty) to show Ultty's icon and name.
-        // Wayland had no app id at all, so GNOME showed a generic icon.
         #[cfg(all(unix, not(target_os = "macos")))]
         let attributes = winit::platform::wayland::WindowAttributesExtWayland::with_name(
             attributes, "ultty", "ultty",
         );
-        let window = event_loop.create_window(attributes)?;
-        let window = Arc::new(window);
-        tracing::debug!(target: "ultty::startup", "window created");
+        let window = Arc::new(event_loop.create_window(attributes)?);
+        tracing::debug!(
+            target: "ultty::startup",
+            window = key.raw(),
+            "window created"
+        );
         let size = window.inner_size();
         let scale_factor = window.scale_factor() as f32;
 
-        // The GPU comes up on a worker thread while this one measures the
-        // fonts, starts the shells and runs the loop; see `gpu`.
-
-        // On Wayland, winit holds redraws for the compositor's frame
-        // callbacks (see `pacing`), which lets the swapchain skip FIFO.
         let paced_by_frame_callbacks = {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
             window
                 .window_handle()
                 .is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)))
         };
-        // Before the GPU's surface: see `cpu_frames`.
-        let mut cpu_frames = cpu_frames::enabled(config.behavior.cpu_first_frames)
+
+        let mut scaled_font = config.font.clone();
+        scaled_font.size *= scale_factor;
+        let fonts = ultty::renderer::Fonts::load(&scaled_font);
+        tracing::debug!(
+            target: "ultty::startup",
+            window = key.raw(),
+            "cell metrics ready"
+        );
+
+        let mut tab_bar = TabBarState::new();
+        tab_bar.scale = scale_factor;
+        tab_bar.title_letters = 0;
+
+        let mut cpu_frames = None;
+        let mut renderer = if let Some(shared) = shared_gpu {
+            match gpu::setup_with_shared(
+                shared,
+                Arc::clone(&window),
+                size,
+                &config.colors,
+                fonts,
+                paced_by_frame_callbacks,
+            ) {
+                gpu::SharedGpuSetup::Ready(mut gpu) => {
+                    gpu.renderer.set_opacity(config.behavior.opacity);
+                    gpu.renderer.set_tab_bar_height(tab_bar.content_top());
+                    tracing::debug!(
+                        target: "ultty::startup",
+                        window = key.raw(),
+                        elapsed_ms = create_start.elapsed().as_millis(),
+                        "shared GPU window ready"
+                    );
+                    gpu::RendererState::Ready(gpu)
+                }
+                gpu::SharedGpuSetup::Failed(error) => return Err(error),
+                gpu::SharedGpuSetup::Incompatible(fonts) => {
+                    tracing::info!(
+                        "Window {} is incompatible with shared GPU adapter; creating dedicated GPU setup",
+                        key.raw()
+                    );
+                    Self::start_async_gpu(
+                        key,
+                        event_loop,
+                        &window,
+                        size,
+                        config,
+                        *fonts,
+                        paced_by_frame_callbacks,
+                        event_proxy.clone(),
+                        &mut cpu_frames,
+                    )?
+                }
+            }
+        } else {
+            Self::start_async_gpu(
+                key,
+                event_loop,
+                &window,
+                size,
+                config,
+                fonts,
+                paced_by_frame_callbacks,
+                event_proxy.clone(),
+                &mut cpu_frames,
+            )?
+        };
+        renderer.set_tab_bar_height(tab_bar.content_top());
+
+        let accessibility = config.behavior.accessibility.then(|| {
+            let adapter =
+                ultty::a11y::Adapter::new(event_loop, &window, WINDOW_TITLE, event_proxy.clone());
+            window.set_visible(true);
+            tracing::debug!(
+                target: "ultty::startup",
+                window = key.raw(),
+                "accessibility adapter ready, window shown"
+            );
+            adapter
+        });
+        window.set_ime_allowed(true);
+
+        Ok(Self {
+            key,
+            window,
+            accessibility,
+            renderer,
+            cpu_frames,
+            output_shown: false,
+            tab_bar,
+            tab_width_freeze: None,
+            last_render: Instant::now(),
+            input_sent_at: None,
+            output_since_input: false,
+            last_tab_title_refresh: Instant::now() - TAB_TITLE_REFRESH_INTERVAL,
+            tab_title_activity: None,
+            needs_redraw: true,
+            frame_pacing: pacing::FramePacing::default(),
+            pending_close: false,
+            modifiers: ModifiersState::empty(),
+            mouse_pos: PhysicalPosition::new(0.0, 0.0),
+            mouse_pressed: false,
+            native_selection: native_selection::NativeSelectionState::default(),
+            reported_button: None,
+            last_click_time: Instant::now() - CLICK_THRESHOLD * 2,
+            click_count: 0,
+            last_click_pos: (0, 0),
+            last_title_bar_toggle_click_time: Instant::now() - CLICK_THRESHOLD * 2,
+            copy_mode: CopyMode::new(),
+            search_job: None,
+            copy_mode_pane: None,
+            url_detector: UrlDetector::new(config.behavior.url_detection),
+            bell_active_until: None,
+            divider_dragging: None,
+            shortcuts_visible: false,
+            command_palette: Default::default(),
+            protocol_status_visible: false,
+            cursor_blink: blink::CursorBlink::new(),
+            frames_drawn: 0,
+            native_mouse_capture: native_panes::MouseCapture::default(),
+            native_search_matches: Vec::new(),
+            native_search_active: false,
+            native_search_query: String::new(),
+            native_search_index: 0,
+            url_row_buf: Vec::new(),
+            url_hyperlink_grid: Vec::new(),
+            url_hyperlink_map: std::collections::HashMap::new(),
+            scroll_pixel_accum: 0.0,
+            scroll_line_accum: 0.0,
+            scale_factor,
+            min_window_size: None,
+            launched_at: Instant::now(),
+            ime_preedit: String::new(),
+            ime_cursor_area: None,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_async_gpu(
+        key: WindowKey,
+        event_loop: &ActiveEventLoop,
+        window: &Arc<Window>,
+        size: PhysicalSize<u32>,
+        config: &Config,
+        fonts: ultty::renderer::Fonts,
+        paced_by_frame_callbacks: bool,
+        event_proxy: EventLoopProxy<AppEvent>,
+        cpu_frames: &mut Option<cpu_frames::CpuFrames>,
+    ) -> Result<gpu::RendererState> {
+        *cpu_frames = cpu_frames::enabled(config.behavior.cpu_first_frames)
             .then(|| {
-                cpu_frames::CpuFrames::new(event_loop.owned_display_handle(), Arc::clone(&window))
+                cpu_frames::CpuFrames::new(event_loop.owned_display_handle(), Arc::clone(window))
                     .inspect_err(|error| tracing::warn!("No CPU first frames: {error:#}"))
                     .ok()
             })
             .flatten();
         let (fonts_sender, fonts_receiver) = std::sync::mpsc::channel();
         gpu::spawn_setup(
+            key,
             event_loop.owned_display_handle(),
-            Arc::clone(&window),
+            Arc::clone(window),
             size,
             config.colors.clone(),
             fonts_receiver,
             paced_by_frame_callbacks,
-            event_proxy.clone(),
+            event_proxy,
         )?;
-
-        // The adapter connects to the session bus on its own thread, so
-        // neither a slow nor a missing bus holds up the window.
-        let accessibility = config.behavior.accessibility.then(|| {
-            let adapter =
-                ultty::a11y::Adapter::new(event_loop, &window, WINDOW_TITLE, event_proxy.clone());
-            window.set_visible(true);
-            tracing::debug!(target: "ultty::startup", "accessibility adapter ready, window shown");
-            adapter
-        });
-        // winit leaves input methods off; without this, fcitx and ibus
-        // users cannot type Chinese, Japanese or Korean.
-        window.set_ime_allowed(true);
-
-        // Scale font size to physical pixels so cosmic-text metrics match
-        // the orthographic projection (which uses physical window dimensions).
-        let mut scaled_font = config.font.clone();
-        scaled_font.size *= scale_factor;
-        let fonts = ultty::renderer::Fonts::load(&scaled_font);
-        tracing::debug!(target: "ultty::startup", "cell metrics ready");
         if let Some(cpu) = cpu_frames.as_mut() {
             cpu.set_fonts(&fonts, &config.colors);
-            tracing::debug!(target: "ultty::startup", "CPU frame fonts ready");
+            tracing::debug!(
+                target: "ultty::startup",
+                window = key.raw(),
+                "CPU frame fonts ready"
+            );
         }
-        let mut renderer =
+        let renderer =
             gpu::RendererState::Starting(gpu::Starting::new(&fonts, size, config.behavior.opacity));
-        // This fails only when the GPU setup has already failed, and the
-        // worker reports that.
         let _ = fonts_sender.send(fonts);
+        Ok(renderer)
+    }
+}
 
-        // Create tab bar state at the window's scale. It is always visible
-        // (CSD), so set its height before sizing the terminal.
-        let mut tab_bar = TabBarState::new();
-        tab_bar.scale = scale_factor;
-        // The title types itself out at launch, starting from `->>>_`.
-        tab_bar.title_letters = 0;
-        renderer.set_tab_bar_height(tab_bar.content_top());
+impl ProcessState {
+    /// Save the current session, unless this process keeps none.
+    pub(super) fn save_session(&self) {
+        save_session(&self.runtime.manager, self.session_file.as_deref());
+    }
 
-        // Get terminal dimensions from the cell metrics
-        let (cols, rows) = renderer.terminal_dimensions();
+    /// Create a new tab in `window` whose shell is wired to its own protocol socket.
+    pub(super) fn create_tab_in_window(&mut self, window: WindowKey) -> std::io::Result<TabId> {
+        self.runtime
+            .manager
+            .create_tab_in_window(window, &mut |tab_id| {
+                tab_shell_env(&mut self.runtime.protocol, &self.config.terminal, tab_id)
+            })
+    }
+
+    /// Create a new tab running `command` in `window`, wired to its own protocol socket.
+    pub(super) fn create_tab_with_command_in_window(
+        &mut self,
+        window: WindowKey,
+        command: &str,
+        args: &[String],
+        working_dir: Option<&str>,
+        title: Option<&str>,
+    ) -> std::io::Result<TabId> {
+        self.runtime.manager.create_tab_with_command_in_window(
+            window,
+            command,
+            args,
+            working_dir,
+            title,
+            &mut |tab_id| tab_shell_env(&mut self.runtime.protocol, &self.config.terminal, tab_id),
+        )
+    }
+
+    /// Keep the protocol server's view of tabs in step with the terminal manager.
+    pub(super) fn sync_protocol_tabs(&mut self) {
+        self.runtime.sync_tabs();
+    }
+
+    /// Socket fds the wakeup bridge watches.
+    pub(super) fn refresh_runtime_wakeup_fds(&mut self) {
+        let mut readable = Vec::new();
+        let mut writable = Vec::new();
+        if let Some(server) = self.runtime.protocol.as_ref() {
+            readable.extend(server.readiness_fds());
+        }
+        if let Some(server) = self.control_server.as_ref() {
+            readable.extend(server.readiness_fds());
+            writable.extend(server.writable_fds());
+        }
+        self.socket_wakeup.set_fds(readable, writable);
+    }
+
+    /// Copy text to the system clipboard.
+    pub(super) fn copy_to_clipboard(&mut self, text: &str) {
+        if let Some(clipboard) = &mut self.clipboard {
+            if let Err(e) = clipboard.set_text(text.to_string()) {
+                tracing::warn!("Failed to copy to clipboard: {}", e);
+            } else {
+                tracing::debug!("Copied {} bytes to clipboard", text.len());
+            }
+        }
+    }
+}
+
+impl App {
+    /// Create a new application with its initial window.
+    fn new(
+        event_loop: &ActiveEventLoop,
+        event_proxy: EventLoopProxy<AppEvent>,
+        startup_command: Option<&StartupCommand>,
+        config: Config,
+    ) -> Result<Self> {
+        tracing::info!("Loaded configuration");
+
+        let primary_key = WindowKey::PRIMARY;
+        let first_window =
+            WindowState::create(primary_key, event_loop, event_proxy.clone(), &config, None)?;
+        let (cols, rows) = first_window.renderer.terminal_dimensions();
         tracing::info!("Terminal size: {}x{}", cols, rows);
 
         Self::sweep_stale_runtime_files();
-        // Start the native protocol server BEFORE spawning shells: each tab
-        // gets its own listening socket, and the tab's shell is told about it
-        // through ULTTY_SOCKET at spawn time.
         let mut protocol_server = Self::start_protocol_server();
-        // Sessions start at the grid's size, not 80x24, even when the window
-        // system sends no resize (no window manager, say): inline surfaces
-        // are as wide as the pane.
         if let Some(server) = protocol_server.as_mut() {
             server.set_viewport(f32::from(cols), f32::from(rows));
         }
         let control_server = Self::start_control_server();
 
-        // Create terminal manager - with launch profile if configured
         let mut terminal_manager = Self::create_terminal_manager(
             &config,
             cols,
@@ -433,8 +571,6 @@ impl App {
         terminal_manager.set_image_storage_limit(config.images.storage_limit_bytes());
         terminal_manager.set_close_on_exit(config.behavior.close_on_exit);
         terminal_manager.set_inherit_working_directory(config.behavior.inherit_working_directory);
-        // Each terminal's I/O thread parses on its own and pokes the UI
-        // through this proxy when there is something new to draw.
         let pty_proxy = std::sync::Mutex::new(event_proxy.clone());
         let published_panes = control_events::open_panes(&terminal_manager)
             .into_iter()
@@ -453,75 +589,34 @@ impl App {
             socket_proxy.send_event(AppEvent::RuntimeReadable).is_ok()
         });
 
-        // Try to create clipboard
         let clipboard = Clipboard::new().ok();
         if clipboard.is_none() {
             tracing::warn!("Failed to initialize clipboard");
         }
 
-        // Create URL detector
-        let url_detector = UrlDetector::new(config.behavior.url_detection);
-
-        // Create config watcher for hot-reload
+        let watcher_proxy = event_proxy.clone();
         let config_watcher = ConfigWatcher::new(move || {
-            let _ = event_proxy.send_event(AppEvent::RuntimeReadable);
+            let _ = watcher_proxy.send_event(AppEvent::RuntimeReadable);
         });
         if config_watcher.is_some() {
             tracing::info!("Config hot-reload enabled");
         }
 
-        // Build shortcuts list before moving config
-        let shortcuts_list = Self::build_shortcuts_list(&config.keybindings);
+        let shortcuts_list = ProcessState::build_shortcuts_list(&config.keybindings);
+        let first_winit_id = first_window.window.id();
 
-        let mut app = Self {
-            window,
-            accessibility,
-            renderer,
-            cpu_frames,
-            output_shown: false,
+        let shared = ProcessState {
+            proxy: event_proxy,
+            shared_gpu: None,
             runtime,
             session_file: session_file(
                 startup_command,
                 ultty::session::SessionData::last_session_path(),
             ),
-            tab_bar,
-            tab_width_freeze: None,
-            last_render: Instant::now(),
-            input_sent_at: None,
-            output_since_input: false,
-            last_tab_title_refresh: Instant::now() - TAB_TITLE_REFRESH_INTERVAL,
-            tab_title_activity: None,
-            needs_redraw: true,
-            frame_pacing: pacing::FramePacing::default(),
-            pending_close: false,
-            modifiers: ModifiersState::empty(),
-            clipboard,
-            mouse_pos: PhysicalPosition::new(0.0, 0.0),
-            mouse_pressed: false,
-            reported_button: None,
-            last_click_time: Instant::now() - CLICK_THRESHOLD * 2,
-            click_count: 0,
-            last_click_pos: (0, 0),
-            last_title_bar_toggle_click_time: Instant::now() - CLICK_THRESHOLD * 2,
             config,
-            copy_mode: CopyMode::new(),
-            search_job: None,
-            copy_mode_pane: None,
-            url_detector,
             config_watcher,
-            bell_active_until: None,
-            divider_dragging: None,
-            shortcuts_visible: false,
-            command_palette: Default::default(),
-            protocol_status_visible: false,
+            clipboard,
             shortcuts_list,
-            cursor_blink: blink::CursorBlink::new(),
-            // Check for auto-dump environment variable (number of frames to wait)
-            frames_drawn: 0,
-            auto_dump_frames: std::env::var("ULTTY_AUTO_DUMP")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0),
             control_server,
             pending_control_waits: Vec::new(),
             pending_override_pushes: Vec::new(),
@@ -530,29 +625,177 @@ impl App {
             next_override_request: 1,
             published_panes,
             socket_wakeup,
-            native_search_matches: Vec::new(),
-            native_search_active: false,
-            native_search_query: String::new(),
-            native_search_index: 0,
-            native_mouse_capture: native_panes::MouseCapture::default(),
-            native_selection: native_selection::NativeSelectionState::default(),
-            url_row_buf: Vec::new(),
-            url_hyperlink_grid: Vec::new(),
-            url_hyperlink_map: std::collections::HashMap::new(),
-            scroll_pixel_accum: 0.0,
-            scroll_line_accum: 0.0,
-            scale_factor,
-            min_window_size: None,
-            ime_preedit: String::new(),
-            ime_cursor_area: None,
-            launched_at: Instant::now(),
+            auto_dump_frames: std::env::var("ULTTY_AUTO_DUMP")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+            pending_new_windows: 0,
+            pending_reload_config: false,
+            pending_cycle_theme: false,
         };
 
-        // Initialize tab bar state so it renders on first frame
-        app.update_tab_bar();
-        app.refresh_runtime_wakeup_fds();
+        let mut windows = BTreeMap::new();
+        windows.insert(primary_key, first_window);
+        let mut window_ids = HashMap::new();
+        window_ids.insert(first_winit_id, primary_key);
+
+        let mut app = Self {
+            shared,
+            windows,
+            window_ids,
+            focused_window: Some(primary_key),
+        };
+
+        app.with_window(primary_key, |ctx| {
+            ctx.update_tab_bar();
+        });
+        app.shared.refresh_runtime_wakeup_fds();
 
         Ok(app)
+    }
+
+    /// Run `f` with a disjoint mutable view of `key`'s window and process state.
+    fn with_window<R>(
+        &mut self,
+        key: WindowKey,
+        f: impl FnOnce(&mut WindowCtx<'_>) -> R,
+    ) -> Option<R> {
+        let win = self.windows.get_mut(&key)?;
+        let mut ctx = WindowCtx {
+            app: &mut self.shared,
+            win,
+        };
+        Some(f(&mut ctx))
+    }
+
+    /// The window targeted by window-unqualified control commands.
+    pub(super) fn target_window_key(&self) -> Option<WindowKey> {
+        self.focused_window
+            .filter(|key| self.windows.contains_key(key))
+            .or_else(|| self.windows.keys().next().copied())
+    }
+
+    /// Open a new window in the running process, sharing the GPU device when
+    /// compatible (ADR 0027).
+    pub(super) fn open_new_window(&mut self, event_loop: &ActiveEventLoop) -> Result<WindowKey> {
+        let start = Instant::now();
+        let (cols, rows) = self
+            .target_window_key()
+            .and_then(|key| self.windows.get(&key))
+            .map(|win| win.renderer.terminal_dimensions())
+            .unwrap_or((80, 24));
+        let (key, _tab_id) =
+            self.shared
+                .runtime
+                .manager
+                .create_window(cols, rows, &mut |tab_id| {
+                    tab_shell_env(
+                        &mut self.shared.runtime.protocol,
+                        &self.shared.config.terminal,
+                        tab_id,
+                    )
+                })?;
+        let win = match WindowState::create(
+            key,
+            event_loop,
+            self.shared.proxy.clone(),
+            &self.shared.config,
+            self.shared.shared_gpu.as_ref(),
+        ) {
+            Ok(win) => win,
+            Err(error) => {
+                self.shared.runtime.manager.close_window(key);
+                self.shared.sync_protocol_tabs();
+                return Err(error);
+            }
+        };
+        let winit_id = win.window.id();
+        self.windows.insert(key, win);
+        self.window_ids.insert(winit_id, key);
+        self.focused_window = Some(key);
+        self.shared.runtime.manager.set_focused_window(key);
+        self.shared.runtime.set_viewer_present(true);
+        self.with_window(key, |ctx| {
+            ctx.update_tab_bar();
+            ctx.relayout_terminals();
+            ctx.win.needs_redraw = true;
+        });
+        tracing::info!(
+            target: "ultty::startup",
+            window = key.raw(),
+            windows = self.windows.len(),
+            elapsed_ms = start.elapsed().as_millis(),
+            "opened in-process window"
+        );
+        Ok(key)
+    }
+
+    /// Close one window. Returns `true` when the application event loop should
+    /// exit (last window closed on Linux; macOS stays alive with zero windows).
+    pub(super) fn close_window(&mut self, key: WindowKey) -> bool {
+        let is_last = self.windows.len() <= 1;
+        if is_last {
+            self.shared.save_session();
+        }
+        if let Some(win) = self.windows.remove(&key) {
+            self.window_ids.remove(&win.window.id());
+        }
+        self.shared
+            .pending_resizes
+            .retain(|(window_key, _)| *window_key != key);
+        self.shared.runtime.manager.close_window(key);
+
+        if self.focused_window == Some(key) {
+            self.focused_window = self.windows.keys().next().copied();
+            if let Some(next) = self.focused_window {
+                self.shared.runtime.manager.set_focused_window(next);
+            }
+        }
+        if self.windows.is_empty() {
+            self.shared.runtime.set_viewer_present(false);
+        }
+        self.shared.sync_protocol_tabs();
+        self.shared.refresh_runtime_wakeup_fds();
+
+        self.windows.is_empty() && cfg!(not(target_os = "macos"))
+    }
+
+    fn drain_pending_process_actions(&mut self, event_loop: &ActiveEventLoop) {
+        if self.shared.pending_reload_config {
+            self.shared.pending_reload_config = false;
+            self.reload_config();
+        }
+        if self.shared.pending_cycle_theme {
+            self.shared.pending_cycle_theme = false;
+            self.cycle_theme();
+        }
+        while self.shared.pending_new_windows > 0 {
+            self.shared.pending_new_windows -= 1;
+            if let Err(error) = self.open_new_window(event_loop) {
+                tracing::warn!("Failed to open new window: {error:#}");
+            }
+        }
+    }
+
+    fn handle_window_event_for(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        key: WindowKey,
+        event: WindowEvent,
+    ) -> bool {
+        if matches!(event, WindowEvent::Focused(true)) {
+            self.focused_window = Some(key);
+            self.shared.runtime.manager.set_focused_window(key);
+            self.shared.sync_protocol_tabs();
+        }
+        let close = self
+            .with_window(key, |ctx| ctx.handle_window_event(event))
+            .unwrap_or(false);
+        self.drain_pending_process_actions(event_loop);
+        if close {
+            return self.close_window(key);
+        }
+        false
     }
 
     fn start_control_server() -> Option<ControlServer> {
@@ -768,14 +1011,6 @@ impl App {
         .map_err(|e| anyhow::anyhow!("Failed to restore session: {}", e))
     }
 
-    /// Save the current session, unless this window keeps none.
-    fn save_session(&self) {
-        save_session(&self.runtime.manager, self.session_file.as_deref());
-    }
-
-    /// Clear out the sockets and tokens that killed or crashed instances
-    /// left where this one is about to listen. A directory that cannot be
-    /// resolved is skipped; starting the server reports it.
     fn sweep_stale_runtime_files() {
         let mut dirs: Vec<_> = [
             ultty::control::paths::control_dir(),
@@ -814,37 +1049,6 @@ impl App {
         }
     }
 
-    /// Create a new tab whose shell is wired to its own protocol socket.
-    fn create_tab(&mut self) -> std::io::Result<TabId> {
-        self.runtime.manager.create_tab_with_env(&mut |tab_id| {
-            tab_shell_env(&mut self.runtime.protocol, &self.config.terminal, tab_id)
-        })
-    }
-
-    /// Create a new tab running `command`, wired to its own protocol socket.
-    fn create_tab_with_command(
-        &mut self,
-        command: &str,
-        args: &[String],
-        working_dir: Option<&str>,
-        title: Option<&str>,
-    ) -> std::io::Result<TabId> {
-        self.runtime.manager.create_tab_with_command(
-            command,
-            args,
-            working_dir,
-            title,
-            &mut |tab_id| tab_shell_env(&mut self.runtime.protocol, &self.config.terminal, tab_id),
-        )
-    }
-
-    /// Keep the protocol server's view of tabs in step with the terminal
-    /// manager: the visible tab owns keyboard input and clipboard access, and
-    /// tabs that no longer exist lose their socket and sessions.
-    fn sync_protocol_tabs(&mut self) {
-        self.runtime.sync_tabs();
-    }
-
     /// Run the application. The first tab runs `startup_command`, or the
     /// configured shell, profile or restored session when there is none.
     pub fn run(startup_command: Option<StartupCommand>, config: Config) -> Result<()> {
@@ -871,34 +1075,48 @@ impl App {
 
     /// Run pending terminal work, then sleep until the next deadline.
     fn update_and_schedule(&mut self, event_loop: &ActiveEventLoop) {
+        self.drain_pending_process_actions(event_loop);
         if self.update() {
             event_loop.exit();
         }
-        // The sockets have been drained; let them wake the loop again.
-        self.socket_wakeup.rearm();
+        self.shared.socket_wakeup.rearm();
         event_loop.set_control_flow(control_flow(self.next_update_deadline(Instant::now())));
     }
+}
 
-    /// Get the terminal state of the focused terminal.
-    fn terminal(&self) -> Option<ultty::event_loop::TerminalGuard<'_>> {
-        self.runtime
+impl WindowCtx<'_> {
+    /// Create a new tab in this window whose shell is wired to its own protocol socket.
+    pub(super) fn create_tab(&mut self) -> std::io::Result<TabId> {
+        self.app.create_tab_in_window(self.win.key)
+    }
+
+    /// Get the terminal state of this window's focused terminal.
+    pub(super) fn terminal(&self) -> Option<ultty::event_loop::TerminalGuard<'_>> {
+        self.app
+            .runtime
             .manager
-            .focused_terminal()
+            .window_focused_terminal(self.win.key)
             .map(|t| t.event_loop.terminal())
     }
 
-    /// Get mutable terminal state of the focused terminal.
-    fn terminal_mut(&mut self) -> Option<ultty::event_loop::TerminalGuard<'_>> {
-        self.runtime
+    /// Get mutable terminal state of this window's focused terminal.
+    pub(super) fn terminal_mut(&mut self) -> Option<ultty::event_loop::TerminalGuard<'_>> {
+        self.app
+            .runtime
             .manager
-            .focused_terminal_mut()
+            .window_focused_terminal_mut(self.win.key)
             .map(|t| t.event_loop.terminal_mut())
     }
 
-    /// Send input to the focused terminal, returning a scrolled-back viewport
-    /// to the live bottom so typed input is immediately visible.
-    fn send_input(&mut self, data: &[u8]) -> std::io::Result<()> {
-        if let Some(terminal) = self.runtime.manager.focused_terminal_mut() {
+    /// Send input to this window's focused terminal, returning a scrolled-back
+    /// viewport to the live bottom so typed input is immediately visible.
+    pub(super) fn send_input(&mut self, data: &[u8]) -> std::io::Result<()> {
+        if let Some(terminal) = self
+            .app
+            .runtime
+            .manager
+            .window_focused_terminal_mut(self.win.key)
+        {
             let mut scrolled_back = false;
             {
                 let mut term = terminal.event_loop.terminal_mut();
@@ -908,81 +1126,83 @@ impl App {
                 }
             }
             if scrolled_back {
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
-            self.input_sent_at = Some(Instant::now());
-            self.output_since_input = false;
+            self.win.input_sent_at = Some(Instant::now());
+            self.win.output_since_input = false;
             terminal.event_loop.send_input(data)
         } else {
             Ok(())
         }
     }
 
-    /// Send a report the terminal generates on its own (mouse motion,
-    /// focus changes). Unlike [`Self::send_input`] it does not mark the
-    /// output that follows as an echo to draw at once: a moving mouse in
-    /// vim or htop would otherwise force a frame for every motion event.
-    fn send_report(&mut self, data: &[u8]) -> std::io::Result<()> {
-        match self.runtime.manager.focused_terminal_mut() {
+    /// Send a report the terminal generates on its own (mouse motion, focus).
+    pub(super) fn send_report(&mut self, data: &[u8]) -> std::io::Result<()> {
+        match self
+            .app
+            .runtime
+            .manager
+            .window_focused_terminal_mut(self.win.key)
+        {
             Some(terminal) => terminal.event_loop.send_input(data),
             None => Ok(()),
         }
     }
 
-    /// Update the tab bar state from the terminal manager.
-    ///
-    /// This is the single hook every tab change goes through, so it also
-    /// syncs the protocol server's tab bookkeeping.
-    /// Show the focused pane's directory and git branch in the title band.
     fn update_title_location(&mut self) {
         let cwd = self
+            .app
             .runtime
             .manager
-            .focused_terminal()
+            .window_focused_terminal(self.win.key)
             .and_then(control::terminal_working_directory);
         let home = std::env::var("HOME").ok();
-        self.tab_bar.title_path = cwd
+        self.win.tab_bar.title_path = cwd
             .as_deref()
             .map(|dir| ultty::tabs::display_path(dir, home.as_deref()))
             .unwrap_or_default();
-        self.tab_bar.title_branch = cwd
+        self.win.tab_bar.title_branch = cwd
             .as_deref()
             .and_then(|dir| ultty::tabs::git_branch(std::path::Path::new(dir)));
         self.update_min_window_size();
     }
 
-    /// Keep the window from shrinking below what the title and three rows
-    /// need. Only tells the window when the size actually changes.
     fn update_min_window_size(&mut self) {
-        let (cell_width, cell_height) = self.renderer.cell_dimensions();
-        let (width, height) = self.tab_bar.min_window_size(cell_width, cell_height);
+        let (cell_width, cell_height) = self.win.renderer.cell_dimensions();
+        let (width, height) = self.win.tab_bar.min_window_size(cell_width, cell_height);
         let size = PhysicalSize::new(width as u32, height as u32);
-        if self.min_window_size != Some(size) {
-            self.min_window_size = Some(size);
-            self.window.set_min_inner_size(Some(size));
+        if self.win.min_window_size != Some(size) {
+            self.win.min_window_size = Some(size);
+            self.win.window.set_min_inner_size(Some(size));
         }
     }
 
-    fn update_tab_bar(&mut self) {
-        self.sync_protocol_tabs();
+    pub(super) fn update_tab_bar(&mut self) {
+        self.app.sync_protocol_tabs();
         let now = Instant::now();
-        self.last_tab_title_refresh = now;
-        self.tab_title_activity =
-            update::title_activity_after_refresh(self.tab_title_activity, now);
+        self.win.last_tab_title_refresh = now;
+        self.win.tab_title_activity =
+            update::title_activity_after_refresh(self.win.tab_title_activity, now);
 
-        let total_width = self.renderer.surface_size().0 as f32;
+        let total_width = self.win.renderer.surface_size().0 as f32;
         let active_tab_id = self
+            .app
             .runtime
             .manager
-            .active_tab()
+            .window_active_tab(self.win.key)
             .map(|t| t.id)
             .unwrap_or_else(|| TabId::new(0));
 
         let tab_width_override = self.active_tab_width_freeze().map(|freeze| freeze.width);
-        let tab_titles = self.runtime.manager.tab_display_titles();
+        let tab_titles = self
+            .app
+            .runtime
+            .manager
+            .window_tab_display_titles(self.win.key);
+        let window_tabs = self.app.runtime.manager.window_tabs(self.win.key);
 
-        self.tab_bar.update_with_titles_and_tab_width_override(
-            self.runtime.manager.tabs(),
+        self.win.tab_bar.update_with_tab_refs_and_width_override(
+            &window_tabs,
             &tab_titles,
             active_tab_id,
             total_width,
@@ -991,25 +1211,21 @@ impl App {
         self.update_title_location();
         self.update_tab_statuses();
 
-        // Update renderer's tab bar height for dimension calculations
-        let new_height = self.tab_bar.content_top();
-        let old_height = self.renderer.tab_bar_height();
+        let new_height = self.win.tab_bar.content_top();
+        let old_height = self.win.renderer.tab_bar_height();
 
         if (new_height - old_height).abs() > 0.1 {
-            self.renderer.set_tab_bar_height(new_height);
-
-            // The area under the bar changed: re-size every pane's grid.
+            self.win.renderer.set_tab_bar_height(new_height);
             self.relayout_terminals();
         }
 
-        self.refresh_runtime_wakeup_fds();
+        self.app.refresh_runtime_wakeup_fds();
     }
 
-    /// Show each tab's most urgent pane status, and the focused pane's in
-    /// the title band.
     fn update_tab_statuses(&mut self) {
-        let manager = &self.runtime.manager;
-        for (state, tab) in self.tab_bar.tabs.iter_mut().zip(manager.tabs()) {
+        let manager = &self.app.runtime.manager;
+        let window_tabs = manager.window_tabs(self.win.key);
+        for (state, tab) in self.win.tab_bar.tabs.iter_mut().zip(window_tabs) {
             state.status = tab
                 .terminals
                 .iter()
@@ -1017,82 +1233,68 @@ impl App {
                 .max_by_key(|status| status.urgency())
                 .cloned();
         }
-        self.tab_bar.title_status = manager
-            .focused_terminal()
+        self.win.tab_bar.title_status = manager
+            .window_focused_terminal(self.win.key)
             .and_then(|terminal| terminal.shown_status().cloned());
     }
 
-    fn freeze_tab_width_after_close(&mut self) {
-        let Some(width) = self.tab_bar.tabs.first().map(|tab| tab.width) else {
+    pub(super) fn freeze_tab_width_after_close(&mut self) {
+        let Some(width) = self.win.tab_bar.tabs.first().map(|tab| tab.width) else {
             return;
         };
 
-        self.tab_width_freeze = Some(TabWidthFreeze {
+        self.win.tab_width_freeze = Some(TabWidthFreeze {
             width,
             until: Instant::now() + TAB_CLOSE_WIDTH_FREEZE_DURATION,
         });
     }
 
-    fn clear_tab_width_freeze(&mut self) {
-        self.tab_width_freeze = None;
+    pub(super) fn clear_tab_width_freeze(&mut self) {
+        self.win.tab_width_freeze = None;
     }
 
     fn active_tab_width_freeze(&self) -> Option<TabWidthFreeze> {
-        self.tab_width_freeze
+        self.win
+            .tab_width_freeze
             .filter(|freeze| Instant::now() < freeze.until)
     }
 
-    fn expire_tab_width_freeze(&mut self, now: Instant) {
+    pub(super) fn expire_tab_width_freeze(&mut self, now: Instant) {
         if self
+            .win
             .tab_width_freeze
             .is_some_and(|freeze| now >= freeze.until)
         {
-            self.tab_width_freeze = None;
+            self.win.tab_width_freeze = None;
             self.update_tab_bar();
-            self.needs_redraw = true;
+            self.win.needs_redraw = true;
         }
     }
 
-    /// Socket fds the wakeup bridge watches. PTYs are not among them: each
-    /// terminal's I/O thread wakes the UI itself.
-    fn refresh_runtime_wakeup_fds(&mut self) {
-        let mut readable = Vec::new();
-        let mut writable = Vec::new();
-        if let Some(server) = self.runtime.protocol.as_ref() {
-            readable.extend(server.readiness_fds());
-        }
-        if let Some(server) = self.control_server.as_ref() {
-            readable.extend(server.readiness_fds());
-            writable.extend(server.writable_fds());
-        }
-        self.socket_wakeup.set_fds(readable, writable);
-    }
-
-    /// Extract text from a vim selection.
-    fn extract_selection_text(&self, selection: &VimSelection) -> String {
+    pub(super) fn extract_selection_text(&self, selection: &VimSelection) -> String {
         let Some(terminal) = self.terminal() else {
             return String::new();
         };
         extract_vim_selection_text(terminal.buffer(), selection)
     }
 
-    /// Perform search in scrollback.
-    fn perform_search(&mut self, query: &str) {
+    pub(super) fn perform_search(&mut self, query: &str) {
         use ultty::vim::search::{Matcher, SearchJob, SearchOptions};
         use ultty::vim::SearchStatus;
 
-        self.search_job = None;
+        self.win.search_job = None;
         if query.is_empty() {
             return;
         }
         let options = SearchOptions {
-            regex: self.copy_mode.search_regex(),
-            ..self.config.search
+            regex: self.win.copy_mode.search_regex(),
+            ..self.app.config.search
         };
         match Matcher::new(query, options) {
             Err(error) => {
-                self.copy_mode.begin_search();
-                self.copy_mode
+                self.win.copy_mode.begin_search();
+                self.win
+                    .copy_mode
                     .set_search_status(SearchStatus::Invalid(error.to_string()));
             }
             Ok(matcher) => {
@@ -1100,40 +1302,33 @@ impl App {
                     .terminal()
                     .map(|terminal| SearchJob::new(matcher, terminal.buffer()));
                 if job.is_some() {
-                    self.search_job = job;
-                    self.copy_mode.begin_search();
+                    self.win.search_job = job;
+                    self.win.copy_mode.begin_search();
                 }
             }
         }
 
-        // Also search native sessions if active
-        if self.native_search_active {
+        if self.win.native_search_active {
             self.perform_native_search(query);
         }
     }
 
-    /// Run the next slice of the copy-mode search, if one is under way, and
-    /// keep the matches clear of history the terminal has since evicted.
-    ///
-    /// The terminal lock is held for [`SEARCH_SLICE`] at most, so the
-    /// terminal keeps up with its PTY while a long scrollback is scanned.
-    fn advance_search(&mut self) {
+    pub(super) fn advance_search(&mut self) {
         use ultty::vim::SearchStatus;
 
         self.reconcile_copy_mode_pane();
-        if !self.copy_mode.is_active() {
-            self.search_job = None;
-            self.copy_mode_pane = None;
+        if !self.win.copy_mode.is_active() {
+            self.win.search_job = None;
+            self.win.copy_mode_pane = None;
             return;
         }
-        let Some(mut job) = self.search_job.take() else {
-            // No scan: only drop matches in rows evicted since.
-            if !self.copy_mode.search_matches().0.is_empty() {
+        let Some(mut job) = self.win.search_job.take() else {
+            if !self.win.copy_mode.search_matches().0.is_empty() {
                 let evicted = self.terminal().map(|t| t.buffer().evicted_lines());
                 if let Some(evicted) = evicted {
-                    let before = self.copy_mode.search_matches().0.len();
-                    self.copy_mode.rebase_search(evicted);
-                    self.needs_redraw |= self.copy_mode.search_matches().0.len() != before;
+                    let before = self.win.copy_mode.search_matches().0.len();
+                    self.win.copy_mode.rebase_search(evicted);
+                    self.win.needs_redraw |= self.win.copy_mode.search_matches().0.len() != before;
                 }
             }
             return;
@@ -1148,147 +1343,160 @@ impl App {
         if done {
             let (matches, evicted) = job.into_matches();
             tracing::debug!("Search finished: {} matches", matches.len());
-            self.copy_mode.finish_search(matches, evicted);
+            self.win.copy_mode.finish_search(matches, evicted);
         } else {
-            self.copy_mode
+            self.win
+                .copy_mode
                 .set_search_status(SearchStatus::Searching(percent));
-            self.search_job = Some(job);
+            self.win.search_job = Some(job);
         }
-        self.needs_redraw = true;
+        self.win.needs_redraw = true;
     }
 
-    /// Drop pane-local copy state before using a newly focused grid.
-    fn reconcile_copy_mode_pane(&mut self) {
-        self.needs_redraw |= reconcile_copy_mode_pane(
-            &mut self.copy_mode_pane,
-            &mut self.search_job,
-            &mut self.copy_mode,
-            self.runtime.manager.focused_terminal_id(),
+    pub(super) fn reconcile_copy_mode_pane(&mut self) {
+        self.win.needs_redraw |= reconcile_copy_mode_pane(
+            &mut self.win.copy_mode_pane,
+            &mut self.win.search_job,
+            &mut self.win.copy_mode,
+            self.app
+                .runtime
+                .manager
+                .window_focused_terminal_id(self.win.key),
         );
     }
 
-    /// Check if the visible tab has any native protocol sessions.
-    fn has_native_sessions(&self) -> bool {
-        self.runtime
+    pub(super) fn has_native_sessions(&self) -> bool {
+        let Some(active_tab) = self
+            .app
+            .runtime
+            .manager
+            .window_active_tab(self.win.key)
+            .map(|tab| tab.id)
+        else {
+            return false;
+        };
+        self.app
+            .runtime
             .protocol
             .as_ref()
-            .is_some_and(|s| s.active_tab_sessions().next().is_some())
+            .is_some_and(|s| s.tab_sessions(active_tab).next().is_some())
     }
 
-    /// Perform search across the visible tab's native protocol sessions.
     fn perform_native_search(&mut self, query: &str) {
-        self.native_search_query = query.to_string();
-        self.native_search_matches.clear();
-        self.native_search_index = 0;
+        self.win.native_search_query = query.to_string();
+        self.win.native_search_matches.clear();
+        self.win.native_search_index = 0;
 
-        if let Some(ref server) = self.runtime.protocol {
-            for session in server.active_tab_sessions() {
+        if let (Some(ref server), Some(active_tab)) = (
+            &self.app.runtime.protocol,
+            self.app
+                .runtime
+                .manager
+                .window_active_tab(self.win.key)
+                .map(|tab| tab.id),
+        ) {
+            for session in server.tab_sessions(active_tab) {
                 let matches = session.scene().search(query);
-                self.native_search_matches.extend(matches);
+                self.win.native_search_matches.extend(matches);
             }
         }
 
         tracing::debug!(
             "Native search '{}': found {} matches",
             query,
-            self.native_search_matches.len()
+            self.win.native_search_matches.len()
         );
     }
 
-    /// Navigate to the next native search match.
-    fn native_search_next(&mut self) {
-        if self.native_search_matches.is_empty() {
+    pub(super) fn native_search_next(&mut self) {
+        if self.win.native_search_matches.is_empty() {
             return;
         }
-        self.native_search_index =
-            (self.native_search_index + 1) % self.native_search_matches.len();
-        self.needs_redraw = true;
+        self.win.native_search_index =
+            (self.win.native_search_index + 1) % self.win.native_search_matches.len();
+        self.win.needs_redraw = true;
     }
 
-    /// Navigate to the previous native search match.
-    fn native_search_prev(&mut self) {
-        if self.native_search_matches.is_empty() {
+    pub(super) fn native_search_prev(&mut self) {
+        if self.win.native_search_matches.is_empty() {
             return;
         }
-        if self.native_search_index == 0 {
-            self.native_search_index = self.native_search_matches.len() - 1;
+        if self.win.native_search_index == 0 {
+            self.win.native_search_index = self.win.native_search_matches.len() - 1;
         } else {
-            self.native_search_index -= 1;
+            self.win.native_search_index -= 1;
         }
-        self.needs_redraw = true;
+        self.win.needs_redraw = true;
     }
 
-    /// Dismiss native search.
-    fn dismiss_native_search(&mut self) {
-        self.native_search_active = false;
-        self.native_search_matches.clear();
-        self.native_search_query.clear();
-        self.native_search_index = 0;
-        self.needs_redraw = true;
+    pub(super) fn dismiss_native_search(&mut self) {
+        self.win.native_search_active = false;
+        self.win.native_search_matches.clear();
+        self.win.native_search_query.clear();
+        self.win.native_search_index = 0;
+        self.win.needs_redraw = true;
     }
 
-    /// Update tab bar hover state.
-    fn update_tab_hover(&mut self) {
-        if !self.tab_bar.visible {
+    pub(super) fn update_tab_hover(&mut self) {
+        if !self.win.tab_bar.visible {
             return;
         }
 
-        let x = self.mouse_pos.x as f32;
-        let y = self.mouse_pos.y as f32;
+        let x = self.win.mouse_pos.x as f32;
+        let y = self.win.mouse_pos.y as f32;
 
-        let old_hovered_tab = self.tab_bar.hovered_tab;
-        let old_new_tab_hovered = self.tab_bar.new_tab_button_hovered;
-        let old_window_control = self.tab_bar.hovered_title_button;
-        let old_close_button = self.tab_bar.hovered_close_button;
-        self.tab_bar.set_hover(x, y);
-        let old_menu_item = self.tab_bar.hovered_menu_item;
-        if self.tab_bar.menu_open {
-            let (cell_width, cell_height) = self.renderer.cell_dimensions();
-            self.tab_bar.hovered_menu_item = self
+        let old_hovered_tab = self.win.tab_bar.hovered_tab;
+        let old_new_tab_hovered = self.win.tab_bar.new_tab_button_hovered;
+        let old_window_control = self.win.tab_bar.hovered_title_button;
+        let old_close_button = self.win.tab_bar.hovered_close_button;
+        self.win.tab_bar.set_hover(x, y);
+        let old_menu_item = self.win.tab_bar.hovered_menu_item;
+        if self.win.tab_bar.menu_open {
+            let (cell_width, cell_height) = self.win.renderer.cell_dimensions();
+            self.win.tab_bar.hovered_menu_item = self
+                .win
                 .tab_bar
                 .menu_layout(cell_width, cell_height)
                 .item_at(x, y);
-            if self.tab_bar.hovered_menu_item != old_menu_item {
-                self.needs_redraw = true;
+            if self.win.tab_bar.hovered_menu_item != old_menu_item {
+                self.win.needs_redraw = true;
             }
         }
 
-        // Redraw if hover state changed
-        if old_hovered_tab != self.tab_bar.hovered_tab
-            || old_new_tab_hovered != self.tab_bar.new_tab_button_hovered
-            || old_window_control != self.tab_bar.hovered_title_button
-            || old_close_button != self.tab_bar.hovered_close_button
+        if old_hovered_tab != self.win.tab_bar.hovered_tab
+            || old_new_tab_hovered != self.win.tab_bar.new_tab_button_hovered
+            || old_window_control != self.win.tab_bar.hovered_title_button
+            || old_close_button != self.win.tab_bar.hovered_close_button
         {
-            self.needs_redraw = true;
+            self.win.needs_redraw = true;
         }
     }
 
-    /// The client-side resize zone under physical (x, y), if any. Resizing
-    /// wins over the chrome buttons in the edge band, so every corner can
-    /// be grabbed; a maximized or screen-filling window has no zones, which
-    /// keeps its screen-corner close button a full target.
     pub(super) fn resize_direction_at(&self, x: f32, y: f32) -> Option<ResizeDirection> {
-        let size = self.window.inner_size();
-        let monitor_size = self.window.current_monitor().map(|monitor| monitor.size());
-        if window_should_use_square_corners(size, monitor_size, self.window.is_maximized()) {
+        let size = self.win.window.inner_size();
+        let monitor_size = self
+            .win
+            .window
+            .current_monitor()
+            .map(|monitor| monitor.size());
+        if window_should_use_square_corners(size, monitor_size, self.win.window.is_maximized()) {
             return None;
         }
-        let (cell_width, _) = self.renderer.cell_dimensions();
+        let (cell_width, _) = self.win.renderer.cell_dimensions();
         resize_direction_at_window_edge(
             x,
             y,
             size.width as f32,
             size.height as f32,
-            self.window.scale_factor() as f32,
-            self.tab_bar.content_top(),
+            self.win.window.scale_factor() as f32,
+            self.win.tab_bar.content_top(),
             cell_width,
         )
     }
 
-    /// Update cursor icon when hovering a client-side resize zone.
-    fn update_resize_cursor(&mut self) -> bool {
-        let x = self.mouse_pos.x as f32;
-        let y = self.mouse_pos.y as f32;
+    pub(super) fn update_resize_cursor(&mut self) -> bool {
+        let x = self.win.mouse_pos.x as f32;
+        let y = self.win.mouse_pos.y as f32;
         let Some(direction) = self.resize_direction_at(x, y) else {
             return false;
         };
@@ -1299,56 +1507,53 @@ impl App {
             ResizeDirection::West | ResizeDirection::East => CursorIcon::EwResize,
             ResizeDirection::North | ResizeDirection::South => CursorIcon::NsResize,
         };
-        self.window.set_cursor(cursor);
+        self.win.window.set_cursor(cursor);
         true
     }
 
-    fn update_cursor_for_url(&mut self) {
-        // Don't change cursor if hovering over tab bar
-        if self.tab_bar.visible && (self.mouse_pos.y as f32) < self.tab_bar.height() {
-            self.window.set_cursor(CursorIcon::Default);
+    pub(super) fn update_cursor_for_url(&mut self) {
+        if self.win.tab_bar.visible && (self.win.mouse_pos.y as f32) < self.win.tab_bar.height() {
+            self.win.window.set_cursor(CursorIcon::Default);
             return;
         }
 
-        if !self.url_detector.is_enabled() || !self.modifiers.control_key() {
-            self.window.set_cursor(CursorIcon::Default);
+        if !self.win.url_detector.is_enabled() || !self.win.modifiers.control_key() {
+            self.win.window.set_cursor(CursorIcon::Default);
             return;
         }
 
-        // Account for tab bar offset
-        let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
-        let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
-        if self.url_detector.has_url_at(col, row) {
-            self.window.set_cursor(CursorIcon::Pointer);
+        let adjusted_y = self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64;
+        let (col, row) = self.pixel_to_cell(self.win.mouse_pos.x, adjusted_y);
+        if self.win.url_detector.has_url_at(col, row) {
+            self.win.window.set_cursor(CursorIcon::Pointer);
         } else {
-            self.window.set_cursor(CursorIcon::Default);
+            self.win.window.set_cursor(CursorIcon::Default);
         }
     }
 
-    /// Update URL detection when terminal content changes.
-    fn update_url_detection(&mut self) {
-        if !self.url_detector.is_enabled() {
+    pub(super) fn update_url_detection(&mut self) {
+        if !self.win.url_detector.is_enabled() {
             return;
         }
 
-        // Reuse buffers: clear and refill instead of allocating new Vecs each frame
-        self.url_row_buf.clear();
-        self.url_hyperlink_grid.clear();
-        self.url_hyperlink_map.clear();
+        self.win.url_row_buf.clear();
+        self.win.url_hyperlink_grid.clear();
+        self.win.url_hyperlink_map.clear();
 
-        // Access terminal_manager directly (not self.terminal()) to enable
-        // disjoint field borrows — Rust can see url_row_buf/url_hyperlink_grid/
-        // url_hyperlink_map are separate from terminal_manager.
-        let Some(focused) = self.runtime.manager.focused_terminal() else {
+        let Some(focused) = self
+            .app
+            .runtime
+            .manager
+            .window_focused_terminal(self.win.key)
+        else {
             return;
         };
         let terminal = focused.event_loop.terminal();
         let dims = terminal.dimensions();
 
-        // Fill row text buffer
-        self.url_row_buf.reserve(dims.rows as usize);
+        self.win.url_row_buf.reserve(dims.rows as usize);
         for row in 0..dims.rows {
-            self.url_row_buf.push(
+            self.win.url_row_buf.push(
                 terminal
                     .buffer()
                     .visible_row(row)
@@ -1357,8 +1562,7 @@ impl App {
             );
         }
 
-        // Fill hyperlink grid buffer
-        self.url_hyperlink_grid.reserve(dims.rows as usize);
+        self.win.url_hyperlink_grid.reserve(dims.rows as usize);
         for row in 0..dims.rows {
             let mut row_links = Vec::with_capacity(dims.cols as usize);
             for col in 0..dims.cols {
@@ -1371,24 +1575,21 @@ impl App {
                         .unwrap_or(0),
                 );
             }
-            self.url_hyperlink_grid.push(row_links);
+            self.win.url_hyperlink_grid.push(row_links);
         }
 
-        // Fill hyperlink map buffer
         for (k, v) in terminal.all_hyperlinks().iter() {
-            self.url_hyperlink_map.insert(*k, v.clone());
+            self.win.url_hyperlink_map.insert(*k, v.clone());
         }
 
-        // Detect regex-based URLs
-        let rows = &self.url_row_buf;
-        self.url_detector.detect(rows.len() as u16, |row| {
+        let rows = &self.win.url_row_buf;
+        self.win.url_detector.detect(rows.len() as u16, |row| {
             rows.get(row as usize).cloned().unwrap_or_default()
         });
 
-        // Detect OSC 8 hyperlinks
-        let grid = &self.url_hyperlink_grid;
-        let map = &self.url_hyperlink_map;
-        self.url_detector.detect_hyperlinks(
+        let grid = &self.win.url_hyperlink_grid;
+        let map = &self.win.url_hyperlink_map;
+        self.win.url_detector.detect_hyperlinks(
             dims.rows,
             dims.cols,
             |row, col| {
@@ -1401,27 +1602,24 @@ impl App {
         );
     }
 
-    /// Handle pending column resize requests (DECCOLM - 132/80 column mode).
-    ///
-    /// Some legacy applications use CSI ?3h to switch to 132-column mode
-    /// and CSI ?3l to switch back to 80-column mode. This resizes the window
-    /// to accommodate the requested column count.
-    fn handle_column_resize_requests(&mut self) {
-        // Check if focused terminal has a pending resize request
-        if let Some(terminal) = self.runtime.manager.focused_terminal_mut() {
+    pub(super) fn handle_column_resize_requests(&mut self) {
+        if let Some(terminal) = self
+            .app
+            .runtime
+            .manager
+            .window_focused_terminal_mut(self.win.key)
+        {
             if let Some(columns) = terminal
                 .event_loop
                 .terminal_mut()
                 .take_column_resize_request()
             {
-                // Calculate new window size based on column count
-                let (cell_width, _) = self.renderer.cell_dimensions();
+                let (cell_width, _) = self.win.renderer.cell_dimensions();
                 let new_width = (columns as f32 * cell_width) as u32;
-                let current_height = self.window.inner_size().height;
+                let current_height = self.win.window.inner_size().height;
 
-                // Request window resize
                 let new_size = PhysicalSize::new(new_width, current_height);
-                if self.window.request_inner_size(new_size).is_some() {
+                if self.win.window.request_inner_size(new_size).is_some() {
                     tracing::info!(
                         "Requested window resize to {} columns ({} pixels wide)",
                         columns,
@@ -1429,99 +1627,93 @@ impl App {
                     );
                 }
 
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
         }
     }
 
-    /// Handle window resize.
-    /// Size every pane's terminal, in every tab, to the space it is drawn
-    /// in. Splits, pane closes and divider drags re-lay out from the same
-    /// area inside the terminal manager.
     pub(super) fn relayout_terminals(&mut self) {
-        let (width, height) = self.renderer.terminal_area();
-        let (cell_width, cell_height) = self.renderer.cell_dimensions();
+        let (width, height) = self.win.renderer.terminal_area();
+        let (cell_width, cell_height) = self.win.renderer.cell_dimensions();
         let area = ultty::terminal_manager::PaneArea {
             width,
             height,
             cell_width,
             cell_height,
         };
-        if let Err(e) = self.runtime.manager.layout_panes(area) {
+        if let Err(e) = self
+            .app
+            .runtime
+            .manager
+            .layout_window_panes(self.win.key, area)
+        {
             tracing::warn!("Failed to resize terminals: {}", e);
         }
     }
 
-    /// The window moved to a display with another scale factor, or the
-    /// display's scaling changed. Rescales the chrome and the font; winit
-    /// follows this with a `Resized` event that resizes the surface.
-    fn handle_scale_factor_changed(&mut self, scale_factor: f32) {
-        if scale_factor <= 0.0 || (scale_factor - self.scale_factor).abs() < f32::EPSILON {
+    pub(super) fn handle_scale_factor_changed(&mut self, scale_factor: f32) {
+        if scale_factor <= 0.0 || (scale_factor - self.win.scale_factor).abs() < f32::EPSILON {
             return;
         }
-        // Keep any zoom the user applied: the font stays the same size in
-        // logical points.
-        let font_size = self.renderer.font_size() / self.scale_factor * scale_factor;
+        let font_size = self.win.renderer.font_size() / self.win.scale_factor * scale_factor;
         tracing::info!(
             "Scale factor {} -> {}, font size {:.1}pt",
-            self.scale_factor,
+            self.win.scale_factor,
             scale_factor,
             font_size / scale_factor
         );
-        self.scale_factor = scale_factor;
-        self.tab_bar.scale = scale_factor;
-        self.renderer.set_font_size(font_size);
+        self.win.scale_factor = scale_factor;
+        self.win.tab_bar.scale = scale_factor;
+        self.win.renderer.set_font_size(font_size);
         self.update_tab_bar();
-        // Cell size changed: re-size every pane's grid.
         self.relayout_terminals();
-        self.needs_redraw = true;
+        self.win.needs_redraw = true;
     }
 
-    fn handle_resize(&mut self, size: PhysicalSize<u32>) {
+    pub(super) fn handle_resize(&mut self, size: PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
             return;
         }
 
-        // Resize renderer
-        self.renderer.resize(size.width, size.height);
+        self.win.renderer.resize(size.width, size.height);
         self.update_window_corner_radius();
         self.clear_tab_width_freeze();
         self.update_tab_bar();
 
-        // Get new terminal dimensions
-        let (cols, rows) = self.renderer.terminal_dimensions();
+        let (cols, rows) = self.win.renderer.terminal_dimensions();
         tracing::debug!("Resize: {}x{}", cols, rows);
 
-        // Size each pane's terminal to its own share of the window.
         self.relayout_terminals();
 
-        // Clamp copy mode cursor/scroll if active
-        if self.copy_mode.is_active() {
+        if self.win.copy_mode.is_active() {
             let total_rows = self
                 .terminal()
                 .map(|t| t.buffer().history_len() + t.dimensions().rows as usize)
                 .unwrap_or(rows as usize);
-            self.copy_mode
+            self.win
+                .copy_mode
                 .resize(total_rows, rows as usize, cols as usize);
         }
 
-        // Each session is sized to its pane, unbound ones to the window.
         self.sync_native_viewports();
-
-        self.needs_redraw = true;
+        self.win.needs_redraw = true;
     }
 
-    fn update_window_corner_radius(&mut self) {
-        let size = self.window.inner_size();
-        let monitor_size = self.window.current_monitor().map(|monitor| monitor.size());
+    pub(super) fn update_window_corner_radius(&mut self) {
+        let size = self.win.window.inner_size();
+        let monitor_size = self
+            .win
+            .window
+            .current_monitor()
+            .map(|monitor| monitor.size());
         let square_corners =
-            window_should_use_square_corners(size, monitor_size, self.window.is_maximized());
+            window_should_use_square_corners(size, monitor_size, self.win.window.is_maximized());
         let radius = if square_corners {
             0.0
         } else {
             WINDOW_CORNER_RADIUS
         };
-        if let Some(renderer) = self.renderer.ready_mut() {
+        if let Some(renderer) = self.win.renderer.ready_mut() {
             renderer.set_window_corner_radius(radius);
         }
     }
@@ -1770,7 +1962,12 @@ struct AppHandler {
 
 impl ApplicationHandler<AppEvent> for AppHandler {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.app.is_some() {
+        if let Some(app) = self.app.as_mut() {
+            if cfg!(target_os = "macos") && app.windows.is_empty() {
+                if let Err(error) = app.open_new_window(event_loop) {
+                    tracing::warn!("Failed to reopen window: {error:#}");
+                }
+            }
             return;
         }
         let config = self.config.take().unwrap_or_else(Config::load);
@@ -1781,8 +1978,11 @@ impl ApplicationHandler<AppEvent> for AppHandler {
             config,
         ) {
             Ok(mut app) => {
-                app.update_tab_bar();
-                app.relayout_terminals();
+                let primary = WindowKey::PRIMARY;
+                app.with_window(primary, |ctx| {
+                    ctx.update_tab_bar();
+                    ctx.relayout_terminals();
+                });
                 event_loop.set_control_flow(control_flow(app.next_update_deadline(Instant::now())));
                 self.app = Some(app);
             }
@@ -1796,11 +1996,14 @@ impl ApplicationHandler<AppEvent> for AppHandler {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
         if let Some(app) = self.app.as_mut() {
-            if app.handle_window_event(event) {
+            let Some(&key) = app.window_ids.get(&window_id) else {
+                return;
+            };
+            if app.handle_window_event_for(event_loop, key, event) {
                 event_loop.exit();
             }
         }
@@ -1815,31 +2018,47 @@ impl ApplicationHandler<AppEvent> for AppHandler {
             }
             AppEvent::Accessibility(event) => {
                 if let Some(app) = self.app.as_mut() {
-                    app.handle_accessibility_event(event.window_event);
+                    if let Some(&key) = app.window_ids.get(&event.window_id) {
+                        app.with_window(key, |ctx| {
+                            ctx.handle_accessibility_event(event.window_event);
+                        });
+                    }
                     app.update_and_schedule(event_loop);
                 }
             }
             AppEvent::ShutdownSignal => {
                 if let Some(app) = self.app.as_ref() {
-                    app.save_session();
+                    app.shared.save_session();
                 }
                 event_loop.exit();
             }
-            AppEvent::Renderer(gpu::Handoff(gpu)) => {
+            AppEvent::Renderer(gpu::Handoff { window_key, result }) => {
                 let Some(app) = self.app.as_mut() else {
                     return;
                 };
-                match gpu {
+                match result {
                     Ok(gpu) => {
-                        app.install_renderer(gpu);
+                        app.shared
+                            .shared_gpu
+                            .get_or_insert_with(|| gpu.shared.clone());
+                        app.with_window(window_key, |ctx| {
+                            ctx.install_renderer(gpu);
+                        });
                         app.update_and_schedule(event_loop);
                     }
-                    // As when the GPU was set up before the window's loop
-                    // ran: no frame was ever drawn, and Ultty exits with
-                    // the error.
                     Err(error) => {
-                        self.init_error = Some(error);
-                        event_loop.exit();
+                        if app.windows.len() <= 1 {
+                            self.init_error = Some(error);
+                            event_loop.exit();
+                        } else {
+                            tracing::error!(
+                                "GPU setup failed for window {}: {error:#}",
+                                window_key.raw()
+                            );
+                            if app.close_window(window_key) {
+                                event_loop.exit();
+                            }
+                        }
                     }
                 }
             }

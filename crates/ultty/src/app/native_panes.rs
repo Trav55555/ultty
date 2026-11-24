@@ -1,17 +1,18 @@
 //! Native sessions in panes (ADR 0025): each session is bound to the pane
 //! whose PTY runs its app and kept at that pane's size.
 
-use super::App;
+use super::WindowCtx;
 use ultty::pane_layout::Rect;
 use ultty::terminal_manager::TerminalId;
 use ultty_protocol::{InputType, MouseButton};
 
-impl App {
+impl WindowCtx<'_> {
     /// Size native sessions to their current panes and window grid.
     pub(super) fn sync_native_viewports(&mut self) {
-        self.runtime
-            .set_fallback_grid(self.renderer.terminal_dimensions());
-        self.runtime.sync_native_viewports();
+        self.app
+            .runtime
+            .set_fallback_grid(self.win.renderer.terminal_dimensions());
+        self.app.runtime.sync_native_viewports();
     }
 }
 

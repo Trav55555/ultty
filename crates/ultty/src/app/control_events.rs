@@ -1,10 +1,10 @@
 //! Application control event publication.
 
-use super::App;
+use super::ProcessState;
 use ultty::control::events::pane_changes;
 pub(super) use ultty::control::events::{control_event, open_panes};
 
-impl App {
+impl ProcessState {
     /// Tell subscribers about panes opened or closed since the last call,
     /// whether by a key binding, a control request or a shell exiting.
     pub(super) fn publish_pane_changes(&mut self) {

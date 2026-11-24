@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use super::{App, CLICK_THRESHOLD};
+use super::{App, WindowCtx, CLICK_THRESHOLD};
 use ultty::action::Action;
 use ultty::command_palette::PaletteKey;
 use ultty::config::KeybindingConfig;
@@ -18,23 +18,25 @@ use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, W
 use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
-impl App {
-    /// Handle window event. Returns true if should exit.
+impl WindowCtx<'_> {
+    /// Handle a window event for this window. Returns `true` if this window
+    /// requested to be closed.
     pub(super) fn handle_window_event(&mut self, event: WindowEvent) -> bool {
-        if let Some(adapter) = self.accessibility.as_mut() {
-            adapter.process_event(&self.window, &event);
+        if matches!(event, WindowEvent::Destroyed) {
+            tracing::info!("Window {} destroyed", self.win.key.raw());
+            return true;
         }
-        // Check for pending close from window control button
-        if self.pending_close {
-            tracing::info!("Close requested");
-            self.save_session();
+        if let Some(adapter) = self.win.accessibility.as_mut() {
+            adapter.process_event(&self.win.window, &event);
+        }
+        if self.win.pending_close {
+            tracing::info!("Close requested for window {}", self.win.key.raw());
             return true;
         }
 
         match event {
             WindowEvent::CloseRequested => {
-                tracing::info!("Close requested");
-                self.save_session();
+                tracing::info!("Close requested for window {}", self.win.key.raw());
                 return true;
             }
             WindowEvent::Resized(size) => {
@@ -45,19 +47,18 @@ impl App {
                 self.handle_scale_factor_changed(scale_factor as f32);
             }
             WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
+                self.win.modifiers = mods.state();
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.handle_key(event);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.mouse_pos = position;
-                if self.reported_button.is_some() {
+                self.win.mouse_pos = position;
+                if self.win.reported_button.is_some() {
                     self.report_mouse_drag();
-                } else if self.mouse_pressed {
+                } else if self.win.mouse_pressed {
                     self.handle_mouse_drag();
                 } else if self.terminal().is_some_and(|t| t.track_mouse_motion()) {
-                    // AnyEvent mode reports motion even without button pressed
                     self.handle_mouse_motion();
                 }
                 self.update_tab_hover();
@@ -84,7 +85,7 @@ impl App {
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.set_ime_preedit(String::new());
-                if self.command_palette.is_open() {
+                if self.win.command_palette.is_open() {
                     self.palette_input(PaletteKey::Text(&text));
                     return false;
                 }
@@ -96,30 +97,27 @@ impl App {
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(),
-            WindowEvent::Occluded(occluded) => self.set_occluded(occluded),
+            WindowEvent::Occluded(occluded) => self.win.set_occluded(occluded),
             WindowEvent::Focused(focused) => {
                 if focused {
-                    // Clear a bell's urgency hint; X11 keeps it until cleared.
-                    self.window.request_user_attention(None);
+                    self.win.window.request_user_attention(None);
                 } else {
-                    // A button held when focus went will not be seen released.
-                    self.native_mouse_capture.clear();
+                    self.win.native_mouse_capture.clear();
                     self.cancel_native_transcript_selection();
                 }
                 if self.terminal().is_some_and(|t| t.modes().focus_reporting) {
-                    // Send focus in/out escape sequence
                     let seq = if focused { b"\x1b[I" } else { b"\x1b[O" };
                     let _ = self.send_report(seq);
                 }
             }
             _ => {}
         }
-        false
+        self.win.pending_close
     }
 
     /// Convert pixel position to terminal cell coordinates.
     pub(super) fn pixel_to_cell(&self, x: f64, y: f64) -> (u16, u16) {
-        let (cell_width, cell_height) = self.renderer.cell_dimensions();
+        let (cell_width, cell_height) = self.win.renderer.cell_dimensions();
         if cell_width <= 0.0 || cell_height <= 0.0 {
             return (0, 0);
         }
@@ -128,21 +126,15 @@ impl App {
         (col, row)
     }
 
-    /// Convert winit modifiers to terminal mouse modifiers.
     fn mouse_modifiers(&self) -> MouseModifiers {
         MouseModifiers::new(
-            self.modifiers.shift_key(),
-            self.modifiers.alt_key(),
-            self.modifiers.control_key(),
-            self.modifiers.super_key(),
+            self.win.modifiers.shift_key(),
+            self.win.modifiers.alt_key(),
+            self.win.modifiers.control_key(),
+            self.win.modifiers.super_key(),
         )
     }
 
-    /// Forward a mouse event at `(x, y)`, in pixels below the tab bar, to
-    /// the native sessions of the pane under it, in that pane's cells (ADR
-    /// 0025 §4). While a button is held, moves and the release go to the
-    /// pane that took the press, wherever the pointer is. Returns true if
-    /// there was a pane to send it to.
     fn forward_mouse_to_native_sessions(
         &mut self,
         event_type: ultty_protocol::InputType,
@@ -150,17 +142,28 @@ impl App {
         y: f64,
     ) -> bool {
         let modifiers = self.winit_mods_to_protocol();
-        let (cell_width, cell_height) = self.renderer.cell_dimensions();
-        let (width, height) = self.renderer.terminal_area();
-        // The capture is kept whatever happens below: a release always
-        // ends it, even one that goes nowhere.
-        let target = self.native_mouse_capture.route(
+        let (cell_width, cell_height) = self.win.renderer.cell_dimensions();
+        let (width, height) = self.win.renderer.terminal_area();
+        let target = self.win.native_mouse_capture.route(
             &event_type,
-            &self.runtime.manager.active_pane_rects(width, height),
+            &self
+                .app
+                .runtime
+                .manager
+                .window_active_pane_rects(self.win.key, width, height),
             (x as f32, y as f32),
             (cell_width, cell_height),
         );
-        let Some(ref mut server) = self.runtime.protocol else {
+        let Some(active_tab) = self
+            .app
+            .runtime
+            .manager
+            .window_active_tab(self.win.key)
+            .map(|tab| tab.id)
+        else {
+            return false;
+        };
+        let Some(ref mut server) = self.app.runtime.protocol else {
             return false;
         };
         if server.session_count() == 0 || cell_width <= 0.0 || cell_height <= 0.0 {
@@ -169,11 +172,10 @@ impl App {
         let Some((pane, cell_x, cell_y)) = target else {
             return false;
         };
-        server.broadcast_mouse(pane, event_type, cell_x, cell_y, modifiers);
+        server.send_mouse_to_tab_pane(active_tab, pane, event_type, cell_x, cell_y, modifiers);
         true
     }
 
-    /// Convert winit MouseButton to protocol MouseButton.
     fn winit_to_protocol_mouse_button(button: MouseButton) -> Option<ultty_protocol::MouseButton> {
         match button {
             MouseButton::Left => Some(ultty_protocol::MouseButton::Left),
@@ -183,7 +185,6 @@ impl App {
         }
     }
 
-    /// Handle mouse button press/release.
     fn handle_mouse_button(&mut self, button: MouseButton, state: ElementState) {
         if button != MouseButton::Left
             && button != MouseButton::Middle
@@ -192,23 +193,21 @@ impl App {
             return;
         }
 
-        let x = self.mouse_pos.x as f32;
-        let y = self.mouse_pos.y as f32;
+        let x = self.win.mouse_pos.x as f32;
+        let y = self.win.mouse_pos.y as f32;
 
-        // A click anywhere closes the command palette, and does nothing else.
-        if self.command_palette.is_open() {
+        if self.win.command_palette.is_open() {
             if state == ElementState::Pressed {
                 self.close_command_palette();
             }
             return;
         }
 
-        // An open menu takes every click: an item runs, anything else closes
-        // it. Nothing reaches the terminal or the chrome underneath.
-        if self.tab_bar.menu_open {
+        if self.win.tab_bar.menu_open {
             if state == ElementState::Pressed {
-                let (cell_width, cell_height) = self.renderer.cell_dimensions();
+                let (cell_width, cell_height) = self.win.renderer.cell_dimensions();
                 let item = self
+                    .win
                     .tab_bar
                     .menu_layout(cell_width, cell_height)
                     .item_at(x, y)
@@ -221,28 +220,22 @@ impl App {
             return;
         }
 
-        // A program tracking the mouse gets its presses, except with Shift
-        // held, which selects text as in other terminals. A release goes
-        // where its press went.
         let report_to_program = !self.native_transcript_selection_active()
             && !(state == ElementState::Pressed
                 && button == MouseButton::Left
                 && self.native_transcript_at_pointer())
             && self.terminal().is_some_and(|t| t.mouse_tracking_enabled())
             && if state == ElementState::Pressed {
-                !self.modifiers.shift_key()
+                !self.win.modifiers.shift_key()
             } else {
-                self.reported_button.is_some()
+                self.win.reported_button.is_some()
             };
         if report_to_program {
-            // Don't intercept UI elements when mouse tracking is on
-            if self.tab_bar.visible && y < self.tab_bar.height() {
-                // Still allow tab bar interaction
+            if self.win.tab_bar.visible && y < self.win.tab_bar.height() {
             } else {
-                // Convert to cell coordinates and send to terminal
                 let (col, row) = self.pixel_to_cell(
-                    self.mouse_pos.x,
-                    self.mouse_pos.y - self.tab_bar.content_top() as f64,
+                    self.win.mouse_pos.x,
+                    self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64,
                 );
                 let term_button = match button {
                     MouseButton::Left => TerminalMouseButton::Left,
@@ -251,13 +244,11 @@ impl App {
                     _ => return,
                 };
                 let pressed = state == ElementState::Pressed;
-                // A release names the button that was down (SGR reports
-                // it; the legacy encodings turn any release into 3).
                 let term_button = if pressed {
-                    self.reported_button = Some(term_button);
+                    self.win.reported_button = Some(term_button);
                     term_button
                 } else {
-                    self.reported_button.take().unwrap_or(term_button)
+                    self.win.reported_button.take().unwrap_or(term_button)
                 };
                 let mods = self.mouse_modifiers();
                 if let Some(bytes) = self
@@ -272,25 +263,22 @@ impl App {
 
         match state {
             ElementState::Pressed => {
-                // Edge resize for CSD (no native decorations)
                 if button == MouseButton::Left {
-                    if !self.tab_bar.is_title_bar_toggle_area(x, y) {
-                        self.last_title_bar_toggle_click_time =
+                    if !self.win.tab_bar.is_title_bar_toggle_area(x, y) {
+                        self.win.last_title_bar_toggle_click_time =
                             Instant::now() - CLICK_THRESHOLD * 2;
                     }
 
                     if let Some(direction) = self.resize_direction_at(x, y) {
-                        let _ = self.window.drag_resize_window(direction);
+                        let _ = self.win.window.drag_resize_window(direction);
                         return;
                     }
                 }
 
-                // Check for tab bar clicks first
-                if self.tab_bar.visible && y < self.tab_bar.height() {
-                    // Window control buttons
+                if self.win.tab_bar.visible && y < self.win.tab_bar.height() {
                     if button == MouseButton::Left {
-                        // "+" is handled with the tab row's "+" below.
                         if let Some(control) = self
+                            .win
                             .tab_bar
                             .title_button_at(x, y)
                             .filter(|button| *button != ultty::tabs::TitleButton::NewTab)
@@ -298,13 +286,15 @@ impl App {
                             use ultty::tabs::TitleButton;
                             match control {
                                 TitleButton::Close => {
-                                    self.pending_close = true;
+                                    self.win.pending_close = true;
                                 }
                                 TitleButton::Maximize => {
-                                    self.window.set_maximized(!self.window.is_maximized());
+                                    self.win
+                                        .window
+                                        .set_maximized(!self.win.window.is_maximized());
                                 }
                                 TitleButton::Minimize => {
-                                    self.window.set_minimized(true);
+                                    self.win.window.set_minimized(true);
                                 }
                                 TitleButton::SplitRight => {
                                     self.split_pane(SplitDirection::Horizontal);
@@ -313,122 +303,148 @@ impl App {
                                     self.split_pane(SplitDirection::Vertical);
                                 }
                                 TitleButton::Menu => {
-                                    self.tab_bar.menu_open = true;
-                                    self.tab_bar.hovered_menu_item = None;
-                                    self.needs_redraw = true;
+                                    self.win.tab_bar.menu_open = true;
+                                    self.win.tab_bar.hovered_menu_item = None;
+                                    self.win.needs_redraw = true;
                                 }
                                 TitleButton::NewTab => {}
                             }
                             return;
                         }
 
-                        // Draggable title bar area
-                        if self.tab_bar.is_drag_area(x, y) {
-                            if self.tab_bar.is_title_bar_toggle_area(x, y) {
+                        if self.win.tab_bar.is_drag_area(x, y) {
+                            if self.win.tab_bar.is_title_bar_toggle_area(x, y) {
                                 let now = Instant::now();
-                                if now.duration_since(self.last_title_bar_toggle_click_time)
+                                if now.duration_since(self.win.last_title_bar_toggle_click_time)
                                     < CLICK_THRESHOLD
                                 {
-                                    self.window.set_maximized(!self.window.is_maximized());
-                                    self.last_title_bar_toggle_click_time =
+                                    self.win
+                                        .window
+                                        .set_maximized(!self.win.window.is_maximized());
+                                    self.win.last_title_bar_toggle_click_time =
                                         now - CLICK_THRESHOLD * 2;
                                     return;
                                 }
-                                self.last_title_bar_toggle_click_time = now;
+                                self.win.last_title_bar_toggle_click_time = now;
                             }
-                            let _ = self.window.drag_window();
+                            let _ = self.win.window.drag_window();
                             return;
                         }
                     }
 
-                    let is_tab_row =
-                        self.tab_bar.shows_tab_row() && y >= self.tab_bar.title_bar_height();
+                    let is_tab_row = self.win.tab_bar.shows_tab_row()
+                        && y >= self.win.tab_bar.title_bar_height();
 
-                    // Middle click closes tab
                     if button == MouseButton::Middle && is_tab_row {
-                        if let Some(tab_idx) = self.tab_bar.tab_at_x(x) {
-                            if self.runtime.manager.tab_count() > 1 {
-                                let tabs = self.runtime.manager.tabs();
-                                if let Some(tab) = tabs.get(tab_idx) {
-                                    let tab_id = tab.id;
+                        if let Some(tab_idx) = self.win.tab_bar.tab_at_x(x) {
+                            if self.app.runtime.manager.window_tab_count(self.win.key) > 1 {
+                                let tab_id = self
+                                    .app
+                                    .runtime
+                                    .manager
+                                    .window_tabs(self.win.key)
+                                    .get(tab_idx)
+                                    .map(|tab| tab.id);
+                                if let Some(tab_id) = tab_id {
                                     self.freeze_tab_width_after_close();
-                                    self.runtime.manager.close_tab(tab_id);
+                                    self.app.runtime.manager.close_tab(tab_id);
                                     tracing::info!("Closed tab {} via middle click", tab_idx);
                                     self.update_tab_bar();
-                                    self.needs_redraw = true;
+                                    self.win.needs_redraw = true;
                                 }
                             }
                         }
                         return;
                     }
 
-                    // Check for close button click
-                    if let Some(tab_idx) = self.tab_bar.close_button_at(x, y) {
-                        if self.runtime.manager.tab_count() > 1 {
-                            let tabs = self.runtime.manager.tabs();
-                            if let Some(tab) = tabs.get(tab_idx) {
-                                let tab_id = tab.id;
+                    if let Some(tab_idx) = self.win.tab_bar.close_button_at(x, y) {
+                        if self.app.runtime.manager.window_tab_count(self.win.key) > 1 {
+                            let tab_id = self
+                                .app
+                                .runtime
+                                .manager
+                                .window_tabs(self.win.key)
+                                .get(tab_idx)
+                                .map(|tab| tab.id);
+                            if let Some(tab_id) = tab_id {
                                 self.freeze_tab_width_after_close();
-                                self.runtime.manager.close_tab(tab_id);
+                                self.app.runtime.manager.close_tab(tab_id);
                                 tracing::info!("Closed tab {} via close button", tab_idx);
                                 self.update_tab_bar();
-                                self.needs_redraw = true;
+                                self.win.needs_redraw = true;
                             }
                         }
                         return;
                     }
 
-                    // Click on "+" new tab button
-                    if button == MouseButton::Left && self.tab_bar.is_new_tab_button_at(x, y) {
+                    if button == MouseButton::Left && self.win.tab_bar.is_new_tab_button_at(x, y) {
                         match self.create_tab() {
                             Ok(_) => {
                                 self.clear_tab_width_freeze();
                                 tracing::info!("Created new tab via + button");
                                 self.update_tab_bar();
-                                self.needs_redraw = true;
+                                self.win.needs_redraw = true;
                             }
                             Err(e) => tracing::warn!("Failed to create tab: {}", e),
                         }
                         return;
                     }
 
-                    // Click on tab - start drag and switch to it
                     if is_tab_row {
-                        if let Some(tab_idx) = self.tab_bar.tab_at_x(x) {
-                            self.tab_bar.start_drag(tab_idx, x);
-                            self.runtime.manager.switch_to_tab(tab_idx);
+                        if let Some(tab_idx) = self.win.tab_bar.tab_at_x(x) {
+                            self.win.tab_bar.start_drag(tab_idx, x);
+                            self.app
+                                .runtime
+                                .manager
+                                .switch_to_tab_in_window(self.win.key, tab_idx);
                             self.update_tab_bar();
-                            self.needs_redraw = true;
+                            self.win.needs_redraw = true;
                             tracing::debug!("Started drag on tab {}", tab_idx);
                         }
                     }
                     return;
                 }
 
-                // Not in tab bar - handle normal clicks
+                if button == MouseButton::Left
+                    && self.app.runtime.manager.window_pane_count(self.win.key) > 1
+                {
+                    let content_y = y - self.win.tab_bar.content_top();
+                    let (aw, ah) = self.win.renderer.terminal_area();
 
-                // In multi-pane mode, check for divider drag or pane focus
-                if button == MouseButton::Left && self.runtime.manager.pane_count() > 1 {
-                    let content_y = y - self.tab_bar.content_top();
-                    let (aw, ah) = self.renderer.terminal_area();
-
-                    // A divider within 4 px: start dragging it.
-                    if let Some(divider) =
-                        self.runtime.manager.divider_at(x, content_y, aw, ah, 4.0)
-                    {
+                    if let Some(divider) = self.app.runtime.manager.window_divider_at(
+                        self.win.key,
+                        x,
+                        content_y,
+                        aw,
+                        ah,
+                        4.0,
+                    ) {
                         let along = match divider.direction {
                             SplitDirection::Horizontal => x,
                             SplitDirection::Vertical => content_y,
                         };
-                        self.divider_dragging = Some((divider, along));
+                        self.win.divider_dragging = Some((divider, along));
                         return;
                     }
 
-                    // Otherwise, focus the clicked pane
-                    if let Some(pane) = self.runtime.manager.pane_at(x, content_y, aw, ah) {
-                        if Some(pane) != self.runtime.manager.focused_terminal_id() {
-                            self.runtime.manager.focus_terminal(pane);
-                            self.needs_redraw = true;
+                    if let Some(pane) =
+                        self.app
+                            .runtime
+                            .manager
+                            .window_pane_at(self.win.key, x, content_y, aw, ah)
+                    {
+                        if Some(pane)
+                            != self
+                                .app
+                                .runtime
+                                .manager
+                                .window_focused_terminal_id(self.win.key)
+                        {
+                            self.app
+                                .runtime
+                                .manager
+                                .window_focus_terminal(self.win.key, pane);
+                            self.win.needs_redraw = true;
                         }
                     }
                 }
@@ -437,31 +453,29 @@ impl App {
                     return;
                 }
                 if self.begin_native_transcript_selection() {
-                    self.mouse_pressed = true;
+                    self.win.mouse_pressed = true;
                     return;
                 }
                 self.cancel_native_transcript_selection();
 
                 let (col, row) = self.pixel_to_cell(
-                    self.mouse_pos.x,
-                    self.mouse_pos.y - self.tab_bar.content_top() as f64,
+                    self.win.mouse_pos.x,
+                    self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64,
                 );
 
-                // Forward to native protocol sessions
                 if let Some(proto_button) = Self::winit_to_protocol_mouse_button(button) {
                     let event_type = ultty_protocol::InputType::MouseDown {
                         button: proto_button,
                     };
                     self.forward_mouse_to_native_sessions(
                         event_type,
-                        self.mouse_pos.x,
-                        self.mouse_pos.y - self.tab_bar.content_top() as f64,
+                        self.win.mouse_pos.x,
+                        self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64,
                     );
                 }
 
-                // Check for Ctrl+Click on URL
-                if self.modifiers.control_key() && self.url_detector.is_enabled() {
-                    if let Some(url) = self.url_detector.url_at(col, row) {
+                if self.win.modifiers.control_key() && self.win.url_detector.is_enabled() {
+                    if let Some(url) = self.win.url_detector.url_at(col, row) {
                         let url_str = url.url.clone();
                         if let Err(e) = UrlDetector::open_url(&url_str) {
                             tracing::warn!("{}", e);
@@ -472,30 +486,27 @@ impl App {
                     }
                 }
 
-                self.mouse_pressed = true;
+                self.win.mouse_pressed = true;
 
-                // Detect double/triple clicks
                 let now = Instant::now();
-                let same_cell = (col, row) == self.last_click_pos;
-                let quick_click = now.duration_since(self.last_click_time) < CLICK_THRESHOLD;
+                let same_cell = (col, row) == self.win.last_click_pos;
+                let quick_click = now.duration_since(self.win.last_click_time) < CLICK_THRESHOLD;
 
                 if same_cell && quick_click {
-                    self.click_count = (self.click_count % 3) + 1;
+                    self.win.click_count = (self.win.click_count % 3) + 1;
                 } else {
-                    self.click_count = 1;
+                    self.win.click_count = 1;
                 }
 
-                self.last_click_time = now;
-                self.last_click_pos = (col, row);
+                self.win.last_click_time = now;
+                self.win.last_click_pos = (col, row);
 
-                // Start selection based on click count and modifiers
-                // Alt+drag enables block/rectangular selection
-                let mode = if self.modifiers.alt_key() && self.click_count == 1 {
+                let mode = if self.win.modifiers.alt_key() && self.win.click_count == 1 {
                     SelectionMode::Block
                 } else {
-                    match self.click_count {
+                    match self.win.click_count {
                         1 => SelectionMode::Normal,
-                        2 => SelectionMode::Normal, // Word selection handled differently
+                        2 => SelectionMode::Normal,
                         3 => SelectionMode::Line,
                         _ => SelectionMode::Normal,
                     }
@@ -503,52 +514,48 @@ impl App {
 
                 let point = SelectionPoint::new(col as i32, row as i32);
 
-                if self.click_count == 2 && !self.modifiers.alt_key() {
-                    // Word selection - find word boundaries (not in block mode)
+                if self.win.click_count == 2 && !self.win.modifiers.alt_key() {
                     self.select_word(col, row);
                 } else if let Some(mut t) = self.terminal_mut() {
                     t.start_selection(point, mode);
                 }
 
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
             ElementState::Released => {
                 if button == MouseButton::Left && self.native_transcript_selection_active() {
                     self.end_native_transcript_selection();
-                    self.mouse_pressed = false;
-                    if self.config.behavior.copy_on_select {
+                    self.win.mouse_pressed = false;
+                    if self.app.config.behavior.copy_on_select {
                         self.native_transcript_copy();
                     }
                     return;
                 }
-                self.mouse_pressed = false;
-                self.reported_button = None;
-                self.divider_dragging = None;
+                self.win.mouse_pressed = false;
+                self.win.reported_button = None;
+                self.win.divider_dragging = None;
 
-                // Forward MouseUp to native protocol sessions
                 if let Some(proto_button) = Self::winit_to_protocol_mouse_button(button) {
-                    let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
+                    let adjusted_y = self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64;
                     let event_type = ultty_protocol::InputType::MouseUp {
                         button: proto_button,
                     };
                     self.forward_mouse_to_native_sessions(
                         event_type,
-                        self.mouse_pos.x,
+                        self.win.mouse_pos.x,
                         adjusted_y.max(0.0),
                     );
                 }
 
-                // End tab drag if active
-                if self.tab_bar.is_dragging() {
-                    self.tab_bar.end_drag();
-                    self.needs_redraw = true;
+                if self.win.tab_bar.is_dragging() {
+                    self.win.tab_bar.end_drag();
+                    self.win.needs_redraw = true;
                 }
 
-                // Copy selection to clipboard on release (if copy_on_select enabled)
-                if self.config.behavior.copy_on_select {
+                if self.app.config.behavior.copy_on_select {
                     if let Some(text) = self.terminal().and_then(|t| t.selected_text()) {
                         if !text.is_empty() {
-                            self.copy_to_clipboard(&text);
+                            self.app.copy_to_clipboard(&text);
                         }
                     }
                 }
@@ -556,69 +563,71 @@ impl App {
         }
     }
 
-    /// Handle mouse drag for selection.
     fn handle_mouse_drag(&mut self) {
         if self.native_transcript_selection_active() {
             self.update_native_transcript_selection();
             return;
         }
-        // Handle tab bar dragging
-        if self.tab_bar.is_dragging() {
-            let x = self.mouse_pos.x as f32;
-            if let Some((from, to)) = self.tab_bar.update_drag(x) {
-                // Reorder tabs in terminal manager
-                if self.runtime.manager.reorder_tabs(from, to) {
+        if self.win.tab_bar.is_dragging() {
+            let x = self.win.mouse_pos.x as f32;
+            if let Some((from, to)) = self.win.tab_bar.update_drag(x) {
+                if self
+                    .app
+                    .runtime
+                    .manager
+                    .reorder_window_tabs(self.win.key, from, to)
+                {
                     self.update_tab_bar();
                     tracing::debug!("Reordered tab {} to {}", from, to);
                 }
             }
-            self.needs_redraw = true;
+            self.win.needs_redraw = true;
             return;
         }
 
-        // Handle pane divider dragging
-        if let Some((divider, last_pos)) = self.divider_dragging {
+        if let Some((divider, last_pos)) = self.win.divider_dragging {
             let current_pos = match divider.direction {
-                SplitDirection::Horizontal => self.mouse_pos.x as f32,
-                SplitDirection::Vertical => self.mouse_pos.y as f32 - self.tab_bar.content_top(),
+                SplitDirection::Horizontal => self.win.mouse_pos.x as f32,
+                SplitDirection::Vertical => {
+                    self.win.mouse_pos.y as f32 - self.win.tab_bar.content_top()
+                }
             };
             let delta = current_pos - last_pos;
             if delta.abs() > 1.0 {
-                self.runtime.manager.drag_divider(&divider, delta);
-                self.divider_dragging = Some((divider, current_pos));
-                self.needs_redraw = true;
+                self.app
+                    .runtime
+                    .manager
+                    .window_drag_divider(self.win.key, &divider, delta);
+                self.win.divider_dragging = Some((divider, current_pos));
+                self.win.needs_redraw = true;
             }
             return;
         }
 
-        // Account for tab bar offset
-        let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
+        let adjusted_y = self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64;
         if adjusted_y < 0.0 {
-            return; // Dragging in tab bar area
+            return;
         }
 
-        // Forward mouse move to native protocol sessions
         self.forward_mouse_to_native_sessions(
             ultty_protocol::InputType::MouseMove,
-            self.mouse_pos.x,
+            self.win.mouse_pos.x,
             adjusted_y,
         );
 
-        let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
+        let (col, row) = self.pixel_to_cell(self.win.mouse_pos.x, adjusted_y);
         let point = SelectionPoint::new(col as i32, row as i32);
 
         if let Some(mut t) = self.terminal_mut() {
             t.update_selection(point);
         }
-        self.needs_redraw = true;
+        self.win.needs_redraw = true;
     }
 
-    /// Report motion with a button held to a program that tracks the mouse
-    /// (modes 1002 and 1003), as a drag of that button.
     fn report_mouse_drag(&mut self) {
-        let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
-        let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y.max(0.0));
-        let Some(button) = self.reported_button else {
+        let adjusted_y = self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64;
+        let (col, row) = self.pixel_to_cell(self.win.mouse_pos.x, adjusted_y.max(0.0));
+        let Some(button) = self.win.reported_button else {
             return;
         };
         let mods = self.mouse_modifiers();
@@ -630,15 +639,13 @@ impl App {
         }
     }
 
-    /// Handle mouse motion without button pressed (for AnyEvent mode).
     fn handle_mouse_motion(&mut self) {
-        let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
+        let adjusted_y = self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64;
         if adjusted_y < 0.0 {
-            return; // In tab bar area
+            return;
         }
 
-        let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y);
-        // Motion without button uses Release (3) + motion flag (32) = 35
+        let (col, row) = self.pixel_to_cell(self.win.mouse_pos.x, adjusted_y);
         let mods = self.mouse_modifiers();
         if let Some(bytes) = self.terminal().and_then(|t| {
             t.encode_mouse_event(TerminalMouseButton::Release, col, row, true, true, mods)
@@ -648,9 +655,9 @@ impl App {
     }
 
     pub(super) fn close_menu(&mut self) {
-        self.tab_bar.menu_open = false;
-        self.tab_bar.hovered_menu_item = None;
-        self.needs_redraw = true;
+        self.win.tab_bar.menu_open = false;
+        self.win.tab_bar.hovered_menu_item = None;
+        self.win.needs_redraw = true;
     }
 
     /// Run a main-menu entry.
@@ -661,51 +668,53 @@ impl App {
                 Ok(_) => {
                     self.clear_tab_width_freeze();
                     self.update_tab_bar();
-                    self.needs_redraw = true;
+                    self.win.needs_redraw = true;
                 }
                 Err(e) => tracing::warn!("Failed to create tab: {}", e),
             },
             MenuItem::NewWindow => {
-                // One window per process: start another Ultty.
-                let spawned =
-                    std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn());
-                if let Err(e) = spawned {
-                    tracing::warn!("Failed to open a new window: {}", e);
+                if self.app.config.behavior.window_per_process {
+                    let spawned = std::env::current_exe()
+                        .and_then(|exe| std::process::Command::new(exe).spawn());
+                    if let Err(e) = spawned {
+                        tracing::warn!("Failed to open a new window: {}", e);
+                    }
+                } else {
+                    self.app.pending_new_windows += 1;
                 }
             }
             MenuItem::SplitRight => self.split_pane(SplitDirection::Horizontal),
             MenuItem::SplitDown => self.split_pane(SplitDirection::Vertical),
             MenuItem::Settings => open_settings(),
             MenuItem::Shortcuts => {
-                self.shortcuts_visible = true;
-                self.needs_redraw = true;
+                self.win.shortcuts_visible = true;
+                self.win.needs_redraw = true;
             }
             MenuItem::About => {
-                Self::show_notification("Ultty", &format!("Version {}", env!("CARGO_PKG_VERSION")))
+                App::show_notification("Ultty", &format!("Version {}", env!("CARGO_PKG_VERSION")))
             }
         }
     }
 
-    /// Split the focused pane: side by side (Horizontal) or stacked
-    /// (Vertical). Shared by the keybindings and the title-band buttons.
+    /// Split the focused pane in this window: side by side (Horizontal) or
+    /// stacked (Vertical).
     pub(super) fn split_pane(&mut self, direction: SplitDirection) {
-        let result = match direction {
-            SplitDirection::Horizontal => self.runtime.manager.split_horizontal(),
-            SplitDirection::Vertical => self.runtime.manager.split_vertical(),
-        };
+        let result = self
+            .app
+            .runtime
+            .manager
+            .split_window_focused(self.win.key, direction);
         match result {
             Ok(Some(terminal_id)) => {
                 tracing::info!("Split {:?}: new terminal {:?}", direction, terminal_id);
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
             Ok(None) => tracing::warn!("No active tab for split"),
             Err(e) => tracing::warn!("Failed to split: {}", e),
         }
     }
 
-    /// Select the word at the given position.
     fn select_word(&mut self, col: u16, row: u16) {
-        // First, find word boundaries (immutable borrow)
         let word_bounds = {
             let Some(terminal) = self.terminal() else {
                 return;
@@ -716,7 +725,6 @@ impl App {
                 let mut start_col = col;
                 let mut end_col = col;
 
-                // Scan left for word start
                 while start_col > 0 {
                     if let Some(cell) = grid_row.cell(start_col - 1) {
                         if is_word_char(cell.char()) {
@@ -729,7 +737,6 @@ impl App {
                     }
                 }
 
-                // Scan right for word end
                 let cols = grid.dimensions().cols;
                 while end_col < cols - 1 {
                     if let Some(cell) = grid_row.cell(end_col + 1) {
@@ -749,7 +756,6 @@ impl App {
             }
         };
 
-        // Then set selection (mutable borrow)
         if let Some((start_col, end_col)) = word_bounds {
             let start = SelectionPoint::new(start_col as i32, row as i32);
             let end = SelectionPoint::new(end_col as i32, row as i32);
@@ -762,29 +768,24 @@ impl App {
         }
     }
 
-    /// Handle scroll wheel.
     fn handle_scroll(&mut self, delta: MouseScrollDelta) {
         tracing::debug!("handle_scroll: delta={:?}", delta);
 
-        // winit scroll delta: positive y = scroll UP (wheel rolled away from user)
-        // This should reveal content ABOVE (scroll up in terminal terms)
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => {
-                self.scroll_line_accum += y as f64;
-                let lines = self.scroll_line_accum.trunc() as i32;
-                self.scroll_line_accum -= lines as f64;
-                self.scroll_pixel_accum = 0.0;
+                self.win.scroll_line_accum += y as f64;
+                let lines = self.win.scroll_line_accum.trunc() as i32;
+                self.win.scroll_line_accum -= lines as f64;
+                self.win.scroll_pixel_accum = 0.0;
                 lines
             }
             MouseScrollDelta::PixelDelta(pos) => {
-                // Accumulate pixel deltas to avoid dropping small scroll events
-                // (common on Wayland/HiDPI where each event is a few pixels)
-                self.scroll_pixel_accum += pos.y;
-                self.scroll_line_accum = 0.0;
-                let (_, cell_height) = self.renderer.cell_dimensions();
+                self.win.scroll_pixel_accum += pos.y;
+                self.win.scroll_line_accum = 0.0;
+                let (_, cell_height) = self.win.renderer.cell_dimensions();
                 let cell_h = (cell_height as f64).max(1.0);
-                let lines = (self.scroll_pixel_accum / cell_h).trunc() as i32;
-                self.scroll_pixel_accum -= lines as f64 * cell_h;
+                let lines = (self.win.scroll_pixel_accum / cell_h).trunc() as i32;
+                self.win.scroll_pixel_accum -= lines as f64 * cell_h;
                 lines
             }
         };
@@ -792,17 +793,15 @@ impl App {
         tracing::debug!(
             "handle_scroll: computed lines={}, pixel_accum={}, line_accum={}",
             lines,
-            self.scroll_pixel_accum,
-            self.scroll_line_accum
+            self.win.scroll_pixel_accum,
+            self.win.scroll_line_accum
         );
 
         if lines == 0 {
             return;
         }
 
-        // The open palette takes the wheel: it moves the selection, and
-        // nothing behind the palette scrolls.
-        if self.command_palette.is_open() {
+        if self.win.command_palette.is_open() {
             if let Some((key, steps)) = super::command_palette::wheel_key(lines) {
                 for _ in 0..steps {
                     self.palette_input(key);
@@ -811,12 +810,9 @@ impl App {
             return;
         }
 
-        // Check if mouse tracking is enabled - send scroll events to PTY
         if self.terminal().is_some_and(|t| t.mouse_tracking_enabled()) {
-            let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
-            let (col, row) = self.pixel_to_cell(self.mouse_pos.x, adjusted_y.max(0.0));
-            // Terminal scroll: positive lines = scroll up (button 64)
-            // Button 64 = scroll up, Button 65 = scroll down
+            let adjusted_y = self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64;
+            let (col, row) = self.pixel_to_cell(self.win.mouse_pos.x, adjusted_y.max(0.0));
             let button = if lines > 0 {
                 TerminalMouseButton::ScrollUp
             } else {
@@ -825,7 +821,6 @@ impl App {
             let count = lines.unsigned_abs() as usize;
             let mods = self.mouse_modifiers();
 
-            // Debug: log scroll events
             let mouse_mode = self.terminal().map(|t| t.modes().mouse_mode);
             tracing::debug!(
                 "Mouse scroll: lines={}, button={:?}, pos=({},{}), mode={:?}",
@@ -851,9 +846,8 @@ impl App {
             return;
         }
 
-        // Forward scroll to native protocol sessions
         {
-            let adjusted_y = self.mouse_pos.y - self.tab_bar.content_top() as f64;
+            let adjusted_y = self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64;
             let delta_y = match delta {
                 MouseScrollDelta::LineDelta(_, y) => y,
                 MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
@@ -863,19 +857,15 @@ impl App {
                     delta_x: 0.0,
                     delta_y,
                 },
-                self.mouse_pos.x,
+                self.win.mouse_pos.x,
                 adjusted_y.max(0.0),
             );
         }
 
-        // Check if in alternate screen with alternate scroll mode
-        // In this case, send arrow keys instead of scrolling
         let in_alternate = self.terminal().is_some_and(|t| t.is_alternate_screen());
         let alternate_scroll = self.terminal().is_some_and(|t| t.modes().alternate_scroll);
 
         if in_alternate && alternate_scroll {
-            // Send arrow keys for scrolling in alternate screen
-            // Check DECCKM mode to send correct escape sequence
             let app_cursor = self
                 .terminal()
                 .is_some_and(|t| t.modes().application_cursor_keys);
@@ -885,11 +875,11 @@ impl App {
                     b"\x1bOA"
                 } else {
                     b"\x1b[A"
-                } // Up
+                }
             } else if app_cursor {
-                b"\x1bOB" // Down (application mode)
+                b"\x1bOB"
             } else {
-                b"\x1b[B" // Down (normal mode)
+                b"\x1b[B"
             };
             for _ in 0..count {
                 let _ = self.send_input(arrow);
@@ -897,17 +887,13 @@ impl App {
             return;
         }
 
-        // In alternate screen without alternate_scroll, ignore scroll
         if in_alternate {
             return;
         }
 
-        // Normal mode: scroll the scrollback buffer
         self.scroll_scrollback(lines);
     }
 
-    /// Move the viewport `lines` into scrollback (negative: back toward the
-    /// live screen).
     fn scroll_scrollback(&mut self, lines: i32) {
         let Some(mut t) = self.terminal_mut() else {
             return;
@@ -928,111 +914,87 @@ impl App {
         }
         drop(t);
 
-        self.needs_redraw = true;
+        self.win.needs_redraw = true;
     }
 
-    /// Copy text to clipboard.
-    pub(super) fn copy_to_clipboard(&mut self, text: &str) {
-        if let Some(clipboard) = &mut self.clipboard {
-            if let Err(e) = clipboard.set_text(text.to_string()) {
-                tracing::warn!("Failed to copy to clipboard: {}", e);
-            } else {
-                tracing::debug!("Copied {} bytes to clipboard", text.len());
-            }
-        }
-    }
-
-    /// Paste text from clipboard.
     fn paste_from_clipboard(&mut self) {
-        if let Some(clipboard) = &mut self.clipboard {
-            match clipboard.get_text() {
-                Ok(text) => {
-                    if self.forward_text_to_native_session(&text) {
-                        return;
-                    }
-                    let bracketed = self.terminal().is_some_and(|t| t.modes().bracketed_paste);
-                    if let Err(e) = self.send_input(&paste_payload(&text, bracketed)) {
-                        tracing::warn!("Failed to paste: {}", e);
-                    }
-                }
+        let text = match self.app.clipboard.as_mut() {
+            Some(clipboard) => match clipboard.get_text() {
+                Ok(text) => Some(text),
                 Err(e) => {
                     tracing::warn!("Failed to read clipboard: {}", e);
+                    None
                 }
+            },
+            None => None,
+        };
+        if let Some(text) = text {
+            if self.forward_text_to_native_session(&text) {
+                return;
+            }
+            let bracketed = self.terminal().is_some_and(|t| t.modes().bracketed_paste);
+            if let Err(e) = self.send_input(&paste_payload(&text, bracketed)) {
+                tracing::warn!("Failed to paste: {}", e);
             }
         }
     }
 
-    /// Show the input method's composition text, or clear it with an
-    /// empty string.
     fn set_ime_preedit(&mut self, text: String) {
-        if self.ime_preedit != text {
-            self.ime_preedit = text;
-            self.needs_redraw = true;
+        if self.win.ime_preedit != text {
+            self.win.ime_preedit = text;
+            self.win.needs_redraw = true;
         }
     }
 
-    /// Handle keyboard input.
     fn handle_key(&mut self, event: KeyEvent) {
-        // While the input method is composing, keys are its to handle: the
-        // text arrives as a commit, and must not also be sent as keys.
-        if !self.ime_preedit.is_empty() {
+        if !self.win.ime_preedit.is_empty() {
             return;
         }
         if event.state == ElementState::Released {
-            if self.command_palette.is_open() {
+            if self.win.command_palette.is_open() {
                 return;
             }
-            // Only a program that asked for release events gets any bytes.
             if !self.forward_key_up_to_native_sessions(&event) {
                 self.send_key_to_terminal(&event);
             }
             return;
         }
 
-        // Reset cursor blink on key press (cursor should be visible while typing)
-        self.cursor_blink.restart(Instant::now());
+        self.win.cursor_blink.restart(Instant::now());
 
-        // The open command palette takes every key; none reaches a program.
-        if self.command_palette.is_open() {
+        if self.win.command_palette.is_open() {
             self.handle_palette_key(&event);
             return;
         }
 
-        // Bound actions. A page or prompt key on the alternate screen does
-        // nothing here and goes on to the program.
         for action in self.bound_actions(&event.logical_key) {
             if !action.waits_for_modes() && self.perform_action(action) {
                 return;
             }
         }
 
-        // Escape closes the main menu; it takes no other keys.
-        if self.tab_bar.menu_open {
+        if self.win.tab_bar.menu_open {
             if let Key::Named(NamedKey::Escape) = &event.logical_key {
                 self.close_menu();
             }
             return;
         }
 
-        // Close modal overlays with Escape
-        if self.shortcuts_visible || self.protocol_status_visible {
+        if self.win.shortcuts_visible || self.win.protocol_status_visible {
             if let Key::Named(NamedKey::Escape) = &event.logical_key {
-                self.shortcuts_visible = false;
-                self.protocol_status_visible = false;
-                self.needs_redraw = true;
+                self.win.shortcuts_visible = false;
+                self.win.protocol_status_visible = false;
+                self.win.needs_redraw = true;
                 return;
             }
-            // Block other keys while a modal overlay is visible.
             return;
         }
 
-        // If in copy mode, route to vim handler
-        if self.copy_mode.is_active() {
+        if self.win.copy_mode.is_active() {
             self.handle_copy_mode_key(&event);
             return;
         }
 
-        // Clear selection on any key press (except modifiers)
         if !matches!(
             event.logical_key,
             Key::Named(NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super)
@@ -1042,14 +1004,13 @@ impl App {
             }
         }
 
-        // Copy and paste (Ctrl+Shift+C/V), and Shift+Insert paste.
         for action in self.bound_actions(&event.logical_key) {
             if action.waits_for_modes() && self.perform_action(action) {
                 return;
             }
         }
         if let Key::Named(NamedKey::Insert) = &event.logical_key {
-            if self.modifiers.shift_key() {
+            if self.win.modifiers.shift_key() {
                 self.paste_from_clipboard();
                 return;
             }
@@ -1060,29 +1021,21 @@ impl App {
         }
     }
 
-    /// The actions bound to `key` with the modifiers held now, in
-    /// [`Action::ALL`] order.
     pub(super) fn bound_actions(&self, key: &Key) -> Vec<Action> {
-        bound_actions(&self.config.keybindings, key, self.modifiers)
+        bound_actions(&self.app.config.keybindings, key, self.win.modifiers)
     }
 
-    /// Run `action`, as its key or the command palette asks. Returns
-    /// whether it applied: the page and prompt keys do nothing on the
-    /// alternate screen, where their key belongs to the program.
     pub(super) fn perform_action(&mut self, action: Action) -> bool {
         use ultty::pane_layout::FocusDirection;
         match action {
             Action::CopyMode => {
-                if self.copy_mode.is_active() {
-                    self.copy_mode.exit();
+                if self.win.copy_mode.is_active() {
+                    self.win.copy_mode.exit();
                 } else {
                     self.enter_copy_mode();
                 }
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
-            // Page through scrollback on the main screen. On the alternate
-            // screen there is no scrollback, so the key goes to the app, as
-            // in xterm.
             Action::ScrollPageUp | Action::ScrollPageDown => {
                 let screen = self
                     .terminal()
@@ -1091,13 +1044,10 @@ impl App {
                 let Some(rows) = screen else {
                     return false;
                 };
-                // Keep one line of the previous page for context.
                 let page = i32::from(rows.saturating_sub(1).max(1));
                 let up = action == Action::ScrollPageUp;
                 self.scroll_scrollback(if up { page } else { -page });
             }
-            // Prompt marks (OSC 133) on the main screen: jump between
-            // prompts and select the last command's output.
             Action::JumpPrevPrompt | Action::JumpNextPrompt | Action::SelectLastOutput => {
                 use ultty::grid::PromptJump;
                 let handled = self
@@ -1112,55 +1062,52 @@ impl App {
                     return false;
                 };
                 if changed {
-                    self.needs_redraw = true;
+                    self.win.needs_redraw = true;
                 }
             }
             Action::Find => {
-                // If native sessions are active, also search their scene trees
                 if self.has_native_sessions() {
-                    self.native_search_active = true;
-                    self.native_search_query.clear();
-                    self.native_search_matches.clear();
-                    self.native_search_index = 0;
+                    self.win.native_search_active = true;
+                    self.win.native_search_query.clear();
+                    self.win.native_search_matches.clear();
+                    self.win.native_search_index = 0;
                 }
                 self.enter_search_mode();
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
             Action::NewTab => match self.create_tab() {
                 Ok(tab_id) => {
                     self.clear_tab_width_freeze();
                     tracing::info!("Created new tab {:?}", tab_id);
                     self.update_tab_bar();
-                    self.needs_redraw = true;
+                    self.win.needs_redraw = true;
                 }
                 Err(e) => tracing::warn!("Failed to create tab: {}", e),
             },
             Action::CloseTab => {
-                if self.runtime.manager.tab_count() > 1 {
-                    if let Some(tab) = self.runtime.manager.active_tab() {
+                if self.app.runtime.manager.window_tab_count(self.win.key) > 1 {
+                    if let Some(tab) = self.app.runtime.manager.window_active_tab(self.win.key) {
                         let tab_id = tab.id;
                         self.freeze_tab_width_after_close();
-                        self.runtime.manager.close_tab(tab_id);
+                        self.app.runtime.manager.close_tab(tab_id);
                         tracing::info!("Closed tab {:?}", tab_id);
                         self.update_tab_bar();
-                        self.needs_redraw = true;
+                        self.win.needs_redraw = true;
                     }
                 }
             }
             Action::NextTab => {
-                self.runtime.manager.next_tab();
+                self.app.runtime.manager.next_tab_in_window(self.win.key);
                 self.update_tab_bar();
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
             Action::PrevTab => {
-                self.runtime.manager.prev_tab();
+                self.app.runtime.manager.prev_tab_in_window(self.win.key);
                 self.update_tab_bar();
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
             Action::SplitRight => self.split_pane(SplitDirection::Horizontal),
             Action::SplitDown => self.split_pane(SplitDirection::Vertical),
-            // Pane navigation: to the nearest pane on that side, wherever
-            // it is in the split tree.
             Action::FocusPaneLeft
             | Action::FocusPaneRight
             | Action::FocusPaneUp
@@ -1171,35 +1118,47 @@ impl App {
                     Action::FocusPaneUp => FocusDirection::Up,
                     _ => FocusDirection::Down,
                 };
-                let (width, height) = self.renderer.terminal_area();
-                self.runtime
-                    .manager
-                    .focus_direction(direction, width, height);
-                self.needs_redraw = true;
+                let (width, height) = self.win.renderer.terminal_area();
+                self.app.runtime.manager.window_focus_direction(
+                    self.win.key,
+                    direction,
+                    width,
+                    height,
+                );
+                self.win.needs_redraw = true;
             }
             Action::ClosePane => {
-                if self.runtime.manager.close_focused_pane() {
+                if self
+                    .app
+                    .runtime
+                    .manager
+                    .close_window_focused_pane(self.win.key)
+                {
                     tracing::info!("Closed pane");
-                    self.needs_redraw = true;
+                    self.win.needs_redraw = true;
                 }
             }
-            Action::ReloadConfig => self.reload_config(),
+            Action::ReloadConfig => {
+                self.app.pending_reload_config = true;
+            }
             Action::ShowShortcuts => {
-                self.shortcuts_visible = !self.shortcuts_visible;
-                if self.shortcuts_visible {
-                    self.protocol_status_visible = false;
+                self.win.shortcuts_visible = !self.win.shortcuts_visible;
+                if self.win.shortcuts_visible {
+                    self.win.protocol_status_visible = false;
                 }
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
             Action::ProtocolStatus => {
-                self.protocol_status_visible = !self.protocol_status_visible;
-                if self.protocol_status_visible {
-                    self.shortcuts_visible = false;
+                self.win.protocol_status_visible = !self.win.protocol_status_visible;
+                if self.win.protocol_status_visible {
+                    self.win.shortcuts_visible = false;
                 }
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
             Action::CommandPalette => self.open_command_palette(),
-            Action::CycleTheme => self.cycle_theme(),
+            Action::CycleTheme => {
+                self.app.pending_cycle_theme = true;
+            }
             Action::FontIncrease => self.change_font_size(true),
             Action::FontDecrease => self.change_font_size(false),
             Action::FontReset => self.reset_font_size(),
@@ -1211,14 +1170,13 @@ impl App {
                     return true;
                 }
                 if let Some(text) = self.terminal().and_then(|t| t.selected_text()) {
-                    self.copy_to_clipboard(&text);
+                    self.app.copy_to_clipboard(&text);
                 }
             }
         }
         true
     }
 
-    /// Send a key to the focused terminal, encoded for its keyboard modes.
     fn send_key_to_terminal(&mut self, event: &KeyEvent) {
         let bytes = self.encode_key(event);
         if bytes.is_empty() {
@@ -1229,7 +1187,6 @@ impl App {
         }
     }
 
-    /// The bytes a key event sends to the focused terminal's program.
     fn encode_key(&self, event: &KeyEvent) -> Vec<u8> {
         let unmodified = event.key_without_modifiers();
         let Some(key) = keys::key_from_winit(&event.logical_key, &unmodified, event.location)
@@ -1238,13 +1195,11 @@ impl App {
         };
         let pressed = event.state == ElementState::Pressed;
         let mut mods = Mods::new(
-            self.modifiers.shift_key(),
-            self.modifiers.alt_key(),
-            self.modifiers.control_key(),
-            self.modifiers.super_key(),
+            self.win.modifiers.shift_key(),
+            self.win.modifiers.alt_key(),
+            self.win.modifiers.control_key(),
+            self.win.modifiers.super_key(),
         );
-        // A modifier key's own bit reflects this event: set when it goes
-        // down, clear when it comes up.
         if let Key::Named(named) = &event.logical_key {
             let own = match named {
                 NamedKey::Shift => Some(Mods::SHIFT),
@@ -1303,7 +1258,6 @@ impl App {
         )
     }
 
-    /// Convert a winit key event into protocol key + modifiers.
     fn convert_key_event(&self, event: &KeyEvent) -> Option<(ProtocolKey, ProtocolModifiers)> {
         let protocol_key = match &event.logical_key {
             Key::Named(named) => match named {
@@ -1341,16 +1295,16 @@ impl App {
         }?;
 
         let mut modifiers = ProtocolModifiers::NONE;
-        if self.modifiers.shift_key() {
+        if self.win.modifiers.shift_key() {
             modifiers = modifiers.union(ProtocolModifiers::SHIFT);
         }
-        if self.modifiers.control_key() {
+        if self.win.modifiers.control_key() {
             modifiers = modifiers.union(ProtocolModifiers::CTRL);
         }
-        if self.modifiers.alt_key() {
+        if self.win.modifiers.alt_key() {
             modifiers = modifiers.union(ProtocolModifiers::ALT);
         }
-        if self.modifiers.super_key() {
+        if self.win.modifiers.super_key() {
             modifiers = modifiers.union(ProtocolModifiers::META);
         }
 
@@ -1364,22 +1318,25 @@ impl App {
         ultty::terminal_manager::TerminalId,
         Option<i32>,
     )> {
-        let terminal = self.runtime.manager.focused_terminal()?;
+        let terminal = self
+            .app
+            .runtime
+            .manager
+            .window_focused_terminal(self.win.key)?;
         let foreground = terminal.event_loop.foreground_pgrp();
-        self.runtime
+        self.app
+            .runtime
             .protocol
             .as_ref()?
             .has_pane_key_subscribers(terminal.tab_id, terminal.id, foreground)
             .then_some((terminal.tab_id, terminal.id, foreground))
     }
 
-    /// A selected native recipient consumes the input even if its queue refuses it.
-    /// Retrying through the PTY could type into an unrelated shell after failure.
     fn forward_text_to_native_session(&mut self, text: &str) -> bool {
         let Some((tab, pane, foreground)) = self.native_input_target() else {
             return false;
         };
-        let Some(server) = self.runtime.protocol.as_mut() else {
+        let Some(server) = self.app.runtime.protocol.as_mut() else {
             return false;
         };
         if let Err(error) = server.send_text_input_to_pane(tab, pane, text.to_owned(), foreground) {
@@ -1395,7 +1352,7 @@ impl App {
         let Some((tab, pane, foreground)) = self.native_input_target() else {
             return false;
         };
-        let Some(ref mut server) = self.runtime.protocol else {
+        let Some(ref mut server) = self.app.runtime.protocol else {
             return false;
         };
         if let Err(error) = server.send_key_to_pane(tab, pane, key, modifiers, foreground) {
@@ -1411,7 +1368,7 @@ impl App {
         let Some((tab, pane, foreground)) = self.native_input_target() else {
             return false;
         };
-        let Some(ref mut server) = self.runtime.protocol else {
+        let Some(ref mut server) = self.app.runtime.protocol else {
             return false;
         };
         if let Err(error) = server.send_key_up_to_pane(tab, pane, key, modifiers, foreground) {
@@ -1432,10 +1389,17 @@ impl App {
         let viewport_cols = dims.cols as usize;
         drop(terminal);
 
-        self.search_job = None;
-        self.copy_mode_pane = self.runtime.manager.focused_terminal_id();
-        self.copy_mode.set_search_regex(self.config.search.regex);
-        self.copy_mode
+        self.win.search_job = None;
+        self.win.copy_mode_pane = self
+            .app
+            .runtime
+            .manager
+            .window_focused_terminal_id(self.win.key);
+        self.win
+            .copy_mode
+            .set_search_regex(self.app.config.search.regex);
+        self.win
+            .copy_mode
             .enter(total_rows, viewport_rows, viewport_cols);
         tracing::debug!("Entered copy mode");
     }
@@ -1452,81 +1416,83 @@ impl App {
         let viewport_cols = dims.cols as usize;
         drop(terminal);
 
-        self.search_job = None;
-        self.copy_mode_pane = self.runtime.manager.focused_terminal_id();
-        self.copy_mode.set_search_regex(self.config.search.regex);
-        self.copy_mode
+        self.win.search_job = None;
+        self.win.copy_mode_pane = self
+            .app
+            .runtime
+            .manager
+            .window_focused_terminal_id(self.win.key);
+        self.win
+            .copy_mode
+            .set_search_regex(self.app.config.search.regex);
+        self.win
+            .copy_mode
             .enter_search(total_rows, viewport_rows, viewport_cols);
         tracing::debug!("Entered search mode");
     }
 
     fn handle_copy_mode_key(&mut self, event: &KeyEvent) {
         self.reconcile_copy_mode_pane();
-        if !self.copy_mode.is_active() {
+        if !self.win.copy_mode.is_active() {
             return;
         }
         let protocol_key = self.winit_key_to_protocol(&event.logical_key);
         let protocol_mods = self.winit_mods_to_protocol();
 
-        // Word motions need the text of the row the copy-mode cursor is on.
-        let (cursor_row, _) = self.copy_mode.cursor_position();
+        let (cursor_row, _) = self.win.copy_mode.cursor_position();
         let row_text = self
             .terminal()
             .and_then(|t| t.buffer().row_at(cursor_row).map(|row| row.text()))
             .unwrap_or_default();
 
         match self
+            .win
             .copy_mode
             .handle_key_in_row(&protocol_key, protocol_mods, &row_text)
         {
             CopyModeResult::Handled => {
-                // If native search is active, mirror n/N navigation
-                if self.native_search_active && !self.native_search_matches.is_empty() {
-                    // Check if the key was n or N by looking at the key
+                if self.win.native_search_active && !self.win.native_search_matches.is_empty() {
                     match &protocol_key {
                         ProtocolKey::Char('n') => self.native_search_next(),
                         ProtocolKey::Char('N') => self.native_search_prev(),
                         _ => {}
                     }
                 }
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
             CopyModeResult::Exit => {
                 tracing::debug!("Exited copy mode");
-                if self.native_search_active {
+                if self.win.native_search_active {
                     self.dismiss_native_search();
                 }
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
             CopyModeResult::Copy(selection) => {
                 if let Some(sel) = selection {
                     let text = self.extract_selection_text(&sel);
-                    self.copy_to_clipboard(&text);
+                    self.app.copy_to_clipboard(&text);
                 }
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
             CopyModeResult::CopyAndExit(selection) => {
                 if let Some(sel) = selection {
                     let text = self.extract_selection_text(&sel);
-                    self.copy_to_clipboard(&text);
+                    self.app.copy_to_clipboard(&text);
                 }
                 tracing::debug!("Copied and exited copy mode");
-                if self.native_search_active {
+                if self.win.native_search_active {
                     self.dismiss_native_search();
                 }
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
             CopyModeResult::Search(query) => {
                 self.perform_search(&query);
-                self.needs_redraw = true;
+                self.win.needs_redraw = true;
             }
-            CopyModeResult::NotHandled => {
-                // Key not handled by copy mode
-            }
+            CopyModeResult::NotHandled => {}
         }
     }
 
-    /// Convert winit Key to protocol Key.
     fn winit_key_to_protocol(&self, key: &Key) -> ProtocolKey {
         match key {
             Key::Named(named) => match named {
@@ -1569,16 +1535,15 @@ impl App {
         }
     }
 
-    /// Convert winit modifiers to protocol modifiers.
     fn winit_mods_to_protocol(&self) -> ProtocolModifiers {
         let mut mods = ProtocolModifiers::NONE;
-        if self.modifiers.control_key() {
+        if self.win.modifiers.control_key() {
             mods = mods.union(ProtocolModifiers::CTRL);
         }
-        if self.modifiers.shift_key() {
+        if self.win.modifiers.shift_key() {
             mods = mods.union(ProtocolModifiers::SHIFT);
         }
-        if self.modifiers.alt_key() {
+        if self.win.modifiers.alt_key() {
             mods = mods.union(ProtocolModifiers::ALT);
         }
         mods

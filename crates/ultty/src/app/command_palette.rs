@@ -6,25 +6,25 @@ use ultty::command_palette::{PaletteKey, PaletteOutcome};
 use winit::event::KeyEvent;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
-use super::App;
+use super::WindowCtx;
 use ultty::action::Action;
 
-impl App {
+impl WindowCtx<'_> {
     /// Open the palette over everything else: the other overlays and the
     /// main menu close. Pane focus does not change.
     pub(super) fn open_command_palette(&mut self) {
-        self.shortcuts_visible = false;
-        self.protocol_status_visible = false;
-        if self.tab_bar.menu_open {
+        self.win.shortcuts_visible = false;
+        self.win.protocol_status_visible = false;
+        if self.win.tab_bar.menu_open {
             self.close_menu();
         }
-        self.command_palette.open(&self.config.keybindings);
-        self.needs_redraw = true;
+        self.win.command_palette.open(&self.app.config.keybindings);
+        self.win.needs_redraw = true;
     }
 
     pub(super) fn close_command_palette(&mut self) {
-        self.command_palette.close();
-        self.needs_redraw = true;
+        self.win.command_palette.close();
+        self.win.needs_redraw = true;
     }
 
     /// A key pressed while the palette is open. Its own keybinding closes
@@ -37,14 +37,18 @@ impl App {
             self.close_command_palette();
             return;
         }
-        let key = palette_key(&event.logical_key, event.text.as_deref(), self.modifiers);
+        let key = palette_key(
+            &event.logical_key,
+            event.text.as_deref(),
+            self.win.modifiers,
+        );
         self.palette_input(key);
     }
 
     /// Give the palette `key`, and run the action it chose.
     pub(super) fn palette_input(&mut self, key: PaletteKey<'_>) {
-        let outcome = self.command_palette.handle(key);
-        self.needs_redraw = true;
+        let outcome = self.win.command_palette.handle(key);
+        self.win.needs_redraw = true;
         if let PaletteOutcome::Run(action) = outcome {
             self.perform_action(action);
         }

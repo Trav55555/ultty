@@ -4,46 +4,44 @@ use std::time::Instant;
 
 use super::gpu::RendererState;
 use super::update::pipeline_trace_enabled;
-use super::App;
+use super::WindowCtx;
 use ultty::event_loop::TerminalGuard;
 use ultty::protocol::ProtocolServer;
 use ultty::renderer::{ImePreedit, OverlayState, PaneDraw, PaneInfo};
-use ultty::terminal_manager::{TerminalId, TerminalManager};
+use ultty::terminal_manager::{TabId, TerminalId, TerminalManager, WindowKey};
 
-impl App {
-    /// Render the terminal.
+impl WindowCtx<'_> {
+    /// Render this window.
     pub(super) fn render(&mut self) {
-        // Until the GPU is up, the CPU draws if enabled; see `gpu` and `cpu_frames`.
-        let Some(renderer) = self.renderer.ready() else {
+        let Some(renderer) = self.win.renderer.ready() else {
             self.render_cpu_frame();
             return;
         };
-        let palette_caret = renderer.command_palette_caret_cell(&self.command_palette);
+        let palette_caret = renderer.command_palette_caret_cell(&self.win.command_palette);
         self.update_window_corner_radius();
-        if self.frames_drawn == 0 {
-            tracing::debug!(target: "ultty::startup", "drawing the first frame");
+        if self.win.frames_drawn == 0 {
+            tracing::debug!(
+                target: "ultty::startup",
+                window = self.win.key.raw(),
+                "drawing the first frame"
+            );
         }
-        // Only looked for while the startup log is on: it scans the grid.
-        if !self.output_shown && tracing::enabled!(target: "ultty::startup", tracing::Level::DEBUG)
+        if !self.win.output_shown
+            && tracing::enabled!(target: "ultty::startup", tracing::Level::DEBUG)
         {
             let shows_output = self
                 .terminal()
                 .is_some_and(|terminal| ultty::renderer::shows_output(&terminal));
-            self.note_output_shown(shows_output, "GPU");
+            self.win.note_output_shown(shows_output, "GPU");
         }
-        self.frames_drawn = self.frames_drawn.saturating_add(1);
+        self.win.frames_drawn = self.win.frames_drawn.saturating_add(1);
 
         let trace_start = pipeline_trace_enabled().then(Instant::now);
-        let pane_count = self.runtime.manager.pane_count();
-        // Where the cursor is, read before the frame is acquired and the
-        // terminals are locked for drawing.
+        let pane_count = self.app.runtime.manager.window_pane_count(self.win.key);
         let cursor_cell = self.cursor_cell_rect();
         self.update_ime_cursor_area(super::command_palette::ime_cell(palette_caret, cursor_cell));
 
-        // Acquire the frame before locking any terminal: this can block
-        // until the next vsync, and the terminals' I/O threads must keep
-        // parsing meanwhile.
-        let RendererState::Ready(gpu) = &self.renderer else {
+        let RendererState::Ready(gpu) = &self.win.renderer else {
             return;
         };
         let (output, suboptimal) = match gpu.surface.get_current_texture() {
@@ -53,8 +51,6 @@ impl App {
                 self.reconfigure_surface();
                 return;
             }
-            // Nothing to draw into this time; the terminals stay dirty, so
-            // the next update tries again.
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
                 return;
             }
@@ -68,10 +64,8 @@ impl App {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        // Tabs and panes close from many places; whatever their images left
-        // in the texture cache goes here.
-        if let Some(renderer) = self.renderer.ready_mut() {
-            renderer.retain_terminal_images(&self.runtime.manager.terminal_uids());
+        if let Some(renderer) = self.win.renderer.ready_mut() {
+            renderer.retain_terminal_images(&self.app.runtime.manager.terminal_uids());
         }
         let drawn = if pane_count > 1 {
             self.render_multi_pane(&view, cursor_cell)
@@ -79,30 +73,30 @@ impl App {
             self.render_single_pane(&view, cursor_cell)
         };
         let drawn_at = trace_start.map(|_| Instant::now());
-        // Present only now that the drawing above has released every
-        // terminal lock: presenting can block for a whole refresh, or for as
-        // long as the compositor withholds frame callbacks, and the I/O
-        // threads must keep parsing output meanwhile.
         if drawn {
-            // On Wayland this asks for a frame callback with this commit;
-            // winit holds the next `RedrawRequested` until it arrives. Only
-            // call it when a present follows, or no callback ever comes.
-            if let Some(renderer) = self.renderer.ready() {
-                self.window.pre_present_notify();
+            if let Some(renderer) = self.win.renderer.ready() {
+                self.win.window.pre_present_notify();
                 renderer.present(output);
             }
         }
         let presented_at = trace_start.map(|_| Instant::now());
 
-        // Clear dirty flags after successful render
-        self.runtime.manager.clear_dirty();
-        // Clear render dirty flags of the sessions that were just
-        // drawn so the renderer can reuse cached GPU buffers. Hidden
-        // tabs' sessions stay dirty until they are shown.
-        if let Some(ref mut server) = self.runtime.protocol {
-            for session in server.active_tab_sessions_mut() {
-                session.clear_render_dirty();
-                session.clear_scroll_dirty();
+        self.app
+            .runtime
+            .manager
+            .clear_window_active_dirty(self.win.key);
+        if let Some(active_tab) = self
+            .app
+            .runtime
+            .manager
+            .window_active_tab(self.win.key)
+            .map(|tab| tab.id)
+        {
+            if let Some(ref mut server) = self.app.runtime.protocol {
+                for session in server.tab_sessions_mut(active_tab) {
+                    session.clear_render_dirty();
+                    session.clear_scroll_dirty();
+                }
             }
         }
         if suboptimal {
@@ -126,10 +120,9 @@ impl App {
         #[cfg(feature = "heap-stats")]
         ultty::heap_stats::maybe_log();
 
-        // Handle auto-dump countdown
-        if self.auto_dump_frames > 0 {
-            self.auto_dump_frames -= 1;
-            if self.auto_dump_frames == 0 {
+        if self.app.auto_dump_frames > 0 {
+            self.app.auto_dump_frames -= 1;
+            if self.app.auto_dump_frames == 0 {
                 tracing::info!("Auto-dump triggered");
                 self.debug_dump_terminal();
             }
@@ -139,15 +132,20 @@ impl App {
     /// The focused terminal's cursor cell in window pixels, or `None` when
     /// no terminal has focus.
     fn cursor_cell_rect(&self) -> Option<CellRect> {
-        let (width, height) = self.renderer.cell_dimensions();
-        let top = self.renderer.tab_bar_height();
-        let (origin_x, origin_y) = if self.runtime.manager.pane_count() > 1 {
-            let size = self.window.inner_size();
-            let focused = self.runtime.manager.focused_terminal_id()?;
-            let (_, (x, y, _, _)) = self
+        let (width, height) = self.win.renderer.cell_dimensions();
+        let top = self.win.renderer.tab_bar_height();
+        let (origin_x, origin_y) = if self.app.runtime.manager.window_pane_count(self.win.key) > 1 {
+            let size = self.win.window.inner_size();
+            let focused = self
+                .app
                 .runtime
                 .manager
-                .active_pane_rects(size.width as f32, size.height as f32 - top)
+                .window_focused_terminal_id(self.win.key)?;
+            let (_, (x, y, _, _)) = self
+                .app
+                .runtime
+                .manager
+                .window_active_pane_rects(self.win.key, size.width as f32, size.height as f32 - top)
                 .into_iter()
                 .find(|(id, _)| *id == focused)?;
             (x, y + top)
@@ -176,11 +174,11 @@ impl App {
             cell.width.round() as i32,
             cell.height.round() as i32,
         ];
-        if self.ime_cursor_area == Some(area) {
+        if self.win.ime_cursor_area == Some(area) {
             return;
         }
-        self.ime_cursor_area = Some(area);
-        self.window.set_ime_cursor_area(
+        self.win.ime_cursor_area = Some(area);
+        self.win.window.set_ime_cursor_area(
             winit::dpi::PhysicalPosition::new(area[0], area[1]),
             winit::dpi::PhysicalSize::new(area[2].max(1) as u32, area[3].max(1) as u32),
         );
@@ -188,98 +186,96 @@ impl App {
 
     /// Configure the surface again for the window's current size.
     fn reconfigure_surface(&mut self) {
-        let size = self.window.inner_size();
-        self.renderer.resize(size.width, size.height);
+        let size = self.win.window.inner_size();
+        self.win.renderer.resize(size.width, size.height);
     }
 
-    /// Draw a single terminal pane into `view`, returning whether there
-    /// was one to draw. The terminal is locked only for the drawing; the
-    /// caller presents.
     fn render_single_pane(
         &mut self,
         view: &wgpu::TextureView,
         cursor_cell: Option<CellRect>,
     ) -> bool {
-        let Some((pane, terminal)) = self
+        let Some((pane, tab_id, terminal)) = self
+            .app
             .runtime
             .manager
-            .focused_terminal()
-            .map(|t| (t.id, t.event_loop.terminal()))
+            .window_focused_terminal(self.win.key)
+            .map(|t| (t.id, t.tab_id, t.event_loop.terminal()))
         else {
             return false;
         };
 
-        // Check if bell is still active
         let bell_active = self
+            .win
             .bell_active_until
             .map(|until| Instant::now() < until)
             .unwrap_or(false);
 
-        let protocol_status_rows = if self.protocol_status_visible {
-            Some(self.build_protocol_status_rows())
+        let protocol_status_rows = if self.win.protocol_status_visible {
+            Some(self.app.build_protocol_status_rows())
         } else {
             None
         };
 
         let overlay = OverlayState {
-            copy_mode: if self.copy_mode.is_active() {
-                Some(&self.copy_mode)
+            copy_mode: if self.win.copy_mode.is_active() {
+                Some(&self.win.copy_mode)
             } else {
                 None
             },
-            urls: self.url_detector.urls(),
-            ctrl_held: self.modifiers.control_key(),
-            tab_bar: if self.tab_bar.visible {
-                Some(&self.tab_bar)
+            urls: self.win.url_detector.urls(),
+            ctrl_held: self.win.modifiers.control_key(),
+            tab_bar: if self.win.tab_bar.visible {
+                Some(&self.win.tab_bar)
             } else {
                 None
             },
             bell_active,
-            shortcuts_visible: self.shortcuts_visible,
-            keybindings: if self.shortcuts_visible {
-                Some(&self.shortcuts_list)
+            shortcuts_visible: self.win.shortcuts_visible,
+            keybindings: if self.win.shortcuts_visible {
+                Some(&self.app.shortcuts_list)
             } else {
                 None
             },
             protocol_status: protocol_status_rows.as_deref(),
-            cursor_blink_visible: self.cursor_blink.visible(),
+            cursor_blink_visible: self.win.cursor_blink.visible(),
             ime_preedit: cursor_cell
-                .filter(|_| !self.ime_preedit.is_empty())
+                .filter(|_| !self.win.ime_preedit.is_empty())
                 .map(|cell| ImePreedit {
-                    text: &self.ime_preedit,
+                    text: &self.win.ime_preedit,
                     x: cell.x,
                     y: cell.y,
                 }),
             command_palette: self
+                .win
                 .command_palette
                 .is_open()
-                .then_some(&self.command_palette),
+                .then_some(&self.win.command_palette),
         };
 
-        // Only the visible tab's native sessions are drawn, and only the
-        // ones of this pane or not bound yet: a session in a background
-        // tab, or bound to a pane that closed under it, must not paint over
-        // what the user is looking at.
-        if let Some(ref server) = self.runtime.protocol {
-            if server.pane_or_unbound_sessions(pane).next().is_some() {
+        if let Some(ref server) = self.app.runtime.protocol {
+            if server
+                .pane_or_unbound_sessions_in_tab(tab_id, pane)
+                .next()
+                .is_some()
+            {
                 let selection_matches = self.native_transcript_highlights(pane);
                 let search_matches = if !selection_matches.is_empty() {
                     Some(selection_matches.as_slice())
-                } else if self.native_search_active && !self.native_search_matches.is_empty() {
-                    Some(self.native_search_matches.as_slice())
+                } else if self.win.native_search_active
+                    && !self.win.native_search_matches.is_empty()
+                {
+                    Some(self.win.native_search_matches.as_slice())
                 } else {
                     None
                 };
 
-                // Collect live region IDs (across all tabs and surfaces, so
-                // switching tabs does not evict images of hidden sessions)
-                // for cache eviction.
                 let live_regions: std::collections::HashSet<ultty::renderer::NativeResourceKey> =
                     server
                         .sessions()
                         .flat_map(|s| s.scene().iter_all().map(move |r| (s.session_id(), r.id)))
                         .collect();
-                let Some(renderer) = self.renderer.ready_mut() else {
+                let Some(renderer) = self.win.renderer.ready_mut() else {
                     return false;
                 };
                 renderer.retain_native_images(&live_regions);
@@ -289,95 +285,97 @@ impl App {
                     &terminal,
                     &overlay,
                     server
-                        .pane_or_unbound_sessions(pane)
+                        .pane_or_unbound_sessions_in_tab(tab_id, pane)
                         .map(|session| session as &dyn ultty::scene::view::NativeRenderSource),
                     search_matches,
-                    self.native_search_index,
+                    self.win.native_search_index,
                 );
                 return true;
             }
         }
 
-        let Some(renderer) = self.renderer.ready_mut() else {
+        let Some(renderer) = self.win.renderer.ready_mut() else {
             return false;
         };
         renderer.render_with_overlay(view, &terminal, &overlay);
         true
     }
 
-    /// Draw multiple panes into `view`, returning whether there were any
-    /// to draw. The panes are locked only for the drawing; the caller
-    /// presents.
     fn render_multi_pane(
         &mut self,
         view: &wgpu::TextureView,
         cursor_cell: Option<CellRect>,
     ) -> bool {
-        // One lock per pane, held for this frame. Everything below reads the
-        // panes through these guards; locking a pane's terminal again here
-        // would deadlock.
-        let locked = lock_active_panes(
-            &self.runtime.manager,
-            self.renderer.surface_size().into(),
-            self.tab_bar.content_top(),
+        let active_tab = self
+            .app
+            .runtime
+            .manager
+            .window_active_tab(self.win.key)
+            .map(|tab| tab.id);
+        let locked = lock_window_active_panes(
+            &self.app.runtime.manager,
+            self.win.key,
+            self.win.renderer.surface_size().into(),
+            self.win.tab_bar.content_top(),
         );
         if locked.is_empty() {
             return false;
         }
 
-        let mut panes = pane_draws(&locked, self.runtime.protocol.as_ref());
+        let mut panes = pane_draws(&locked, active_tab, self.app.runtime.protocol.as_ref());
         for (pane, locked_pane) in panes.iter_mut().zip(&locked) {
             pane.selection = self.native_transcript_highlights(locked_pane.id);
         }
 
-        // Check if bell is still active
         let bell_active = self
+            .win
             .bell_active_until
             .map(|until| Instant::now() < until)
             .unwrap_or(false);
 
-        let protocol_status_rows = if self.protocol_status_visible {
-            Some(self.build_protocol_status_rows())
+        let protocol_status_rows = if self.win.protocol_status_visible {
+            Some(self.app.build_protocol_status_rows())
         } else {
             None
         };
 
         let overlay = OverlayState {
-            copy_mode: if self.copy_mode.is_active() {
-                Some(&self.copy_mode)
+            copy_mode: if self.win.copy_mode.is_active() {
+                Some(&self.win.copy_mode)
             } else {
                 None
             },
-            urls: self.url_detector.urls(),
-            ctrl_held: self.modifiers.control_key(),
-            tab_bar: if self.tab_bar.visible {
-                Some(&self.tab_bar)
+            urls: self.win.url_detector.urls(),
+            ctrl_held: self.win.modifiers.control_key(),
+            tab_bar: if self.win.tab_bar.visible {
+                Some(&self.win.tab_bar)
             } else {
                 None
             },
             bell_active,
-            shortcuts_visible: self.shortcuts_visible,
-            keybindings: if self.shortcuts_visible {
-                Some(&self.shortcuts_list)
+            shortcuts_visible: self.win.shortcuts_visible,
+            keybindings: if self.win.shortcuts_visible {
+                Some(&self.app.shortcuts_list)
             } else {
                 None
             },
             protocol_status: protocol_status_rows.as_deref(),
-            cursor_blink_visible: self.cursor_blink.visible(),
+            cursor_blink_visible: self.win.cursor_blink.visible(),
             ime_preedit: cursor_cell
-                .filter(|_| !self.ime_preedit.is_empty())
+                .filter(|_| !self.win.ime_preedit.is_empty())
                 .map(|cell| ImePreedit {
-                    text: &self.ime_preedit,
+                    text: &self.win.ime_preedit,
                     x: cell.x,
                     y: cell.y,
                 }),
             command_palette: self
+                .win
                 .command_palette
                 .is_open()
-                .then_some(&self.command_palette),
+                .then_some(&self.win.command_palette),
         };
 
-        let Some(renderer) = self.renderer.ready_mut() else {
+        let Some(renderer) = self.win.renderer.ready_mut() else {
             return false;
         };
         renderer.render_panes(view, &panes, &overlay);
@@ -396,6 +394,7 @@ pub(super) struct LockedPane<'a> {
 /// sessions bound to it (ADR 0025).
 pub(super) fn pane_draws<'a>(
     locked: &'a [LockedPane<'a>],
+    active_tab: Option<TabId>,
     server: Option<&'a ProtocolServer>,
 ) -> Vec<PaneDraw<'a>> {
     locked
@@ -404,12 +403,13 @@ pub(super) fn pane_draws<'a>(
             terminal: &pane.terminal,
             info: pane.info,
             selection: Vec::new(),
-            sessions: server.map_or_else(Vec::new, |server| {
-                server
-                    .pane_sessions(pane.id)
+            sessions: match (server, active_tab) {
+                (Some(server), Some(tab)) => server
+                    .pane_sessions_in_tab(tab, pane.id)
                     .map(|session| session as &dyn ultty::scene::view::NativeRenderSource)
-                    .collect()
-            }),
+                    .collect(),
+                _ => Vec::new(),
+            },
         })
         .collect()
 }
@@ -423,20 +423,20 @@ pub(super) struct CellRect {
     pub(super) height: f32,
 }
 
-/// Lock every pane of the active tab once, paired with its rectangle and
-/// focus, as the window draws them and as multi-pane screenshots capture
-/// them. The rectangles are the split tree's, the same ones each pane's grid
-/// is sized to. The guards must be the only access to these terminals while
-/// they live: locking one again would deadlock.
-pub(super) fn lock_active_panes(
+/// Lock every pane of `window`'s active tab once, paired with its rectangle
+/// and focus, as the window draws them and as multi-pane screenshots capture
+/// them.
+pub(super) fn lock_window_active_panes(
     terminal_manager: &TerminalManager,
+    window: WindowKey,
     window_size: winit::dpi::PhysicalSize<u32>,
     tab_bar_height: f32,
 ) -> Vec<LockedPane<'_>> {
-    let terminals = terminal_manager.active_tab_terminals();
-    let focused_id = terminal_manager.focused_terminal_id();
+    let terminals = terminal_manager.window_active_tab_terminals(window);
+    let focused_id = terminal_manager.window_focused_terminal_id(window);
     terminal_manager
-        .active_pane_rects(
+        .window_active_pane_rects(
+            window,
             window_size.width as f32,
             window_size.height as f32 - tab_bar_height,
         )

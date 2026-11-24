@@ -6,7 +6,7 @@ use ultty::terminal_manager::TerminalId;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::{native_panes::native_mouse_target, App};
+use super::{native_panes::native_mouse_target, WindowCtx};
 
 #[derive(Default)]
 pub(super) struct NativeSelectionState {
@@ -32,12 +32,12 @@ struct Hit {
     link: Option<String>,
 }
 
-impl App {
+impl WindowCtx<'_> {
     fn mark_native_selection_dirty(&mut self) {
-        let Some(id) = self.native_selection.session else {
+        let Some(id) = self.win.native_selection.session else {
             return;
         };
-        if let Some(server) = self.runtime.protocol.as_mut() {
+        if let Some(server) = self.app.runtime.protocol.as_mut() {
             if let Some(session) = server
                 .sessions_mut()
                 .find(|session| session.session_id() == id)
@@ -48,27 +48,32 @@ impl App {
     }
 
     pub(super) fn native_transcript_selection_active(&self) -> bool {
-        self.native_selection.active
+        self.win.native_selection.active
     }
 
     fn native_transcript_hit(&self, captured: Option<TerminalId>) -> Option<Hit> {
-        let (width, height) = self.renderer.terminal_area();
-        let cell = self.renderer.cell_dimensions();
+        let (width, height) = self.win.renderer.terminal_area();
+        let cell = self.win.renderer.cell_dimensions();
         if cell.0 <= 0.0 || cell.1 <= 0.0 {
             return None;
         }
+        let active_tab = self.app.runtime.manager.window_active_tab(self.win.key)?.id;
         let (pane, x, y) = native_mouse_target(
-            &self.runtime.manager.active_pane_rects(width, height),
+            &self
+                .app
+                .runtime
+                .manager
+                .window_active_pane_rects(self.win.key, width, height),
             captured,
             (
-                self.mouse_pos.x as f32,
-                (self.mouse_pos.y - self.tab_bar.content_top() as f64) as f32,
+                self.win.mouse_pos.x as f32,
+                (self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64) as f32,
             ),
             cell,
         )?;
-        let server = self.runtime.protocol.as_ref()?;
+        let server = self.app.runtime.protocol.as_ref()?;
         server
-            .pane_or_unbound_sessions(pane)
+            .pane_or_unbound_sessions_in_tab(active_tab, pane)
             .filter(|session| session.is_full_scene())
             .find_map(|session| {
                 let (id, local_x, _) = session.hit_test(x, y);
@@ -152,82 +157,88 @@ impl App {
         } else {
             valid = false;
         }
-        self.native_selection = NativeSelectionState {
+        self.win.native_selection = NativeSelectionState {
             selection,
             pane: Some(hit.pane),
             session: Some(hit.session),
             active: true,
             invalid: !valid,
             moved: false,
-            ctrl: self.modifiers.control_key(),
+            ctrl: self.win.modifiers.control_key(),
             anchor: Some((position, hit.row.revision)),
             snapshot: None,
-            pointer_origin: (self.mouse_pos.x, self.mouse_pos.y),
+            pointer_origin: (self.win.mouse_pos.x, self.win.mouse_pos.y),
             link: hit.link,
         };
         self.mark_native_selection_dirty();
-        self.needs_redraw = true;
+        self.win.needs_redraw = true;
         true
     }
 
     pub(super) fn update_native_transcript_selection(&mut self) {
-        if self.native_selection.invalid {
+        if self.win.native_selection.invalid {
             return;
         }
-        let Some(pane) = self.native_selection.pane else {
+        let Some(pane) = self.win.native_selection.pane else {
             return;
         };
         let Some(hit) = self.native_transcript_hit(Some(pane)) else {
             self.invalidate_native_transcript_selection();
             return;
         };
-        if Some(hit.session) != self.native_selection.session {
+        if Some(hit.session) != self.win.native_selection.session {
             self.invalidate_native_transcript_selection();
             return;
         }
         let position = hit.row.position(hit.column);
-        let (x, y) = self.native_selection.pointer_origin;
-        let distance = (self.mouse_pos.x - x).hypot(self.mouse_pos.y - y);
-        if distance >= 3.0 || self.native_selection.anchor.map(|a| a.0) != position {
-            self.native_selection.moved = true;
+        let (x, y) = self.win.native_selection.pointer_origin;
+        let distance = (self.win.mouse_pos.x - x).hypot(self.win.mouse_pos.y - y);
+        if distance >= 3.0 || self.win.native_selection.anchor.map(|a| a.0) != position {
+            self.win.native_selection.moved = true;
         }
         let Some(rows) = hit.rows else {
             self.invalidate_native_transcript_selection();
             return;
         };
         for row in rows {
-            if !self.native_selection.selection.observe(row) {
+            if !self.win.native_selection.selection.observe(row) {
                 self.invalidate_native_transcript_selection();
                 return;
             }
         }
-        if !self.native_selection.selection.extend(hit.row, hit.column) {
+        if !self
+            .win
+            .native_selection
+            .selection
+            .extend(hit.row, hit.column)
+        {
             self.invalidate_native_transcript_selection();
             return;
         }
         self.mark_native_selection_dirty();
-        self.needs_redraw = true;
+        self.win.needs_redraw = true;
     }
 
     pub(super) fn end_native_transcript_selection(&mut self) {
         self.update_native_transcript_selection();
-        if !self.native_selection.active {
+        if !self.win.native_selection.active {
             return;
         }
-        self.native_selection.active = false;
-        if self.native_selection.invalid {
+        self.win.native_selection.active = false;
+        if self.win.native_selection.invalid {
             self.mark_native_selection_dirty();
-            self.needs_redraw = true;
+            self.win.needs_redraw = true;
             return;
         }
-        if self.native_selection.ctrl && !self.native_selection.moved {
-            if self.url_detector.is_enabled() {
-                if let Some((position, _)) = self.native_selection.anchor {
+        if self.win.native_selection.ctrl && !self.win.native_selection.moved {
+            if self.win.url_detector.is_enabled() {
+                if let Some((position, _)) = self.win.native_selection.anchor {
                     if let Some(url) = self
+                        .win
                         .native_selection
                         .link
                         .clone()
-                        .or_else(|| self.native_selection.selection.url_at(position))
+                        .or_else(|| self.win.native_selection.selection.url_at(position))
                     {
                         if let Err(error) = ultty::url::UrlDetector::open_url(&url) {
                             tracing::warn!("Failed to open URL: {error}");
@@ -238,91 +249,136 @@ impl App {
             self.invalidate_native_transcript_selection();
             return;
         }
-        self.native_selection.snapshot = self
+        self.win.native_selection.snapshot = self
+            .win
             .native_selection
             .selection
             .text()
             .filter(|text| !text.is_empty());
-        if self.native_selection.snapshot.is_none() {
+        if self.win.native_selection.snapshot.is_none() {
             self.invalidate_native_transcript_selection();
         }
         self.mark_native_selection_dirty();
-        self.needs_redraw = true;
+        self.win.needs_redraw = true;
     }
 
     fn invalidate_native_transcript_selection(&mut self) {
-        self.native_selection.selection = NativeSelection::default();
-        self.native_selection.snapshot = None;
-        self.native_selection.invalid = true;
+        self.win.native_selection.selection = NativeSelection::default();
+        self.win.native_selection.snapshot = None;
+        self.win.native_selection.invalid = true;
         self.mark_native_selection_dirty();
-        self.needs_redraw = true;
+        self.win.needs_redraw = true;
     }
 
     pub(super) fn cancel_native_transcript_selection(&mut self) {
         self.mark_native_selection_dirty();
-        self.native_selection = NativeSelectionState::default();
-        self.needs_redraw = true;
+        self.win.native_selection = NativeSelectionState::default();
+        self.win.needs_redraw = true;
     }
 
     pub(super) fn native_transcript_copy(&mut self) -> bool {
-        if self.native_selection.pane.is_none() {
+        if self.win.native_selection.pane.is_none() {
             return false;
         }
-        if self.runtime.manager.focused_terminal_id() != self.native_selection.pane {
+        if self
+            .app
+            .runtime
+            .manager
+            .window_focused_terminal_id(self.win.key)
+            != self.win.native_selection.pane
+        {
             self.cancel_native_transcript_selection();
             return false;
         }
-        if self.native_selection.invalid {
+        if self.win.native_selection.invalid {
             return true;
         }
-        let owner_present = self.runtime.protocol.as_ref().is_some_and(|server| {
-            server
-                .pane_or_unbound_sessions(self.native_selection.pane.unwrap())
-                .any(|session| Some(session.session_id()) == self.native_selection.session)
+        let active_tab = self
+            .app
+            .runtime
+            .manager
+            .window_active_tab(self.win.key)
+            .map(|tab| tab.id);
+        let owner_present = active_tab.is_some_and(|tab| {
+            self.app.runtime.protocol.as_ref().is_some_and(|server| {
+                server
+                    .pane_or_unbound_sessions_in_tab(tab, self.win.native_selection.pane.unwrap())
+                    .any(|session| Some(session.session_id()) == self.win.native_selection.session)
+            })
         });
         if !owner_present {
             self.invalidate_native_transcript_selection();
             return true;
         }
-        if let Some(text) = self.native_selection.snapshot.clone() {
-            self.copy_to_clipboard(&text);
+        if let Some(text) = self.win.native_selection.snapshot.clone() {
+            self.app.copy_to_clipboard(&text);
         }
         true
     }
 
     fn native_transcript_revision_matches(&self) -> bool {
-        let Some(pane) = self.native_selection.pane else {
+        let Some(pane) = self.win.native_selection.pane else {
             return false;
         };
-        if self.runtime.manager.focused_terminal_id() != Some(pane) {
+        if self
+            .app
+            .runtime
+            .manager
+            .window_focused_terminal_id(self.win.key)
+            != Some(pane)
+        {
             return false;
         }
-        let Some(server) = self.runtime.protocol.as_ref() else {
+        let Some(active_tab) = self
+            .app
+            .runtime
+            .manager
+            .window_active_tab(self.win.key)
+            .map(|tab| tab.id)
+        else {
             return false;
         };
-        server.pane_or_unbound_sessions(pane).any(|session| {
-            Some(session.session_id()) == self.native_selection.session
-                && session
-                    .scene()
-                    .iter_tree(session.scene().root())
-                    .filter_map(SelectionRow::from_region)
-                    .any(|row| Some(row.revision) == self.native_selection.selection.revision())
-        })
+        let Some(server) = self.app.runtime.protocol.as_ref() else {
+            return false;
+        };
+        server
+            .pane_or_unbound_sessions_in_tab(active_tab, pane)
+            .any(|session| {
+                Some(session.session_id()) == self.win.native_selection.session
+                    && session
+                        .scene()
+                        .iter_tree(session.scene().root())
+                        .filter_map(SelectionRow::from_region)
+                        .any(|row| {
+                            Some(row.revision) == self.win.native_selection.selection.revision()
+                        })
+            })
     }
 
     pub(super) fn native_transcript_highlights(&self, pane: TerminalId) -> Vec<SearchMatch> {
-        if self.native_selection.pane != Some(pane) || !self.native_transcript_revision_matches() {
+        if self.win.native_selection.pane != Some(pane)
+            || !self.native_transcript_revision_matches()
+        {
             return Vec::new();
         }
-        let Some(range) = self.native_selection.selection.range() else {
+        let Some(range) = self.win.native_selection.selection.range() else {
             return Vec::new();
         };
-        let Some(server) = self.runtime.protocol.as_ref() else {
+        let Some(active_tab) = self
+            .app
+            .runtime
+            .manager
+            .window_active_tab(self.win.key)
+            .map(|tab| tab.id)
+        else {
+            return Vec::new();
+        };
+        let Some(server) = self.app.runtime.protocol.as_ref() else {
             return Vec::new();
         };
         let Some(session) = server
-            .pane_or_unbound_sessions(pane)
-            .find(|session| Some(session.session_id()) == self.native_selection.session)
+            .pane_or_unbound_sessions_in_tab(active_tab, pane)
+            .find(|session| Some(session.session_id()) == self.win.native_selection.session)
         else {
             return Vec::new();
         };
@@ -331,7 +387,7 @@ impl App {
             .iter_tree(session.scene().root())
             .filter_map(|region| {
                 let row = SelectionRow::from_region(region)?;
-                if Some(row.revision) != self.native_selection.selection.revision() {
+                if Some(row.revision) != self.win.native_selection.selection.revision() {
                     return None;
                 }
                 let start = range
