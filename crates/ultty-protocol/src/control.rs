@@ -211,6 +211,23 @@ pub enum ControlRequest {
         new_window: bool,
     },
 
+    /// Toggle the quick terminal (show if hidden/absent, hide if visible).
+    ToggleQuick {
+        /// Optional `XDG_ACTIVATION_TOKEN` (or X11 startup id) from the caller.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activation_token: Option<String>,
+    },
+
+    /// Show the quick terminal, creating it if it does not yet exist.
+    ShowQuick {
+        /// Optional `XDG_ACTIVATION_TOKEN` (or X11 startup id) from the caller.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        activation_token: Option<String>,
+    },
+
+    /// Hide the quick terminal while keeping its tabs and processes running.
+    HideQuick,
+
     /// Type shell text plus Enter into the foreground PTY. `args` are
     /// joined with spaces without escaping; this does not preserve argv.
     /// Success means queue acceptance, not execution or completion. Use
@@ -701,6 +718,14 @@ pub enum ControlData {
         /// Destination window ID.
         window: u64,
     },
+    /// `ToggleQuick`, `ShowQuick`, or `HideQuick` updated quick terminal visibility.
+    QuickToggled {
+        /// Quick terminal window ID, when a quick terminal exists.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u64>,
+        /// Whether the quick terminal is now visible.
+        visible: bool,
+    },
     Tabs {
         tabs: Vec<TabInfo>,
     },
@@ -999,6 +1024,10 @@ pub struct TerminalInfo {
     pub cwd: Option<String>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// Metadata describing a single window inside an Ultty process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowInfo {
@@ -1014,6 +1043,12 @@ pub struct WindowInfo {
     pub tabs: Vec<usize>,
     /// Whether this window is currently focused.
     pub focused: bool,
+    /// Whether this window has the quick-terminal role (ADR 0028).
+    #[serde(default)]
+    pub quick: bool,
+    /// Whether this window is currently shown/mapped.
+    #[serde(default = "default_true")]
+    pub visible: bool,
 }
 
 /// Metadata describing a single tab.
@@ -1230,6 +1265,8 @@ mod tests {
                     height: 600,
                     tabs: vec![0],
                     focused: true,
+                    quick: false,
+                    visible: true,
                 }],
             },
             ControlData::WindowOpened {
@@ -1241,6 +1278,10 @@ mod tests {
             ControlData::TabMoved {
                 tab_index: 1,
                 window: 2,
+            },
+            ControlData::QuickToggled {
+                window: Some(1),
+                visible: true,
             },
             ControlData::Tabs {
                 tabs: vec![TabInfo {
@@ -1788,6 +1829,13 @@ mod tests {
                 window: None,
                 new_window: true,
             },
+            ControlRequest::ToggleQuick {
+                activation_token: Some("tok-1".into()),
+            },
+            ControlRequest::ShowQuick {
+                activation_token: None,
+            },
+            ControlRequest::HideQuick,
             ControlRequest::Resize {
                 width: 900,
                 height: 600,

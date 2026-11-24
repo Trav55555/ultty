@@ -32,6 +32,8 @@ pub struct Config {
     pub search: crate::vim::search::SearchOptions,
     /// Inline images (sixel and Kitty graphics)
     pub images: ImagesConfig,
+    /// Quick terminal (drop-down/toggled window, ADR 0028)
+    pub quick_terminal: QuickTerminalConfig,
 }
 
 impl Config {
@@ -1124,6 +1126,192 @@ pub struct BehaviorConfig {
     pub single_instance: bool,
 }
 
+/// Edge (or center) of the monitor where the quick terminal appears (ADR 0028).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QuickTerminalPosition {
+    /// Anchored to the top edge of the monitor.
+    #[default]
+    Top,
+    /// Anchored to the bottom edge of the monitor.
+    Bottom,
+    /// Anchored to the left edge of the monitor.
+    Left,
+    /// Anchored to the right edge of the monitor.
+    Right,
+    /// Centered on the monitor.
+    Center,
+}
+
+/// Quick terminal extent along its anchored axis (ADR 0028).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickTerminalSize {
+    /// Percentage of the monitor dimension along the position axis (10..=100).
+    Percent(u8),
+    /// Fixed logical pixels along the position axis (>= 100).
+    Pixels(u32),
+}
+
+impl Default for QuickTerminalSize {
+    fn default() -> Self {
+        Self::Percent(40)
+    }
+}
+
+impl QuickTerminalSize {
+    /// Parse a size string such as `"40%"`, `"480px"`, or `"480"`.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let trimmed = raw.trim();
+        if let Some(pct) = trimmed.strip_suffix('%') {
+            let value: u8 = pct
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid quick_terminal.size percentage '{raw}'"))?;
+            return Ok(Self::Percent(value.clamp(10, 100)));
+        }
+        let px_str = trimmed.strip_suffix("px").unwrap_or(trimmed).trim();
+        let px: u32 = px_str
+            .parse()
+            .map_err(|_| format!("invalid quick_terminal.size '{raw}'"))?;
+        Ok(Self::Pixels(px.max(100)))
+    }
+
+    /// Resolve this size into physical pixels along a monitor axis of `monitor_px`.
+    pub fn resolve_physical(self, monitor_px: u32, scale_factor: f64, min_px: u32) -> u32 {
+        let target = match self {
+            Self::Percent(pct) => {
+                let pct = u64::from(pct.clamp(10, 100));
+                ((u64::from(monitor_px) * pct) / 100) as u32
+            }
+            Self::Pixels(logical_px) => {
+                let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+                    scale_factor
+                } else {
+                    1.0
+                };
+                (f64::from(logical_px.max(100)) * scale).round() as u32
+            }
+        };
+        target.clamp(min_px.min(monitor_px), monitor_px.max(1))
+    }
+}
+
+impl<'de> Deserialize<'de> for QuickTerminalSize {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = QuickTerminalSize;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter
+                    .write_str("a percentage string like \"40%\" or a pixel size like \"480px\"")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                QuickTerminalSize::parse(value).map_err(E::custom)
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let px = u32::try_from(value).unwrap_or(u32::MAX);
+                Ok(QuickTerminalSize::Pixels(px.max(100)))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value <= 0 {
+                    return Err(E::custom("quick_terminal.size must be positive"));
+                }
+                let px = u32::try_from(value).unwrap_or(u32::MAX);
+                Ok(QuickTerminalSize::Pixels(px.max(100)))
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// Configuration for the quick terminal window (ADR 0028).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct QuickTerminalConfig {
+    /// Edge or center of the monitor where the quick terminal is placed.
+    /// On Wayland without layer shell this is a hint; compositor rules control placement.
+    pub position: QuickTerminalPosition,
+    /// Size along the anchored axis (`"40%"` or pixel value).
+    pub size: QuickTerminalSize,
+    /// Hide the quick terminal automatically when it loses focus.
+    pub autohide: bool,
+    /// Optional global hotkey in `[keybindings]` syntax (used by X11/macOS/portal slices;
+    /// ignored where unsupported).
+    pub hotkey: Option<String>,
+}
+
+impl Default for QuickTerminalConfig {
+    fn default() -> Self {
+        Self {
+            position: QuickTerminalPosition::Top,
+            size: QuickTerminalSize::default(),
+            autohide: true,
+            hotkey: None,
+        }
+    }
+}
+
+impl QuickTerminalConfig {
+    /// Compute the quick terminal's physical `(position, size)` for a monitor
+    /// at physical origin `monitor_pos` with physical extent `monitor_size`.
+    pub fn compute_geometry(
+        &self,
+        monitor_pos: (i32, i32),
+        monitor_size: (u32, u32),
+        scale_factor: f64,
+    ) -> ((i32, i32), (u32, u32)) {
+        let (mx, my) = monitor_pos;
+        let mw = monitor_size.0.max(200);
+        let mh = monitor_size.1.max(100);
+        let min_w = (200.0 * scale_factor.max(1.0)).round() as u32;
+        let min_h = (100.0 * scale_factor.max(1.0)).round() as u32;
+
+        match self.position {
+            QuickTerminalPosition::Top => {
+                let h = self.size.resolve_physical(mh, scale_factor, min_h);
+                ((mx, my), (mw, h))
+            }
+            QuickTerminalPosition::Bottom => {
+                let h = self.size.resolve_physical(mh, scale_factor, min_h);
+                ((mx, my + (mh - h) as i32), (mw, h))
+            }
+            QuickTerminalPosition::Left => {
+                let w = self.size.resolve_physical(mw, scale_factor, min_w);
+                ((mx, my), (w, mh))
+            }
+            QuickTerminalPosition::Right => {
+                let w = self.size.resolve_physical(mw, scale_factor, min_w);
+                ((mx + (mw - w) as i32, my), (w, mh))
+            }
+            QuickTerminalPosition::Center => {
+                let w = self.size.resolve_physical(mw, scale_factor, min_w);
+                let h = self.size.resolve_physical(mh, scale_factor, min_h);
+                let x = mx + ((mw - w) / 2) as i32;
+                let y = my + ((mh - h) / 2) as i32;
+                ((x, y), (w, h))
+            }
+        }
+    }
+}
+
 impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
@@ -2004,5 +2192,74 @@ copy = "ctrl+c"
         assert!(!BehaviorConfig::default().single_instance);
         let config: Config = toml::from_str("[behavior]\nsingle_instance = true\n").unwrap();
         assert!(config.behavior.single_instance);
+    }
+
+    #[test]
+    fn test_quick_terminal_config_defaults_parsing_and_geometry() {
+        let default = QuickTerminalConfig::default();
+        assert_eq!(default.position, QuickTerminalPosition::Top);
+        assert_eq!(default.size, QuickTerminalSize::Percent(40));
+        assert!(default.autohide);
+        assert_eq!(default.hotkey, None);
+
+        let parsed: Config = toml::from_str(
+            r#"
+[quick_terminal]
+position = "right"
+size = "35%"
+autohide = false
+hotkey = "ctrl+grave"
+"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.quick_terminal.position, QuickTerminalPosition::Right);
+        assert_eq!(parsed.quick_terminal.size, QuickTerminalSize::Percent(35));
+        assert!(!parsed.quick_terminal.autohide);
+        assert_eq!(parsed.quick_terminal.hotkey.as_deref(), Some("ctrl+grave"));
+
+        let px_parsed: Config =
+            toml::from_str("[quick_terminal]\nposition = \"bottom\"\nsize = \"450px\"\n").unwrap();
+        assert_eq!(
+            px_parsed.quick_terminal.size,
+            QuickTerminalSize::Pixels(450)
+        );
+
+        assert_eq!(
+            default.compute_geometry((0, 0), (1280, 800), 1.0),
+            ((0, 0), (1280, 320))
+        );
+        assert_eq!(
+            px_parsed
+                .quick_terminal
+                .compute_geometry((100, 50), (1920, 1080), 1.0),
+            ((100, 680), (1920, 450))
+        );
+        let left = QuickTerminalConfig {
+            position: QuickTerminalPosition::Left,
+            size: QuickTerminalSize::Percent(25),
+            ..Default::default()
+        };
+        assert_eq!(
+            left.compute_geometry((1920, 0), (1600, 900), 1.0),
+            ((1920, 0), (400, 900))
+        );
+        let right = QuickTerminalConfig {
+            position: QuickTerminalPosition::Right,
+            size: QuickTerminalSize::Percent(25),
+            ..Default::default()
+        };
+        assert_eq!(
+            right.compute_geometry((1920, 0), (1600, 900), 1.0),
+            ((3120, 0), (400, 900))
+        );
+        let center = QuickTerminalConfig {
+            position: QuickTerminalPosition::Center,
+            size: QuickTerminalSize::Percent(50),
+            ..Default::default()
+        };
+        assert_eq!(
+            center.compute_geometry((0, 0), (1200, 800), 1.0),
+            ((300, 200), (600, 400))
+        );
     }
 }
