@@ -18,10 +18,61 @@
     "expected": { "type": "session_ready", "session_id": "72623859790382856", "root_region": 0, "width": 120, "height": 40 }
   },
   {
+    "name": "begin atomic frame",
+    "direction": "app",
+    "hex": "555430000400000007000000",
+    "expected": { "type": "begin_frame", "frame_id": 7 }
+  },
+  {
+    "name": "end atomic frame",
+    "direction": "app",
+    "hex": "555431000400000007000000",
+    "expected": { "type": "end_frame", "frame_id": 7 }
+  },
+  {
+    "name": "create flex row scrollable region with rounded border and RGB foreground",
+    "direction": "app",
+    "hex": "55541000600000000700000000000000ffffffff010000000400060000803f0000000000020000c842000000000000010000000001000000000100000000010000000000000000000001020000000000000000000000000101c8dcff010011040f0100010000803f",
+    "expected": {
+      "type": "create_region",
+      "id": 7,
+      "parent": 0,
+      "insert_index": -1,
+      "flex_grow": 1.0,
+      "width_percent": 100.0,
+      "fg_rgb": [200, 220, 255],
+      "bold": true
+    }
+  },
+  {
+    "name": "delete region",
+    "direction": "app",
+    "hex": "555412000400000007000000",
+    "expected": { "type": "delete_region", "region": 7 }
+  },
+  {
     "name": "plain content counts UTF-8 bytes",
     "direction": "app",
     "hex": "555420000f0000002a0000000103000000e7958c020000",
     "expected": { "type": "text", "region": 42, "text": "界" }
+  },
+  {
+    "name": "rich text with styled and plain spans",
+    "direction": "app",
+    "hex": "5554200031000000070000000202000000040000006f6b3a200100060000000000010000803f04000000646f6e65000000000000000000803f",
+    "expected": { "type": "rich_text", "region": 7, "spans": ["ok: ", "done"] }
+  },
+  {
+    "name": "append streaming text delta",
+    "direction": "app",
+    "hex": "555423000e000000070000000600000064656c74610a",
+    "expected": { "type": "append_content", "region": 7, "text": "delta\n" }
+  },
+  {
+    "name": "set region metadata key-value pairs",
+    "direction": "app",
+    "hex": "55541400260000000700000002000000020000006964030000006c6f6704000000726f6c65050000006167656e74",
+    "expected": { "type": "set_region_metadata", "region": 7, "metadata": [["id", "log"], ["role", "agent"]] }
   },
   {
     "name": "v1 legacy Markdown widget",
@@ -34,6 +85,76 @@
     "direction": "app",
     "hex": "55542000160000002a0000000302040000006128290a030000006c756101",
     "expected": { "type": "code", "region": 42, "source": "a()\n", "language": "lua", "line_numbers": true }
+  },
+  {
+    "name": "create inline surface (ADR 0020)",
+    "direction": "app",
+    "hex": "55541500500000000a0000000600000200000400060000000000000000000000000000000001000000000100000000010000000001000000000000000000000000000000000000000000000000000000000000000000803f",
+    "expected": { "type": "create_surface", "region": 10, "rows": 6 }
+  },
+  {
+    "name": "close inline surface",
+    "direction": "app",
+    "hex": "55541600040000000a000000",
+    "expected": { "type": "close_surface", "region": 10 }
+  },
+  {
+    "name": "terminal reports inline surface placed",
+    "direction": "terminal",
+    "hex": "55542600050000000a00000000",
+    "expected": { "type": "surface_event", "region": 10, "kind": "placed" }
+  },
+  {
+    "name": "set accessibility semantics for live log region (ADR 0021)",
+    "direction": "app",
+    "hex": "55542600200000000700000004010a0000005472616e736372697074000101000000000000000000",
+    "expected": { "type": "set_semantics", "region": 7, "role": "log", "label": "Transcript", "live": "polite", "busy": true }
+  },
+  {
+    "name": "programmatic animated scroll",
+    "direction": "app",
+    "hex": "555440000d00000007000000000000000000484101",
+    "expected": { "type": "scroll", "region": 7, "x": 0.0, "y": 12.5, "animate": true }
+  },
+  {
+    "name": "layout computed reply for a single region",
+    "direction": "terminal",
+    "hex": "555410002f000000010700000003010000000700000000000000000000000000a0420000c0410000803f0000803f00009c420000b04101",
+    "expected": {
+      "type": "layout_computed",
+      "frame_id": 7,
+      "trigger": "tree_change",
+      "region": 7,
+      "width": 80.0,
+      "height": 24.0,
+      "content_width": 78.0,
+      "content_height": 22.0,
+      "visible": true
+    }
+  },
+  {
+    "name": "keyboard Ctrl+C input event",
+    "direction": "terminal",
+    "hex": "55542000140000000700000004006300000002000000000000000002",
+    "expected": { "type": "input_key_down", "region": 7, "char": "c", "modifiers": 2 }
+  },
+  {
+    "name": "terminal resize notification",
+    "direction": "terminal",
+    "hex": "555422000400000078002800",
+    "expected": { "type": "resize", "width": 120, "height": 40 }
+  },
+  {
+    "name": "terminal error response",
+    "direction": "terminal",
+    "hex": "5554ff001f0000009001190000007375726661636520726f7773206f7574206f662072616e6765",
+    "expected": { "type": "error", "code": 400, "message": "surface rows out of range" }
+  },
+  {
+    "name": "clean session disconnect",
+    "direction": "app",
+    "hex": "5554ff0000000000",
+    "expected": { "type": "disconnect" }
   },
   {
     "name": "ping uses the terminal namespace",
@@ -64,5 +185,29 @@
     "direction": "app",
     "hex": "555420000d0000002a0000000101000000ff020000",
     "expected": { "type": "reject", "error": "invalid_utf8" }
+  },
+  {
+    "name": "unknown app message type is rejected",
+    "direction": "app",
+    "hex": "5554fe0000000000",
+    "expected": { "type": "reject", "error": "unknown_message_type" }
+  },
+  {
+    "name": "NaN scroll offset is rejected",
+    "direction": "app",
+    "hex": "555440000d00000007000000000000000000c07f00",
+    "expected": { "type": "reject", "error": "invalid_float" }
+  },
+  {
+    "name": "surface operations using root region id 0 are rejected",
+    "direction": "app",
+    "hex": "555416000400000000000000",
+    "expected": { "type": "reject", "error": "invalid_data" }
+  },
+  {
+    "name": "surface creation with zero rows is rejected",
+    "direction": "app",
+    "hex": "5554150050000000010000000000000200000400060000000000000000000000000000000001000000000100000000010000000001000000000000000000000000000000000000000000000000000000000000000000803f",
+    "expected": { "type": "reject", "error": "invalid_data" }
   }
 ]
