@@ -24,6 +24,7 @@ use ultty::control::common::{
 };
 use ultty::terminal_manager::{SplitDirection, TerminalId, WindowKey};
 use winit::dpi::PhysicalSize;
+use winit::event_loop::ActiveEventLoop;
 
 impl WindowCtx<'_> {
     /// Answer the pending resizes for this window that `current` size settles:
@@ -64,18 +65,59 @@ impl WindowCtx<'_> {
 }
 
 impl App {
-    pub(super) fn handle_control_requests(&mut self) {
+    /// Resolve a window-scoped command target in ADR 0027 precedence order:
+    /// explicit `--window`, else the window holding `--pane`/`ULTTY_PANE`,
+    /// else the last focused window.
+    fn resolve_window_target(
+        &self,
+        window: Option<u64>,
+        pane: Option<u64>,
+    ) -> Result<WindowKey, ultty_protocol::control::ControlResponse> {
+        use ultty_protocol::control::ControlResponse;
+
+        if let Some(id) = window {
+            return usize::try_from(id)
+                .ok()
+                .map(WindowKey::new)
+                .filter(|key| self.windows.contains_key(key))
+                .ok_or_else(|| ControlResponse::Error {
+                    code: 6,
+                    message: format!("No window {id}; `ulttyctl windows` lists them"),
+                });
+        }
+        if let Some(pane_id) = pane {
+            let terminal = resolve_control_target(&self.shared.runtime.manager, Some(pane_id))?;
+            return self
+                .shared
+                .runtime
+                .manager
+                .window_for_pane(terminal)
+                .filter(|key| self.windows.contains_key(key))
+                .ok_or_else(|| ControlResponse::Error {
+                    code: 6,
+                    message: format!("No open window for pane {pane_id}"),
+                });
+        }
+        self.target_window_key()
+            .ok_or_else(|| ControlResponse::Error {
+                code: 1,
+                message: "No open window".to_string(),
+            })
+    }
+
+    pub(super) fn handle_control_requests(&mut self, event_loop: &ActiveEventLoop) -> bool {
         use ultty_protocol::control::{ControlRequest, ControlResponse};
 
         let requests = {
             let Some(ref mut server) = self.shared.control_server else {
-                return;
+                return false;
             };
             server.take_pending_requests()
         };
 
         let mut responses: Vec<(usize, ControlResponse)> = Vec::new();
         let mut subscriptions: Vec<(usize, Option<u64>)> = Vec::new();
+        let mut should_exit = false;
 
         'requests: for (client_key, request) in requests {
             let mut request = request;
@@ -205,16 +247,24 @@ impl App {
                 continue;
             }
 
-            if let ControlRequest::Resize { width, height } = request {
+            if let ControlRequest::Resize {
+                width,
+                height,
+                window,
+                pane,
+            } = request
+            {
                 let requested = PhysicalSize::new(width, height);
-                if let Some(response) = self.request_window_resize(client_key, &request, requested)
+                if let Some(response) =
+                    self.request_window_resize(client_key, &request, requested, window, pane)
                 {
                     responses.push((client_key, response));
                 }
                 continue;
             }
 
-            let response = self.process_control_request(client_key, request);
+            let response =
+                self.process_control_request(client_key, request, event_loop, &mut should_exit);
             responses.push((client_key, response));
         }
 
@@ -226,6 +276,7 @@ impl App {
                 server.start_subscription(client_key, target);
             }
         }
+        should_exit
     }
 
     /// The earliest instant a pending wait, override push or resize needs
@@ -261,17 +312,17 @@ impl App {
         client_key: usize,
         request: &ultty_protocol::control::ControlRequest,
         requested: PhysicalSize<u32>,
+        window: Option<u64>,
+        pane: Option<u64>,
     ) -> Option<ultty_protocol::control::ControlResponse> {
         use ultty_protocol::control::ControlResponse;
 
         if let Some(response) = self.shared.auth_error_for_request(client_key, request) {
             return Some(response);
         }
-        let Some(key) = self.target_window_key() else {
-            return Some(ControlResponse::Error {
-                code: 1,
-                message: "No open window".to_string(),
-            });
+        let key = match self.resolve_window_target(window, pane) {
+            Ok(key) => key,
+            Err(response) => return Some(response),
         };
         self.with_window(key, |ctx| {
             let result = ctx.win.window.request_inner_size(requested);
@@ -316,9 +367,11 @@ impl App {
         &mut self,
         client_key: usize,
         request: ultty_protocol::control::ControlRequest,
+        event_loop: &ActiveEventLoop,
+        should_exit: &mut bool,
     ) -> ultty_protocol::control::ControlResponse {
         use ultty_protocol::control::{
-            ControlData, ControlRequest, ControlResponse, TabInfo, VersionInfo,
+            ControlData, ControlRequest, ControlResponse, TabInfo, VersionInfo, WindowInfo,
         };
 
         if let Some(response) = self.shared.auth_error_for_request(client_key, &request) {
@@ -350,7 +403,7 @@ impl App {
                 }),
             ControlRequest::WithOwner { owner, request } => match self.shared.owner_error(&owner) {
                 Some(response) => response,
-                None => self.process_control_request(client_key, *request),
+                None => self.process_control_request(client_key, *request, event_loop, should_exit),
             },
 
             ControlRequest::Version => ControlResponse::Data(ControlData::Version(VersionInfo {
@@ -388,6 +441,87 @@ impl App {
                 }
             }
 
+            ControlRequest::ListWindows => {
+                let manager = &self.shared.runtime.manager;
+                let windows: Vec<WindowInfo> = self
+                    .windows
+                    .iter()
+                    .map(|(&key, win)| {
+                        let size = win.window.inner_size();
+                        let tabs: Vec<usize> = manager
+                            .tabs()
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, tab)| tab.window_id == key)
+                            .map(|(idx, _)| idx)
+                            .collect();
+                        let title = manager
+                            .window_active_tab(key)
+                            .map(|tab| manager.tab_display_title(tab.id))
+                            .filter(|title| !title.is_empty())
+                            .unwrap_or_else(|| "Ultty".to_string());
+                        WindowInfo {
+                            id: key.raw() as u64,
+                            title,
+                            width: size.width,
+                            height: size.height,
+                            tabs,
+                            focused: self.focused_window == Some(key),
+                        }
+                    })
+                    .collect();
+                ControlResponse::Data(ControlData::Windows { windows })
+            }
+
+            ControlRequest::NewWindow {
+                title,
+                command,
+                args,
+                working_dir,
+            } => {
+                if command.is_none() && (!args.is_empty() || working_dir.is_some()) {
+                    return invalid_spawn_options();
+                }
+                match self.open_new_window_with_command(
+                    event_loop,
+                    command.as_deref(),
+                    &args,
+                    working_dir.as_deref(),
+                    title.as_deref(),
+                ) {
+                    Ok((win_key, tab_id)) => {
+                        let tabs = self.shared.runtime.manager.tabs();
+                        match tabs.iter().position(|tab| tab.id == tab_id) {
+                            Some(tab_index) => ControlResponse::Data(ControlData::WindowOpened {
+                                window: win_key.raw() as u64,
+                                tab_index,
+                                pane: tabs[tab_index].focused_terminal.raw() as u64,
+                                warning: None,
+                            }),
+                            None => ControlResponse::Error {
+                                code: 2,
+                                message: "The window closed as soon as it opened".to_string(),
+                            },
+                        }
+                    }
+                    Err(e) => ControlResponse::Error {
+                        code: 2,
+                        message: format!("Failed to create window: {e}"),
+                    },
+                }
+            }
+
+            ControlRequest::CloseWindow { window } => {
+                let key = match self.resolve_window_target(Some(window), None) {
+                    Ok(key) => key,
+                    Err(response) => return response,
+                };
+                if self.close_window(key) {
+                    *should_exit = true;
+                }
+                ControlResponse::Ok
+            }
+
             ControlRequest::ListTabs => {
                 let active_tab_id = self.shared.runtime.manager.active_tab().map(|t| t.id);
                 let tabs: Vec<TabInfo> = self
@@ -399,6 +533,7 @@ impl App {
                     .enumerate()
                     .map(|(i, tab)| TabInfo {
                         index: i,
+                        window: tab.window_id.raw() as u64,
                         title: self.shared.runtime.manager.tab_display_title(tab.id),
                         active: Some(tab.id) == active_tab_id,
                         pid: self
@@ -618,15 +753,15 @@ impl App {
                 command,
                 args,
                 working_dir,
+                window,
+                pane,
             } => {
                 if command.is_none() && (!args.is_empty() || working_dir.is_some()) {
                     return invalid_spawn_options();
                 }
-                let Some(win_key) = self.target_window_key() else {
-                    return ControlResponse::Error {
-                        code: 1,
-                        message: "No open window".to_string(),
-                    };
+                let win_key = match self.resolve_window_target(window, pane) {
+                    Ok(key) => key,
+                    Err(response) => return response,
                 };
                 let result = if let Some(cmd) = command {
                     self.shared.create_tab_with_command_in_window(
@@ -891,22 +1026,24 @@ impl App {
                 }
             }
 
-            ControlRequest::FocusWindow => {
-                if let Some(win) = self
-                    .target_window_key()
-                    .and_then(|key| self.windows.get(&key))
-                {
+            ControlRequest::FocusWindow { window, pane } => {
+                let key = match self.resolve_window_target(window, pane) {
+                    Ok(key) => key,
+                    Err(response) => return response,
+                };
+                if let Some(win) = self.windows.get(&key) {
                     win.window.focus_window();
                 }
                 ControlResponse::Ok
             }
 
-            ControlRequest::ToggleFullscreen => {
+            ControlRequest::ToggleFullscreen { window, pane } => {
                 use winit::window::Fullscreen;
-                if let Some(win) = self
-                    .target_window_key()
-                    .and_then(|key| self.windows.get(&key))
-                {
+                let key = match self.resolve_window_target(window, pane) {
+                    Ok(key) => key,
+                    Err(response) => return response,
+                };
+                if let Some(win) = self.windows.get(&key) {
                     let current = win.window.fullscreen();
                     if current.is_some() {
                         win.window.set_fullscreen(None);
@@ -918,13 +1055,16 @@ impl App {
                 ControlResponse::Ok
             }
 
-            ControlRequest::Resize { width, height } => {
+            ControlRequest::Resize {
+                width,
+                height,
+                window,
+                pane,
+            } => {
                 let requested = PhysicalSize::new(width, height);
-                let Some(key) = self.target_window_key() else {
-                    return ControlResponse::Error {
-                        code: 1,
-                        message: "No open window".to_string(),
-                    };
+                let key = match self.resolve_window_target(window, pane) {
+                    Ok(key) => key,
+                    Err(response) => return response,
                 };
                 self.with_window(key, |ctx| {
                     let result = ctx.win.window.request_inner_size(requested);
@@ -941,12 +1081,18 @@ impl App {
                 })
             }
 
-            ControlRequest::SetOpacity { opacity } => {
-                if let Some(key) = self.target_window_key() {
-                    if let Some(win) = self.windows.get_mut(&key) {
-                        win.renderer.set_opacity(opacity.clamp(0.0, 1.0));
-                        win.needs_redraw = true;
-                    }
+            ControlRequest::SetOpacity {
+                opacity,
+                window,
+                pane,
+            } => {
+                let key = match self.resolve_window_target(window, pane) {
+                    Ok(key) => key,
+                    Err(response) => return response,
+                };
+                if let Some(win) = self.windows.get_mut(&key) {
+                    win.renderer.set_opacity(opacity.clamp(0.0, 1.0));
+                    win.needs_redraw = true;
                 }
                 ControlResponse::Ok
             }
@@ -981,7 +1127,7 @@ impl App {
                 ControlResponse::Ok
             }
 
-            ControlRequest::Screenshot { path } => {
+            ControlRequest::Screenshot { path, window, pane } => {
                 let path = match path {
                     Some(path_str) => std::path::PathBuf::from(path_str),
                     None => {
@@ -992,11 +1138,9 @@ impl App {
                             .unwrap_or_else(|| std::path::PathBuf::from(&filename))
                     }
                 };
-                let Some(key) = self.target_window_key() else {
-                    return ControlResponse::Error {
-                        code: 1,
-                        message: "No open window".to_string(),
-                    };
+                let key = match self.resolve_window_target(window, pane) {
+                    Ok(key) => key,
+                    Err(response) => return response,
                 };
                 let result = self
                     .with_window(key, |ctx| {
@@ -1095,7 +1239,9 @@ impl App {
             ControlRequest::Batch { commands } => {
                 let results: Vec<ControlResponse> = commands
                     .into_iter()
-                    .map(|cmd| self.process_control_request(client_key, cmd))
+                    .map(|cmd| {
+                        self.process_control_request(client_key, cmd, event_loop, should_exit)
+                    })
                     .collect();
                 ControlResponse::Data(ControlData::BatchResults { results })
             }
@@ -1109,7 +1255,9 @@ impl App {
 
             ControlRequest::WithToken { token, request } => {
                 match self.shared.authenticate_client(client_key, &token) {
-                    Ok(()) => self.process_control_request(client_key, *request),
+                    Ok(()) => {
+                        self.process_control_request(client_key, *request, event_loop, should_exit)
+                    }
                     Err(response) => response,
                 }
             }
@@ -1470,6 +1618,11 @@ impl ProcessState {
             return;
         }
         let now = Instant::now();
+        let window = self
+            .runtime
+            .manager
+            .window_for_pane(pane)
+            .map(|w| w.raw() as u64);
         let mut answered = Vec::new();
         self.pending_control_waits.retain_mut(|wait| {
             if wait.pane() != pane || !wait.observe(event, now) {
@@ -1484,7 +1637,7 @@ impl ProcessState {
                     sequence: *sequence,
                     exit_code: *exit_code,
                 })),
-                event => super::control_events::control_event(pane, event)
+                event => super::control_events::control_event(pane, window, event)
                     .map(|event| ControlResponse::Data(ControlData::WaitEvent { event })),
             };
             if let Some(response) = response {
@@ -2423,7 +2576,19 @@ mod tests {
             command: None,
             args: Vec::new(),
             working_dir: None,
+            window: None,
+            pane: None,
         }));
+        assert!(control_request_requires_auth(&ControlRequest::ListWindows));
+        assert!(control_request_requires_auth(&ControlRequest::NewWindow {
+            title: None,
+            command: None,
+            args: Vec::new(),
+            working_dir: None,
+        }));
+        assert!(control_request_requires_auth(
+            &ControlRequest::CloseWindow { window: 0 }
+        ));
         assert!(control_request_requires_auth(&ControlRequest::RunCommand {
             command: "make".to_string(),
             args: vec!["test".to_string()],

@@ -82,6 +82,7 @@ pub fn pane_infos(
             panes.push(ultty_protocol::control::PaneInfo {
                 id: pane_id.raw() as u64,
                 tab_index,
+                window: tab.window_id.raw() as u64,
                 active,
                 focused: active && Some(tab.id) == active_tab_id,
                 title,

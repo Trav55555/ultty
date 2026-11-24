@@ -252,6 +252,9 @@ impl ControlServer {
                 "job_status",
                 "wait_job",
                 "new_tab",
+                "list_windows",
+                "new_window",
+                "close_window",
                 "run_command",
                 "run_command_and_wait",
                 "split_pane",
@@ -606,7 +609,7 @@ impl ControlServer {
                     .iter()
                     .filter(|(record, _)| {
                         record.cursor.sequence > cursor.sequence
-                            && target.is_none_or(|pane| pane == record.event.pane())
+                            && target.is_none_or(|pane| record.event.pane() == Some(pane))
                     })
                     .map(|(_, bytes)| bytes.as_slice())
                     .collect()
@@ -706,7 +709,7 @@ impl ControlServer {
             .filter(|(_, client)| {
                 client
                     .subscription
-                    .is_some_and(|target| target.is_none_or(|pane| pane == event.pane()))
+                    .is_some_and(|target| target.is_none_or(|pane| event.pane() == Some(pane)))
                     && (client.subscription_v2
                         || !matches!(event, ControlEvent::ProgramStatusChanged { .. }))
             })
@@ -1027,7 +1030,24 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
                 command,
                 args,
                 working_dir: None,
+                window: None,
+                pane: None,
             })
+        }
+        "windows" => Some(ControlRequest::ListWindows),
+        "new-window" => {
+            let command = parts.next().map(String::from);
+            let args: Vec<String> = parts.map(String::from).collect();
+            Some(ControlRequest::NewWindow {
+                title: None,
+                command,
+                args,
+                working_dir: None,
+            })
+        }
+        "close-window" => {
+            let window = parts.next()?.parse().ok()?;
+            Some(ControlRequest::CloseWindow { window })
         }
         "switch-tab" => {
             let index = parse_display_tab_index(parts.next()?)?;
@@ -1037,11 +1057,21 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
             let index = parts.next().and_then(parse_display_tab_index);
             Some(ControlRequest::CloseTab { index })
         }
-        "focus" => Some(ControlRequest::FocusWindow),
-        "fullscreen" => Some(ControlRequest::ToggleFullscreen),
+        "focus" => Some(ControlRequest::FocusWindow {
+            window: None,
+            pane: None,
+        }),
+        "fullscreen" => Some(ControlRequest::ToggleFullscreen {
+            window: None,
+            pane: None,
+        }),
         "opacity" => {
             let opacity = parts.next()?.parse().ok()?;
-            Some(ControlRequest::SetOpacity { opacity })
+            Some(ControlRequest::SetOpacity {
+                opacity,
+                window: None,
+                pane: None,
+            })
         }
         "send-raw" => {
             let hex_str: String = parts.collect::<Vec<_>>().join("");
@@ -1060,11 +1090,20 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
         "resize" => {
             let width: u32 = parts.next()?.parse().ok()?;
             let height: u32 = parts.next()?.parse().ok()?;
-            Some(ControlRequest::Resize { width, height })
+            Some(ControlRequest::Resize {
+                width,
+                height,
+                window: None,
+                pane: None,
+            })
         }
         "screenshot" => {
             let path = parts.next().map(String::from);
-            Some(ControlRequest::Screenshot { path })
+            Some(ControlRequest::Screenshot {
+                path,
+                window: None,
+                pane: None,
+            })
         }
         "search" => {
             let pattern: String = parts.collect::<Vec<_>>().join(" ");
@@ -1212,6 +1251,24 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                     info.focused
                 )
             }
+            ControlData::Windows { windows } => {
+                let mut out = String::new();
+                for window in windows {
+                    let marker = if window.focused { "*" } else { " " };
+                    let tabs = window
+                        .tabs
+                        .iter()
+                        .map(|index| (index + 1).to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    out.push_str(&format!(
+                        "{}{} {}x{} tabs:[{}] {}\n",
+                        marker, window.id, window.width, window.height, tabs, window.title
+                    ));
+                }
+                out
+            }
+            ControlData::WindowOpened { window, .. } => format!("{window}\n"),
             ControlData::Tabs { tabs } => {
                 let mut out = String::new();
                 for tab in tabs {
@@ -1666,9 +1723,33 @@ mod tests {
             parse_request_only(b"resize 1920 1080"),
             Some(ControlRequest::Resize {
                 width: 1920,
-                height: 1080
+                height: 1080,
+                window: None,
+                pane: None,
             })
         );
+    }
+
+    #[test]
+    fn parse_window_text_commands() {
+        assert_eq!(
+            parse_request_only(b"windows"),
+            Some(ControlRequest::ListWindows)
+        );
+        assert_eq!(
+            parse_request_only(b"new-window htop -d 5"),
+            Some(ControlRequest::NewWindow {
+                title: None,
+                command: Some("htop".to_string()),
+                args: vec!["-d".to_string(), "5".to_string()],
+                working_dir: None,
+            })
+        );
+        assert_eq!(
+            parse_request_only(b"close-window 2"),
+            Some(ControlRequest::CloseWindow { window: 2 })
+        );
+        assert_eq!(parse_request_only(b"close-window"), None);
     }
 
     #[test]
@@ -1800,6 +1881,7 @@ mod tests {
         let pane = |id, focused, title: &str, foreground: Option<&str>| PaneInfo {
             id,
             tab_index: 0,
+            window: 0,
             active: focused,
             focused,
             title: title.to_string(),
@@ -2233,11 +2315,15 @@ mod tests {
         assert_eq!(snapshot, Some(Vec::new()));
         assert_eq!(replayed, 0);
         drop(stream);
-        server.publish(&ControlEvent::Bell { pane: 1 });
+        server.publish(&ControlEvent::Bell {
+            pane: 1,
+            window: None,
+        });
         server.publish(&ControlEvent::ProgramStatusChanged {
             pane: 7,
             generation: 2,
             reason: ultty_protocol::control::StatusChangeReason::Report,
+            window: None,
         });
         let mut resumed = subscribe_v2(&mut server, Some(cursor), Some(7));
         assert!(matches!(
@@ -2254,7 +2340,10 @@ mod tests {
             record.event,
             ControlEvent::ProgramStatusChanged { pane: 7, .. }
         ));
-        server.publish(&ControlEvent::Bell { pane: 7 });
+        server.publish(&ControlEvent::Bell {
+            pane: 7,
+            window: None,
+        });
         let record: ControlEventRecord = serde_json::from_str(&next_line(&mut resumed)).unwrap();
         assert_eq!(record.cursor.sequence, 3);
     }
@@ -2284,7 +2373,10 @@ mod tests {
         ));
         let expired = server.cursor();
         for _ in 0..=MAX_EVENT_HISTORY {
-            server.publish(&ControlEvent::Bell { pane: 1 });
+            server.publish(&ControlEvent::Bell {
+                pane: 1,
+                window: None,
+            });
         }
         assert_eq!(server.history.len(), MAX_EVENT_HISTORY);
         assert!(server.history_bytes <= MAX_EVENT_HISTORY_BYTES);
@@ -2307,8 +2399,12 @@ mod tests {
             pane: 7,
             generation: 1,
             reason: ultty_protocol::control::StatusChangeReason::Report,
+            window: None,
         });
-        server.publish(&ControlEvent::Bell { pane: 7 });
+        server.publish(&ControlEvent::Bell {
+            pane: 7,
+            window: None,
+        });
         assert_eq!(next_line(&mut stream), "{\"event\":\"bell\",\"pane\":7}\n");
     }
 
@@ -2321,13 +2417,21 @@ mod tests {
         let server = test_server("owner-lifetime");
         assert_eq!(before.pid, server.owner().pid);
         assert_ne!(before.epoch, server.owner().epoch);
-        assert!(matches!(
-            server.description(),
-            ControlResponse::Data(ControlData::Description {
-                schema_version: 2,
-                ..
-            })
-        ));
+        let ControlResponse::Data(ControlData::Description {
+            schema_version,
+            supported_operations,
+            ..
+        }) = server.description()
+        else {
+            panic!("expected Description");
+        };
+        assert_eq!(schema_version, 2);
+        for op in ["list_windows", "new_window", "close_window"] {
+            assert!(
+                supported_operations.iter().any(|item| item == op),
+                "missing operation {op}"
+            );
+        }
     }
 
     #[test]
@@ -2343,15 +2447,29 @@ mod tests {
             )
         );
 
-        server.publish(&ControlEvent::Bell { pane: 2 });
+        server.publish(&ControlEvent::Bell {
+            pane: 2,
+            window: None,
+        });
         server.publish(&ControlEvent::CommandFinished {
             pane: 5,
             exit_code: Some(0),
+            window: None,
         });
+        server.publish(&ControlEvent::WindowOpened { window: 1 });
+        server.publish(&ControlEvent::WindowClosed { window: 1 });
         assert_eq!(next_line(&mut events), "{\"event\":\"bell\",\"pane\":2}\n");
         assert_eq!(
             next_line(&mut events),
             "{\"event\":\"command_finished\",\"pane\":5,\"exit_code\":0}\n"
+        );
+        assert_eq!(
+            next_line(&mut events),
+            "{\"event\":\"window_opened\",\"window\":1}\n"
+        );
+        assert_eq!(
+            next_line(&mut events),
+            "{\"event\":\"window_closed\",\"window\":1}\n"
         );
     }
 
@@ -2361,8 +2479,15 @@ mod tests {
         let mut events = subscribe(&mut server, Some(7));
         next_line(&mut events);
 
-        server.publish(&ControlEvent::Bell { pane: 1 });
-        server.publish(&ControlEvent::Bell { pane: 7 });
+        server.publish(&ControlEvent::WindowOpened { window: 1 });
+        server.publish(&ControlEvent::Bell {
+            pane: 1,
+            window: Some(0),
+        });
+        server.publish(&ControlEvent::Bell {
+            pane: 7,
+            window: None,
+        });
         assert_eq!(next_line(&mut events), "{\"event\":\"bell\",\"pane\":7}\n");
     }
 
@@ -2387,6 +2512,7 @@ mod tests {
             pane: 1,
             title: String::new(),
             body: "x".repeat(64 * 1024),
+            window: None,
         };
         // The socket buffer takes some; the backlog limit takes the rest.
         for _ in 0..(4 * MAX_SUBSCRIBER_BACKLOG / (64 * 1024)) {

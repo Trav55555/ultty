@@ -177,7 +177,7 @@ struct ProcessState {
     pending_semantic_actions: Vec<control::PendingSemanticAction>,
     pending_resizes: Vec<(WindowKey, control_resize::PendingResize)>,
     next_override_request: u32,
-    published_panes: Vec<ultty::terminal_manager::TerminalId>,
+    published_panes: Vec<(ultty::terminal_manager::TerminalId, Option<u64>)>,
     socket_wakeup: wakeup::SocketWakeup,
     auto_dump_frames: u32,
     pending_new_windows: usize,
@@ -590,7 +590,7 @@ impl App {
         let pty_proxy = std::sync::Mutex::new(event_proxy.clone());
         let published_panes = control_events::open_panes(&terminal_manager)
             .into_iter()
-            .map(|(pane, _)| pane)
+            .map(|(pane, _, window)| (pane, Some(window.raw() as u64)))
             .collect();
         let mut runtime =
             ultty::runtime::SessionRuntime::new(terminal_manager, protocol_server, (cols, rows))?;
@@ -695,14 +695,45 @@ impl App {
     /// Open a new window in the running process, sharing the GPU device when
     /// compatible (ADR 0027).
     pub(super) fn open_new_window(&mut self, event_loop: &ActiveEventLoop) -> Result<WindowKey> {
+        self.open_new_window_with_command(event_loop, None, &[], None, None)
+            .map(|(key, _)| key)
+    }
+
+    /// Open a new window in the running process with an optional initial command,
+    /// working directory, and tab title (ADR 0027).
+    pub(super) fn open_new_window_with_command(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        command: Option<&str>,
+        args: &[String],
+        working_dir: Option<&str>,
+        title: Option<&str>,
+    ) -> Result<(WindowKey, TabId)> {
         let start = Instant::now();
         let (cols, rows) = self
             .target_window_key()
             .and_then(|key| self.windows.get(&key))
             .map(|win| win.renderer.terminal_dimensions())
             .unwrap_or((80, 24));
-        let (key, _tab_id) =
-            self.shared
+        let (key, tab_id) = if let Some(cmd) = command {
+            self.shared.runtime.manager.create_window_with_command(
+                cols,
+                rows,
+                cmd,
+                args,
+                working_dir,
+                title,
+                &mut |tab_id| {
+                    tab_shell_env(
+                        &mut self.shared.runtime.protocol,
+                        &self.shared.config.terminal,
+                        tab_id,
+                    )
+                },
+            )?
+        } else {
+            let created = self
+                .shared
                 .runtime
                 .manager
                 .create_window(cols, rows, &mut |tab_id| {
@@ -712,6 +743,11 @@ impl App {
                         tab_id,
                     )
                 })?;
+            if let Some(title) = title {
+                self.shared.runtime.manager.set_tab_title(created.1, title);
+            }
+            created
+        };
         let win = match WindowState::create(
             key,
             event_loop,
@@ -738,6 +774,11 @@ impl App {
             ctx.relayout_terminals();
             ctx.win.needs_redraw = true;
         });
+        if let Some(server) = self.shared.control_server.as_mut() {
+            server.publish(&ultty_protocol::control::ControlEvent::WindowOpened {
+                window: key.raw() as u64,
+            });
+        }
         tracing::info!(
             target: "ultty::startup",
             window = key.raw(),
@@ -745,7 +786,7 @@ impl App {
             elapsed_ms = start.elapsed().as_millis(),
             "opened in-process window"
         );
-        Ok(key)
+        Ok((key, tab_id))
     }
 
     /// Close one window. Returns `true` when the application event loop should
@@ -755,8 +796,14 @@ impl App {
         if is_last {
             self.shared.save_session();
         }
-        if let Some(win) = self.windows.remove(&key) {
+        let removed = self.windows.remove(&key);
+        if let Some(win) = removed {
             self.window_ids.remove(&win.window.id());
+            if let Some(server) = self.shared.control_server.as_mut() {
+                server.publish(&ultty_protocol::control::ControlEvent::WindowClosed {
+                    window: key.raw() as u64,
+                });
+            }
         }
         self.shared
             .pending_resizes
@@ -1094,7 +1141,7 @@ impl App {
     /// Run pending terminal work, then sleep until the next deadline.
     fn update_and_schedule(&mut self, event_loop: &ActiveEventLoop) {
         self.drain_pending_process_actions(event_loop);
-        if self.update() {
+        if self.update(event_loop) {
             event_loop.exit();
         }
         self.shared.socket_wakeup.rearm();

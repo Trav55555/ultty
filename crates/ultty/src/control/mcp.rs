@@ -350,6 +350,8 @@ impl McpServer<'_, '_> {
             command: optional_str(args, "command")?.map(str::to_string),
             args: command_args(args)?,
             working_dir: optional_str(args, "cwd")?.map(str::to_string),
+            window: None,
+            pane: None,
         })?;
         Ok(vec![reply_content(response)?])
     }
@@ -386,6 +388,8 @@ impl McpServer<'_, '_> {
         ));
         let response = self.request(ControlRequest::Screenshot {
             path: Some(path.display().to_string()),
+            window: None,
+            pane: None,
         });
         let bytes = response.and_then(|_| {
             std::fs::read(&path).map_err(|e| format!("reading the screenshot failed: {e}"))
@@ -1064,6 +1068,7 @@ mod tests {
         let finished = ControlEvent::CommandFinished {
             pane: 2,
             exit_code: Some(1),
+            window: None,
         };
         let (lines, sent) = exchange(
             &[call(
@@ -1147,6 +1152,8 @@ mod tests {
                 command: Some("htop".to_string()),
                 args: vec!["-d".to_string(), "5".to_string()],
                 working_dir: None,
+                window: None,
+                pane: None,
             }]
         );
         let reply: Value =

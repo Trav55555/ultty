@@ -703,6 +703,40 @@ impl TerminalManager {
         }
     }
 
+    /// Allocate a new window running `command` in its initial tab and focus it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_window_with_command(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        command: &str,
+        args: &[String],
+        working_dir: Option<&str>,
+        title: Option<&str>,
+        tab_env: TabEnvFn,
+    ) -> io::Result<(WindowKey, TabId)> {
+        let window_id = WindowKey(self.next_window_id);
+        self.next_window_id += 1;
+        self.windows.push(WindowRecord::new(window_id, cols, rows));
+        match self.create_tab_with_command_in_window(
+            window_id,
+            command,
+            args,
+            working_dir,
+            title,
+            tab_env,
+        ) {
+            Ok(tab_id) => {
+                self.focused_window = window_id;
+                Ok((window_id, tab_id))
+            }
+            Err(err) => {
+                self.windows.retain(|record| record.id != window_id);
+                Err(err)
+            }
+        }
+    }
+
     /// Close a window and every tab and terminal belonging to it.
     pub fn close_window(&mut self, window: WindowKey) -> bool {
         let Some(pos) = self.windows.iter().position(|record| record.id == window) else {
