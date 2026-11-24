@@ -4932,6 +4932,7 @@ dependencies = [
  "criterion",
  "dirs",
  "foldhash",
+ "futures-core",
  "insta",
  "libc",
  "nix 0.29.0",
@@ -4963,6 +4964,7 @@ dependencies = [
  "wgpu",
  "winit",
  "x11rb",
+ "zbus",
 ]
 
 [[package]]

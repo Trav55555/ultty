@@ -11,6 +11,8 @@ pub mod shutdown;
 pub mod socket;
 pub mod vulkan_icd;
 #[cfg(all(unix, not(target_os = "macos")))]
+pub mod wayland_portal_hotkey;
+#[cfg(all(unix, not(target_os = "macos")))]
 pub mod x11_hotkey;
 
 use crate::pty::Child;
