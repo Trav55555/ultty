@@ -148,7 +148,19 @@ enum AppEvent {
     Renderer(gpu::Handoff),
     /// Global hotkey pressed to toggle the quick terminal (ADR 0028).
     #[cfg(all(unix, not(target_os = "macos")))]
-    ToggleQuickHotkey,
+    ToggleQuickHotkey {
+        /// Optional Wayland activation token from `GlobalShortcuts::Activated`.
+        activation_token: Option<String>,
+    },
+}
+
+/// Active global hotkey backend for the quick terminal (ADR 0028 Slices 3 & 4).
+/// Held for its `Drop` implementation, which releases the grab or portal session.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[allow(dead_code)]
+enum QuickHotkeyGuard {
+    X11(ultty::platform::x11_hotkey::X11GlobalHotkey),
+    WaylandPortal(ultty::platform::wayland_portal_hotkey::WaylandPortalHotkey),
 }
 
 impl From<accesskit_winit::Event> for AppEvent {
@@ -202,7 +214,7 @@ struct ProcessState {
     pending_reload_config: bool,
     pending_cycle_theme: bool,
     #[cfg(all(unix, not(target_os = "macos")))]
-    quick_hotkey: Option<ultty::platform::x11_hotkey::X11GlobalHotkey>,
+    quick_hotkey: Option<QuickHotkeyGuard>,
     quick_hotkey_binding: Option<String>,
 }
 
@@ -843,7 +855,8 @@ impl App {
     }
 
     /// Synchronize the process-wide quick-terminal global hotkey with
-    /// `config.quick_terminal.hotkey` (X11 `XGrabKey`; ADR 0028 Slice 3).
+    /// `config.quick_terminal.hotkey` (X11 `XGrabKey` or Wayland
+    /// `org.freedesktop.portal.GlobalShortcuts`; ADR 0028 Slices 3 & 4).
     pub(super) fn sync_quick_hotkey(&mut self) {
         let desired = self
             .shared
@@ -865,19 +878,33 @@ impl App {
             let Some(binding) = desired else {
                 return;
             };
+            let proxy = self.shared.proxy.clone();
             if self.is_wayland {
-                tracing::info!(
-                    hotkey = %binding,
-                    "quick_terminal.hotkey is not active on Wayland yet; bind `ultty --quick` in your compositor"
-                );
+                match ultty::platform::wayland_portal_hotkey::WaylandPortalHotkey::start(
+                    &binding,
+                    move |activation_token| {
+                        let _ = proxy.send_event(AppEvent::ToggleQuickHotkey { activation_token });
+                    },
+                ) {
+                    Ok(guard) => {
+                        self.shared.quick_hotkey = Some(QuickHotkeyGuard::WaylandPortal(guard));
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            hotkey = %binding,
+                            "Failed to register quick_terminal.hotkey via GlobalShortcuts portal: {err}"
+                        );
+                    }
+                }
                 return;
             }
-            let proxy = self.shared.proxy.clone();
             match ultty::platform::x11_hotkey::X11GlobalHotkey::register(&binding, move || {
-                let _ = proxy.send_event(AppEvent::ToggleQuickHotkey);
+                let _ = proxy.send_event(AppEvent::ToggleQuickHotkey {
+                    activation_token: None,
+                });
             }) {
                 Ok(guard) => {
-                    self.shared.quick_hotkey = Some(guard);
+                    self.shared.quick_hotkey = Some(QuickHotkeyGuard::X11(guard));
                     tracing::info!(
                         hotkey = %binding,
                         "Registered X11 global hotkey for quick terminal"
@@ -2903,9 +2930,11 @@ impl ApplicationHandler<AppEvent> for AppHandler {
                 event_loop.exit();
             }
             #[cfg(all(unix, not(target_os = "macos")))]
-            AppEvent::ToggleQuickHotkey => {
+            AppEvent::ToggleQuickHotkey { activation_token } => {
                 if let Some(app) = self.app.as_mut() {
-                    if let Err(error) = app.toggle_quick_window(event_loop, None) {
+                    if let Err(error) =
+                        app.toggle_quick_window(event_loop, activation_token.as_deref())
+                    {
                         tracing::warn!("Failed to toggle quick terminal via hotkey: {error:#}");
                     }
                     app.update_and_schedule(event_loop);
