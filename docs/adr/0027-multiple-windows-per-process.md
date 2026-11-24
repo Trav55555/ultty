@@ -2,7 +2,7 @@
 
 ## Status
 
-**In progress** — Slices 1–3 have landed:
+**In progress** — Slices 1–4 have landed:
 - Slice 1 (2026-11-23): `App` split into process state and `WindowState`,
   shared GPU device/adapter/instance/queue, per-window tab lists and relayout
   in `TerminalManager`, in-process "New window" with opt-in
@@ -16,8 +16,12 @@
   events, `window_opened`/`window_closed` events, and `--window` →
   `--pane`/`ULTTY_PANE` → last focused window targeting for window commands
   and `new-tab`.
+- Slice 4 (2026-11-24): `SessionData` v2 (`windows: [{ tabs, active_tab_index,
+  size }]` with logical pixel sizes), transparent v1 single-window loading,
+  v2-only writing on last-window close / `ShutdownSignal` / `workspace save`,
+  and N-window restore sharing the process GPU and font grids.
 
-Slices 4–6 are not yet implemented. Original proposal and decisions are from
+Slices 5–6 are not yet implemented. Original proposal and decisions are from
 2026-11-17 (code references in "What Ultty has today" were to `main` at
 252c082).
 
@@ -367,7 +371,7 @@ Each slice also needs `cargo test --workspace`, clippy with
 | 1 (**Done**, 2026-11-23) | Split `App` into process state and `WindowState`; shared GPU; route events by window id; per-window tab list, active tab and pane area in `TerminalManager`; "New window" opens in-process (opt-in `behavior.window_per_process = true`); last window closing exits on Linux (unless a quick terminal exists), process stays running on macOS | 6–9 days | New `TerminalManager` tests for per-window relayout; `scripts/e2e/multi-window.sh` opens two windows in one process and types into both; second-window RSS and startup measured in [2026-11-23-multi-window-slice-1.md](../perf/2026-11-23-multi-window-slice-1.md) (+7.6 MiB PSS, 29 ms `open_new_window`) |
 | 2 (**Done**, 2026-11-24) | Font grids shared by key; one `FontSystem`; per-window zoom | 3–5 days | `AtlasStats::atlas_count` stays 1 for two same-scale windows (`same_scale_windows_share_one_atlas_and_zoom_is_per_window`); `render` bench unchanged and second-window latency dropped to 9 ms in [2026-11-24-multi-window-slice-2.md](../perf/2026-11-24-multi-window-slice-2.md) |
 | 3 (**Done**, 2026-11-24) | Control: `--window`, `windows`, `new-window`, `close-window`, window field in events; target rules | 3–4 days | `ulttyctl` tests; `describe` lists `list_windows`, `new_window`, `close_window`; existing control tests pass unchanged; `scripts/e2e/multi-window.sh` exercises `windows`, `new-window`, `--window`/`--pane` targeting, `close-window`, and window subscribe events |
-| 4 | Session v2 with windows; restore opens N windows; v1 compatibility | 2–3 days | Round-trip tests for v1 and v2 files |
+| 4 (**Done**, 2026-11-24) | Session v2 with windows; restore opens N windows; v1 compatibility | 2–3 days | Round-trip tests for v1 and v2 files (`session::tests::*`, `terminal_manager::tests::multi_window_session_round_trips_windows_tabs_and_sizes`); `scripts/e2e/multi-window.sh` saves a 2-window v2 workspace, restores both windows with logical sizes, and verifies `SIGTERM` preserves both windows |
 | 5 | Move tab: commands, menu, palette, `move-tab`; drag-out to a new window | 4–6 days | Move keeps the PTY (pid unchanged) and resizes it; accessibility trees of both windows updated (AccessKit consumer test) |
 | 6 | Single instance (`behavior.single_instance`), off by default until stable, then on | 2–3 days | Second `ultty` exits after opening a window in the first |
 | 7 | Drop a tab onto another window, X11 and macOS only | 3–5 days, after a prototype | Not planned; reconsider after slice 5 ships and an X11 prototype |
