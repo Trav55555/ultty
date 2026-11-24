@@ -20,6 +20,43 @@ fn find(name: &str) -> Option<String> {
         .map(|candidate| candidate.to_string_lossy().into_owned())
 }
 
+/// Find a bash 4.4+ binary (`ultty.bash` requires `PS0` and modern `--posix -l`
+/// `$ENV` handling; Apple's `/bin/bash` is 3.2).
+fn find_modern_bash() -> Option<String> {
+    let mut candidates: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| {
+            std::env::split_paths(&path)
+                .map(|d| d.join("bash"))
+                .collect()
+        })
+        .unwrap_or_default();
+    candidates.push(PathBuf::from("/opt/homebrew/bin/bash"));
+    candidates.push(PathBuf::from("/usr/local/bin/bash"));
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        let ok = std::process::Command::new(&candidate)
+            .args([
+                "-c",
+                "printf '%s.%s' \"${BASH_VERSINFO[0]}\" \"${BASH_VERSINFO[1]}\"",
+            ])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .and_then(|ver| {
+                let (maj, min) = ver.trim().split_once('.')?;
+                Some((maj.parse::<u32>().ok()?, min.parse::<u32>().ok()?))
+            })
+            .is_some_and(|version| version >= (4, 4));
+        if ok {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 struct Run {
     /// Everything the shell wrote to the terminal.
     output: String,
@@ -150,8 +187,8 @@ fn assert_integrated(run: &Run, rc_marker: &str) {
 
 #[test]
 fn bash_runs_the_users_bashrc_and_marks_once() {
-    let Some(bash) = find("bash") else {
-        eprintln!("skipped: bash is not installed");
+    let Some(bash) = find_modern_bash() else {
+        eprintln!("skipped: bash 4.4+ is not installed");
         return;
     };
     let s = sandbox();
@@ -276,8 +313,8 @@ fn zsh_without_a_zdotdir_reads_dotfiles_from_home_and_leaves_it_unset() {
 
 #[test]
 fn login_bash_runs_the_login_files_and_leaves_posix_mode() {
-    let Some(bash) = find("bash") else {
-        eprintln!("skipped: bash is not installed");
+    let Some(bash) = find_modern_bash() else {
+        eprintln!("skipped: bash 4.4+ is not installed");
         return;
     };
     let s = sandbox();
@@ -325,8 +362,8 @@ fn login_bash_runs_the_login_files_and_leaves_posix_mode() {
 
 #[test]
 fn login_bash_falls_back_through_the_login_files() {
-    let Some(bash) = find("bash") else {
-        eprintln!("skipped: bash is not installed");
+    let Some(bash) = find_modern_bash() else {
+        eprintln!("skipped: bash 4.4+ is not installed");
         return;
     };
     let s = sandbox();
@@ -404,8 +441,8 @@ fn zsh_login_reads_zprofile_and_zlogin_from_the_restored_zdotdir() {
 #[test]
 fn a_command_tab_running_a_bare_shell_gets_the_marks() {
     use ultty::terminal_manager::{TabEnv, TerminalManager};
-    let Some(bash) = find("bash") else {
-        eprintln!("skipped: bash is not installed");
+    let Some(bash) = find_modern_bash() else {
+        eprintln!("skipped: bash 4.4+ is not installed");
         return;
     };
     let s = sandbox();
