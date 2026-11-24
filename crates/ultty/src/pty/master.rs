@@ -125,12 +125,18 @@ impl Pty {
         self.master.as_raw_fd()
     }
 
-    /// Bytes the child has written that nobody has read yet (`FIONREAD`).
+    /// Bytes the child has written that nobody has read yet (`FIONREAD` on Linux,
+    /// `TIOCOUTQ` on macOS where `FIONREAD` queries the slave input queue).
     pub fn unread_bytes(&self) -> std::io::Result<usize> {
+        #[cfg(target_os = "macos")]
+        const UNREAD_IOCTL: libc::c_ulong = 0x4004_7473;
+        #[cfg(not(target_os = "macos"))]
+        const UNREAD_IOCTL: libc::Ioctl = libc::FIONREAD;
+
         let mut count: libc::c_int = 0;
-        // SAFETY: FIONREAD writes one c_int through the pointer, which points
+        // SAFETY: the ioctl writes one c_int through the pointer, which points
         // at a live local; the fd is owned by `self` and open.
-        let rc = unsafe { libc::ioctl(self.master.as_raw_fd(), libc::FIONREAD, &mut count) };
+        let rc = unsafe { libc::ioctl(self.master.as_raw_fd(), UNREAD_IOCTL, &mut count) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error());
         }
