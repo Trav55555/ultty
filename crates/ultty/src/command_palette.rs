@@ -6,8 +6,11 @@
 //! [`Action`] a [`PaletteOutcome::Run`] names, and the renderer and the
 //! accessibility tree read [`CommandPalette::rows`].
 
+use std::borrow::Cow;
+
 use crate::action::{display_binding, Action};
 use crate::config::KeybindingConfig;
+use crate::terminal_manager::WindowKey;
 
 /// A key, as the open palette sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,16 +37,38 @@ pub enum PaletteOutcome {
     Closed,
     /// The palette closed; run this action.
     Run(Action),
+    /// The palette closed; detach the active tab into a new window.
+    MoveTabToNewWindow,
+    /// The palette closed; move the active tab into an existing window.
+    MoveTabToWindow(WindowKey),
+}
+
+/// Command executed when a palette entry is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PaletteCommand {
+    Action(Action),
+    MoveTabToNewWindow,
+    MoveTabToWindow(WindowKey),
 }
 
 /// One action the palette offers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteEntry {
-    pub action: Action,
-    pub label: &'static str,
+    pub command: PaletteCommand,
+    pub label: Cow<'static, str>,
     /// The key bound to it, for display (`"Ctrl+Shift+T"`); empty when
     /// unbound.
     pub key: String,
+}
+
+impl PaletteEntry {
+    /// The static [`Action`] for this entry, when it is a bound action.
+    pub fn action(&self) -> Option<Action> {
+        match self.command {
+            PaletteCommand::Action(action) => Some(action),
+            PaletteCommand::MoveTabToNewWindow | PaletteCommand::MoveTabToWindow(_) => None,
+        }
+    }
 }
 
 /// An entry that matches the query, as listed.
@@ -71,7 +96,7 @@ pub struct CommandPalette {
     matches: Vec<Match>,
     selected: usize,
     /// Actions run from the palette, most recent first.
-    recent: Vec<Action>,
+    recent: Vec<PaletteCommand>,
 }
 
 impl CommandPalette {
@@ -82,16 +107,41 @@ impl CommandPalette {
     /// Open with an empty query, listing the actions with the keys `keys`
     /// binds them to.
     pub fn open(&mut self, keys: &KeybindingConfig) {
+        self.open_with_windows(keys, false, &[]);
+    }
+
+    /// Open with an empty query, including dynamic tab-move entries for
+    /// detaching to a new window and moving to each open `other_windows`.
+    pub fn open_with_windows(
+        &mut self,
+        keys: &KeybindingConfig,
+        can_detach: bool,
+        other_windows: &[WindowKey],
+    ) {
         self.entries = Action::ALL
             .iter()
             .copied()
             .filter(|action| action.in_palette())
             .map(|action| PaletteEntry {
-                action,
-                label: action.label(),
+                command: PaletteCommand::Action(action),
+                label: Cow::Borrowed(action.label()),
                 key: display_binding(action.binding(keys)),
             })
             .collect();
+        if can_detach {
+            self.entries.push(PaletteEntry {
+                command: PaletteCommand::MoveTabToNewWindow,
+                label: Cow::Borrowed("Move tab to new window"),
+                key: String::new(),
+            });
+        }
+        for &window in other_windows {
+            self.entries.push(PaletteEntry {
+                command: PaletteCommand::MoveTabToWindow(window),
+                label: Cow::Owned(format!("Move tab to window {}", window.raw())),
+                key: String::new(),
+            });
+        }
         self.query.clear();
         self.open = true;
         self.refilter();
@@ -124,8 +174,15 @@ impl CommandPalette {
     }
 
     pub fn selected_action(&self) -> Option<Action> {
+        self.selected_command().and_then(|command| match command {
+            PaletteCommand::Action(action) => Some(action),
+            PaletteCommand::MoveTabToNewWindow | PaletteCommand::MoveTabToWindow(_) => None,
+        })
+    }
+
+    pub fn selected_command(&self) -> Option<PaletteCommand> {
         let m = self.matches.get(self.selected)?;
-        Some(self.entries[m.entry].action)
+        Some(self.entries[m.entry].command)
     }
 
     /// Apply `key`. Closed, the palette ignores keys.
@@ -138,11 +195,17 @@ impl CommandPalette {
             PaletteKey::Up if count > 0 => self.selected = (self.selected + count - 1) % count,
             PaletteKey::Down if count > 0 => self.selected = (self.selected + 1) % count,
             PaletteKey::Enter => {
-                if let Some(action) = self.selected_action() {
-                    self.recent.retain(|&a| a != action);
-                    self.recent.insert(0, action);
+                if let Some(command) = self.selected_command() {
+                    self.recent.retain(|&c| c != command);
+                    self.recent.insert(0, command);
                     self.close();
-                    return PaletteOutcome::Run(action);
+                    return match command {
+                        PaletteCommand::Action(action) => PaletteOutcome::Run(action),
+                        PaletteCommand::MoveTabToNewWindow => PaletteOutcome::MoveTabToNewWindow,
+                        PaletteCommand::MoveTabToWindow(window) => {
+                            PaletteOutcome::MoveTabToWindow(window)
+                        }
+                    };
                 }
             }
             PaletteKey::Escape => {
@@ -170,10 +233,10 @@ impl CommandPalette {
         self.selected = 0;
         self.matches.clear();
         if self.query.trim().is_empty() {
-            let recent_rank = |action: Action| {
+            let recent_rank = |command: PaletteCommand| {
                 self.recent
                     .iter()
-                    .position(|&a| a == action)
+                    .position(|&c| c == command)
                     .unwrap_or(usize::MAX)
             };
             self.matches = (0..self.entries.len())
@@ -185,11 +248,11 @@ impl CommandPalette {
                 .collect();
             // Stable: entries never run keep table order.
             self.matches
-                .sort_by_key(|m| recent_rank(self.entries[m.entry].action));
+                .sort_by_key(|m| recent_rank(self.entries[m.entry].command));
             return;
         }
         for (entry, e) in self.entries.iter().enumerate() {
-            if let Some((score, positions)) = fuzzy_match(&self.query, e.label) {
+            if let Some((score, positions)) = fuzzy_match(&self.query, &e.label) {
                 self.matches.push(Match {
                     entry,
                     score,
@@ -310,8 +373,8 @@ fn fold_case(c: char) -> char {
 mod tests {
     use super::*;
 
-    fn labels(palette: &CommandPalette) -> Vec<&'static str> {
-        palette.rows().map(|row| row.entry.label).collect()
+    fn labels(palette: &CommandPalette) -> Vec<&str> {
+        palette.rows().map(|row| row.entry.label.as_ref()).collect()
     }
 
     fn open() -> CommandPalette {
@@ -390,7 +453,10 @@ mod tests {
     #[test]
     fn lists_every_palette_action_once_and_not_itself() {
         let palette = open();
-        let listed: Vec<Action> = palette.rows().map(|row| row.entry.action).collect();
+        let listed: Vec<Action> = palette
+            .rows()
+            .filter_map(|row| row.entry.action())
+            .collect();
         let offered: Vec<Action> = Action::ALL
             .iter()
             .copied()
@@ -528,5 +594,28 @@ mod tests {
             PaletteOutcome::Closed
         );
         assert_eq!(palette.query(), "");
+    }
+
+    #[test]
+    fn palette_offers_move_tab_to_new_window_and_other_windows() {
+        let mut palette = CommandPalette::default();
+        let w1 = WindowKey::new(1);
+        let w2 = WindowKey::new(2);
+        palette.open_with_windows(&KeybindingConfig::default(), true, &[w1, w2]);
+
+        type_text(&mut palette, "move tab new");
+        assert_eq!(labels(&palette)[0], "Move tab to new window");
+        assert_eq!(
+            palette.handle(PaletteKey::Enter),
+            PaletteOutcome::MoveTabToNewWindow
+        );
+
+        palette.open_with_windows(&KeybindingConfig::default(), false, &[w1, w2]);
+        type_text(&mut palette, "move tab window 2");
+        assert_eq!(labels(&palette)[0], "Move tab to window 2");
+        assert_eq!(
+            palette.handle(PaletteKey::Enter),
+            PaletteOutcome::MoveTabToWindow(w2)
+        );
     }
 }

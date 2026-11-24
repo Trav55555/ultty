@@ -263,6 +263,17 @@ impl WindowKey {
     }
 }
 
+/// Outcome of moving a tab between windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveTabOutcome {
+    /// Window the tab was moved out of.
+    pub source_window: WindowKey,
+    /// Window the tab now belongs to.
+    pub destination_window: WindowKey,
+    /// Whether `source_window` now has zero remaining tabs.
+    pub source_empty: bool,
+}
+
 /// Unique identifier for a tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TabId(usize);
@@ -936,6 +947,95 @@ impl TerminalManager {
             self.tabs.insert(to, tab);
         }
         true
+    }
+
+    /// Move `tab_id` to an existing `destination` window, preserving its PTYs,
+    /// scrollback, and native protocol sessions, and resizing its panes to
+    /// `destination`'s pane area.
+    pub fn move_tab_to_window(
+        &mut self,
+        tab_id: TabId,
+        destination: WindowKey,
+    ) -> Result<MoveTabOutcome, &'static str> {
+        let Some(tab_pos) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return Err("Tab not found");
+        };
+        let source_window = self.tabs[tab_pos].window_id;
+        if self.window_record(destination).is_none() {
+            return Err("Destination window not found");
+        }
+        if source_window == destination {
+            if let Some(record) = self.window_record_mut(destination) {
+                record.active_tab = Some(tab_id);
+            }
+            self.focused_window = destination;
+            return Ok(MoveTabOutcome {
+                source_window,
+                destination_window: destination,
+                source_empty: false,
+            });
+        }
+
+        let mut source_empty = false;
+        if let Some(source) = self.window_record_mut(source_window) {
+            let removed_pos = source.tabs.iter().position(|&id| id == tab_id);
+            if let Some(pos) = removed_pos {
+                source.tabs.remove(pos);
+            }
+            if source.active_tab == Some(tab_id) {
+                source.active_tab = if source.tabs.is_empty() {
+                    None
+                } else {
+                    let next = removed_pos
+                        .unwrap_or(0)
+                        .min(source.tabs.len().saturating_sub(1));
+                    Some(source.tabs[next])
+                };
+            }
+            source_empty = source.tabs.is_empty();
+        }
+
+        self.tabs[tab_pos].window_id = destination;
+        if let Some(dest) = self.window_record_mut(destination) {
+            dest.tabs.push(tab_id);
+            dest.active_tab = Some(tab_id);
+        }
+        self.focused_window = destination;
+        self.relayout_window(destination);
+
+        Ok(MoveTabOutcome {
+            source_window,
+            destination_window: destination,
+            source_empty,
+        })
+    }
+
+    /// Allocate a new window record and move `tab_id` into it.
+    ///
+    /// Refuses when `tab_id` is the only tab of its source window.
+    pub fn detach_tab_to_new_window(
+        &mut self,
+        tab_id: TabId,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(WindowKey, MoveTabOutcome), &'static str> {
+        let Some(source) = self.window_for_tab(tab_id) else {
+            return Err("Tab not found");
+        };
+        if self.window_tab_count(source) <= 1 {
+            return Err("Cannot move the only tab of a window to a new window");
+        }
+        let destination = WindowKey(self.next_window_id);
+        self.next_window_id += 1;
+        self.windows
+            .push(WindowRecord::new(destination, cols, rows));
+        match self.move_tab_to_window(tab_id, destination) {
+            Ok(outcome) => Ok((destination, outcome)),
+            Err(err) => {
+                self.windows.retain(|record| record.id != destination);
+                Err(err)
+            }
+        }
     }
 
     /// Create a new terminal (pane) in an existing tab, inheriting the
@@ -2573,6 +2673,96 @@ mod tests {
         assert_eq!(
             restored.window_active_tab(keys[1]).unwrap().title,
             "win1-first"
+        );
+    }
+
+    #[test]
+    fn move_tab_to_window_preserves_pid_and_resizes_to_destination_area() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let tab0 = manager.tabs()[0].id;
+        let tab1 = manager
+            .create_tab_in_window(WindowKey::PRIMARY, &mut no_tab_env)
+            .unwrap();
+        let (w1, _tab2) = manager.create_window(80, 24, &mut no_tab_env).unwrap();
+
+        let big_area = PaneArea {
+            width: 800.0,
+            height: 480.0,
+            cell_width: 10.0,
+            cell_height: 20.0,
+        };
+        let small_area = PaneArea {
+            width: 400.0,
+            height: 240.0,
+            cell_width: 10.0,
+            cell_height: 20.0,
+        };
+        manager
+            .layout_window_panes(WindowKey::PRIMARY, big_area)
+            .unwrap();
+        manager.layout_window_panes(w1, small_area).unwrap();
+
+        let moved_pane = manager
+            .tabs()
+            .iter()
+            .find(|t| t.id == tab1)
+            .unwrap()
+            .focused_terminal;
+        let pid_before = manager.terminal(moved_pane).unwrap().event_loop.child_pid();
+        assert_eq!(grid(&manager, moved_pane), (80, 24));
+
+        let outcome = manager.move_tab_to_window(tab1, w1).unwrap();
+        assert_eq!(
+            outcome,
+            MoveTabOutcome {
+                source_window: WindowKey::PRIMARY,
+                destination_window: w1,
+                source_empty: false,
+            }
+        );
+        assert_eq!(manager.window_for_tab(tab1), Some(w1));
+        assert_eq!(manager.window_tab_count(WindowKey::PRIMARY), 1);
+        assert_eq!(manager.window_tab_count(w1), 2);
+        assert_eq!(manager.window_active_tab(w1).map(|t| t.id), Some(tab1));
+        assert_eq!(
+            manager.terminal(moved_pane).unwrap().event_loop.child_pid(),
+            pid_before
+        );
+        assert_eq!(grid(&manager, moved_pane), (40, 12));
+
+        let second = manager.move_tab_to_window(tab0, w1).unwrap();
+        assert!(second.source_empty);
+        assert_eq!(manager.window_tab_count(WindowKey::PRIMARY), 0);
+        assert_eq!(manager.window_tab_count(w1), 3);
+    }
+
+    #[test]
+    fn detach_tab_to_new_window_moves_tab_and_rejects_sole_tab() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let tab0 = manager.tabs()[0].id;
+        assert!(manager.detach_tab_to_new_window(tab0, 80, 24).is_err());
+
+        let tab1 = manager
+            .create_tab_in_window(WindowKey::PRIMARY, &mut no_tab_env)
+            .unwrap();
+        let pane1 = manager
+            .tabs()
+            .iter()
+            .find(|t| t.id == tab1)
+            .unwrap()
+            .focused_terminal;
+        let pid_before = manager.terminal(pane1).unwrap().event_loop.child_pid();
+
+        let (new_win, outcome) = manager.detach_tab_to_new_window(tab1, 80, 24).unwrap();
+        assert_ne!(new_win, WindowKey::PRIMARY);
+        assert!(!outcome.source_empty);
+        assert_eq!(manager.window_count(), 2);
+        assert_eq!(manager.window_for_tab(tab1), Some(new_win));
+        assert_eq!(manager.window_tab_count(WindowKey::PRIMARY), 1);
+        assert_eq!(manager.window_tab_count(new_win), 1);
+        assert_eq!(
+            manager.terminal(pane1).unwrap().event_loop.child_pid(),
+            pid_before
         );
     }
 

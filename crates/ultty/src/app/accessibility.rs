@@ -336,7 +336,7 @@ fn palette_snapshot(palette: &CommandPalette) -> Option<PaletteSnapshot> {
     let items: Vec<PaletteItemSnapshot> = palette
         .rows()
         .map(|row| PaletteItemSnapshot {
-            label: row.entry.label.to_owned(),
+            label: row.entry.label.to_string(),
             key: row.entry.key.clone(),
         })
         .collect();
@@ -377,5 +377,152 @@ fn pane_title(managed: &ManagedTerminal, set: &str) -> String {
         managed.title.clone()
     } else {
         set.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use accesskit::{NodeId, Role, TreeId};
+    use ultty::a11y::tree::{build, pane_node_id, tab_node_id};
+    use ultty::tabs::TabBarState;
+    use ultty::terminal_manager::{no_tab_env, TerminalManager};
+
+    struct RecordedChanges {
+        added: Vec<NodeId>,
+        removed: Vec<NodeId>,
+    }
+
+    impl accesskit_consumer::TreeChangeHandler for RecordedChanges {
+        fn node_added(&mut self, node: &accesskit_consumer::NodeRef) {
+            if let Some((local_id, _)) = node.tree_state.locate_node(node.id()) {
+                self.added.push(local_id);
+            }
+        }
+
+        fn node_updated(
+            &mut self,
+            _old: &accesskit_consumer::NodeRef,
+            _new: &accesskit_consumer::NodeRef,
+        ) {
+        }
+
+        fn focus_moved(
+            &mut self,
+            _old: Option<&accesskit_consumer::NodeRef>,
+            _new: Option<&accesskit_consumer::NodeRef>,
+        ) {
+        }
+
+        fn node_removed(&mut self, node: &accesskit_consumer::NodeRef) {
+            if let Some((local_id, _)) = node.tree_state.locate_node(node.id()) {
+                self.removed.push(local_id);
+            }
+        }
+    }
+
+    fn window_snapshot(manager: &TerminalManager, window: WindowKey) -> Snapshot {
+        let mut bar = TabBarState::new();
+        let tabs = manager.window_tabs(window);
+        if let Some(active) = manager.window_active_tab(window) {
+            let titles: Vec<String> = tabs
+                .iter()
+                .map(|tab| manager.tab_display_title(tab.id))
+                .collect();
+            bar.update_with_tab_refs_and_width_override(&tabs, &titles, active.id, 800.0, None);
+        }
+        accessibility_snapshot(
+            manager,
+            window,
+            &bar.tabs,
+            None,
+            (800, 600),
+            bar.content_top(),
+            (10.0, 20.0),
+            &CommandPalette::default(),
+        )
+    }
+
+    #[test]
+    fn moving_a_tab_updates_both_windows_accesskit_trees() {
+        let mut manager = TerminalManager::new(80, 24).unwrap();
+        let tab_a = manager.tabs()[0].id;
+        let tab_b = manager
+            .create_tab_in_window(WindowKey::PRIMARY, &mut no_tab_env)
+            .unwrap();
+        let (win1, tab_c) = manager.create_window(80, 24, &mut no_tab_env).unwrap();
+        let moved_pane = manager
+            .tabs()
+            .iter()
+            .find(|t| t.id == tab_b)
+            .unwrap()
+            .focused_terminal;
+
+        let mut tree_w0 = accesskit_consumer::Tree::new(
+            build("Ultty", &window_snapshot(&manager, WindowKey::PRIMARY)),
+            true,
+        );
+        let mut tree_w1 =
+            accesskit_consumer::Tree::new(build("Ultty", &window_snapshot(&manager, win1)), true);
+
+        assert!(tree_w0
+            .state()
+            .node_by_tree_local_id(tab_node_id(tab_a.raw()), TreeId::ROOT)
+            .is_some());
+        assert!(tree_w0
+            .state()
+            .node_by_tree_local_id(tab_node_id(tab_b.raw()), TreeId::ROOT)
+            .is_some());
+        assert!(tree_w1
+            .state()
+            .node_by_tree_local_id(tab_node_id(tab_c.raw()), TreeId::ROOT)
+            .is_some());
+        assert!(tree_w1
+            .state()
+            .node_by_tree_local_id(tab_node_id(tab_b.raw()), TreeId::ROOT)
+            .is_none());
+
+        manager.move_tab_to_window(tab_b, win1).unwrap();
+
+        let mut changes_w0 = RecordedChanges {
+            added: Vec::new(),
+            removed: Vec::new(),
+        };
+        tree_w0.update_and_process_changes(
+            build("Ultty", &window_snapshot(&manager, WindowKey::PRIMARY)),
+            &mut changes_w0,
+        );
+        let mut changes_w1 = RecordedChanges {
+            added: Vec::new(),
+            removed: Vec::new(),
+        };
+        tree_w1.update_and_process_changes(
+            build("Ultty", &window_snapshot(&manager, win1)),
+            &mut changes_w1,
+        );
+
+        assert!(changes_w0.removed.contains(&tab_node_id(tab_b.raw())));
+        assert!(tree_w0
+            .state()
+            .node_by_tree_local_id(tab_node_id(tab_b.raw()), TreeId::ROOT)
+            .is_none());
+        assert!(tree_w0
+            .state()
+            .node_by_tree_local_id(tab_node_id(tab_a.raw()), TreeId::ROOT)
+            .is_some());
+
+        assert!(changes_w1.added.contains(&tab_node_id(tab_b.raw())));
+        let moved_tab_node = tree_w1
+            .state()
+            .node_by_tree_local_id(tab_node_id(tab_b.raw()), TreeId::ROOT)
+            .expect("moved tab in destination tree");
+        assert_eq!(moved_tab_node.role(), Role::Tab);
+        assert_eq!(moved_tab_node.is_selected(), Some(true));
+        let focus_w1 = tree_w1.state().focus().expect("destination tree focus");
+        assert_eq!(
+            focus_w1.tree_state.locate_node(focus_w1.id()),
+            Some((pane_node_id(moved_pane.raw()), TreeId::ROOT))
+        );
+        assert_eq!(focus_w1.role(), Role::Terminal);
     }
 }

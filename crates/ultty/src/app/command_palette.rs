@@ -15,10 +15,23 @@ impl WindowCtx<'_> {
     pub(super) fn open_command_palette(&mut self) {
         self.win.shortcuts_visible = false;
         self.win.protocol_status_visible = false;
-        if self.win.tab_bar.menu_open {
+        if self.win.tab_bar.menu_open || self.win.tab_bar.tab_menu.is_some() {
             self.close_menu();
         }
-        self.win.command_palette.open(&self.app.config.keybindings);
+        let can_detach = self.app.runtime.manager.window_tab_count(self.win.key) > 1;
+        let other_windows: Vec<_> = self
+            .app
+            .runtime
+            .manager
+            .window_ids()
+            .into_iter()
+            .filter(|&key| key != self.win.key)
+            .collect();
+        self.win.command_palette.open_with_windows(
+            &self.app.config.keybindings,
+            can_detach,
+            &other_windows,
+        );
         self.win.needs_redraw = true;
     }
 
@@ -49,8 +62,29 @@ impl WindowCtx<'_> {
     pub(super) fn palette_input(&mut self, key: PaletteKey<'_>) {
         let outcome = self.win.command_palette.handle(key);
         self.win.needs_redraw = true;
-        if let PaletteOutcome::Run(action) = outcome {
-            self.perform_action(action);
+        match outcome {
+            PaletteOutcome::Run(action) => {
+                self.perform_action(action);
+            }
+            PaletteOutcome::MoveTabToNewWindow => {
+                if let Some(tab) = self.app.runtime.manager.window_active_tab(self.win.key) {
+                    self.app.pending_tab_moves.push(super::PendingTabMove {
+                        tab_id: tab.id,
+                        destination: super::MoveDestination::NewWindow,
+                        position: None,
+                    });
+                }
+            }
+            PaletteOutcome::MoveTabToWindow(window) => {
+                if let Some(tab) = self.app.runtime.manager.window_active_tab(self.win.key) {
+                    self.app.pending_tab_moves.push(super::PendingTabMove {
+                        tab_id: tab.id,
+                        destination: super::MoveDestination::Existing(window),
+                        position: None,
+                    });
+                }
+            }
+            PaletteOutcome::Consumed | PaletteOutcome::Closed => {}
         }
     }
 }

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# ADR 0027 slices 1, 3, and 4 GUI smoke: open windows in a single Ultty process
-# via the main menu ("New window") and `ulttyctl new-window`, verify X11 input
-# isolation, `describe`, `windows`, `--window` / `--pane` targeting (`new-tab`,
-# `resize`, `screenshot`), `window_opened`/`window_closed` subscribe events,
-# closing a window while keeping another alive, closing the last window, and
+# ADR 0027 slices 1, 3, 4, and 5 GUI smoke: open windows in a single Ultty
+# process via the main menu ("New window") and `ulttyctl new-window`, verify
+# X11 input isolation, `describe`, `windows`, `--window` / `--pane` targeting
+# (`new-tab`, `resize`, `screenshot`), `move-tab` (`--window` and `--new-window`,
+# preserving PTY PID and resizing), tab drag-out to a new window,
+# `window_opened`/`window_closed` subscribe events, closing windows, and
 # SessionData v2 multi-window save/restore with logical window sizes.
 #
 #   scripts/e2e/multi-window.sh [artifact-dir]
@@ -95,11 +96,11 @@ win1=$(xdotool_on search --onlyvisible --pid "$ultty_pid" | head -1 || true)
 
 pane1=$("$ULTTYCTL" --json panes | python3 -c 'import json,sys; panes=json.load(sys.stdin)["panes"]; assert len(panes)==1 and panes[0]["window"]==0; print(panes[0]["id"])')
 
-# Verify describe advertises the slice 3 window control operations.
+# Verify describe advertises the slice 3 and slice 5 window control operations.
 "$ULTTYCTL" --json describe | python3 -c '
 import json, sys
 ops = set(json.load(sys.stdin)["supported_operations"])
-for op in ("list_windows", "new_window", "close_window"):
+for op in ("list_windows", "new_window", "close_window", "move_tab"):
     assert op in ops, f"missing {op} in describe"
 ' || fail "describe missing window operations"
 
@@ -269,6 +270,72 @@ for _ in $(seq 80); do
     sleep 0.1
 done
 [ "$win3_shot" -eq 1 ] && [ -s "$out/win3.png" ] || fail "--window $win3_id screenshot failed"
+
+# Slice 5: move a tab from window 0 (920x640) to win3 (800x600) via `move-tab`,
+# verify child PID is unchanged and grid resized to win3's dimensions, then
+# detach it into a new window via `move-tab --new-window` and close that window,
+# and finally move a tab back so the 2x2 layout is ready for slice 4 save.
+move_info=$("$ULTTYCTL" --json panes | python3 -c "
+import json, sys
+panes = {p['id']: p for p in json.load(sys.stdin)['panes']}
+p = panes[$tab_in_win0]
+print(p['tab_index'] + 1, p['pid'], p['cols'], p['rows'])
+")
+read -r move_tab_num move_pid_before move_cols_before move_rows_before <<<"$move_info"
+"$ULTTYCTL" move-tab "$move_tab_num" --window "$win3_id" >/dev/null || fail "move-tab --window failed"
+"$ULTTYCTL" --json panes | python3 -c "
+import json, sys
+panes = {p['id']: p for p in json.load(sys.stdin)['panes']}
+p = panes[$tab_in_win0]
+assert p['window'] == $win3_id, p
+assert p['pid'] == $move_pid_before, (p['pid'], $move_pid_before)
+assert (p['cols'], p['rows']) != ($move_cols_before, $move_rows_before), (p['cols'], p['rows'])
+" || fail "move-tab --window did not keep PID or resize grid"
+
+detached_win=$("$ULTTYCTL" move-tab "$move_tab_num" --new-window) || fail "move-tab --new-window failed"
+"$ULTTYCTL" --json panes | python3 -c "
+import json, sys
+panes = {p['id']: p for p in json.load(sys.stdin)['panes']}
+p = panes[$tab_in_win0]
+assert p['window'] == $detached_win, p
+assert p['pid'] == $move_pid_before, (p['pid'], $move_pid_before)
+" || fail "move-tab --new-window did not move tab with same PID"
+
+# Moving the sole tab of detached_win back to window 0 closes detached_win.
+"$ULTTYCTL" move-tab "$move_tab_num" --window 0 >/dev/null || fail "move-tab back to window 0 failed"
+"$ULTTYCTL" --json windows | python3 -c "
+import json, sys
+ids = [w['id'] for w in json.load(sys.stdin)['windows']]
+assert $detached_win not in ids and ids == [0, $win3_id], ids
+" || fail "moving sole tab out of detached window did not close it"
+
+# Drag-out: drag the second tab of window 0 outside the window and release to
+# detach it into a new window via mouse input, preserving its PID.
+xdotool_on windowmove "$win1" 20 40
+xdotool_on windowraise "$win1"
+xdotool_on windowfocus --sync "$win1"
+sleep 0.2
+xdotool_on mousemove --window "$win1" 650 58
+xdotool_on mousedown 1
+sleep 0.1
+xdotool_on mousemove --sync 1100 350
+sleep 0.1
+xdotool_on mouseup 1
+drag_win=""
+for _ in $(seq 80); do
+    drag_win=$("$ULTTYCTL" --json panes | python3 -c "
+import json, sys
+panes = {p['id']: p for p in json.load(sys.stdin)['panes']}
+p = panes[$tab_in_win0]
+if p['window'] not in (0, $win3_id):
+    assert p['pid'] == $move_pid_before
+    print(p['window'])
+" 2>/dev/null || true)
+    [ -n "$drag_win" ] && break
+    sleep 0.1
+done
+[ -n "$drag_win" ] || fail "dragging tab out of window 0 did not detach it into a new window"
+"$ULTTYCTL" move-tab "$move_tab_num" --window 0 >/dev/null || fail "returning dragged tab to window 0 failed"
 
 # Save the 2-window layout via `workspace save` and verify SessionData v2 schema.
 "$ULTTYCTL" workspace save mw-s4 || fail "workspace save mw-s4 failed"

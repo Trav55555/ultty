@@ -426,6 +426,7 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             }),
             _ => Err("usage: close-window <window>".to_string()),
         },
+        "move-tab" => parse_move_tab(rest),
         "tabs" => Ok(ControlRequest::ListTabs),
         "panes" => Ok(ControlRequest::ListPanes),
         "text" => Ok(ControlRequest::GetText {
@@ -683,6 +684,16 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
     }
     if let Some(id) = window_flag {
         set_window_target(&mut request, id)?;
+    }
+    if matches!(
+        request,
+        ControlRequest::MoveTab {
+            window: None,
+            new_window: false,
+            ..
+        }
+    ) {
+        return Err("usage: move-tab <tab> --window <id> | --new-window".to_string());
     }
     Ok(request)
 }
@@ -1039,6 +1050,37 @@ fn set_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
     }
 }
 
+fn parse_move_tab(args: &[String]) -> Result<ControlRequest, String> {
+    let tab = args
+        .first()
+        .ok_or_else(|| "usage: move-tab <tab> --window <id> | --new-window".to_string())
+        .and_then(|value| {
+            parse_display_tab_index(value)
+                .ok_or_else(|| "move-tab index must be 1 or greater".to_string())
+        })?;
+    match &args[1..] {
+        [] => Ok(ControlRequest::MoveTab {
+            tab,
+            window: None,
+            new_window: false,
+        }),
+        [flag] if flag == "--new-window" => Ok(ControlRequest::MoveTab {
+            tab,
+            window: None,
+            new_window: true,
+        }),
+        [flag, id] if flag == "--window" => Ok(ControlRequest::MoveTab {
+            tab,
+            window: Some(
+                id.parse()
+                    .map_err(|_| "--window requires a numeric window id".to_string())?,
+            ),
+            new_window: false,
+        }),
+        _ => Err("usage: move-tab <tab> --window <id> | --new-window".to_string()),
+    }
+}
+
 /// Point a window-scoped request at window `id`; other requests refuse `--window`.
 fn set_window_target(request: &mut ControlRequest, id: u64) -> Result<(), String> {
     match request {
@@ -1051,8 +1093,19 @@ fn set_window_target(request: &mut ControlRequest, id: u64) -> Result<(), String
             *window = Some(id);
             Ok(())
         }
+        ControlRequest::MoveTab {
+            window,
+            new_window: false,
+            ..
+        } if window.is_none() => {
+            *window = Some(id);
+            Ok(())
+        }
+        ControlRequest::MoveTab { .. } => {
+            Err("move-tab accepts either --window <id> or --new-window, not both".to_string())
+        }
         _ => Err(
-            "--window only applies to focus, fullscreen, opacity, resize, screenshot, new-tab and lua open"
+            "--window only applies to focus, fullscreen, opacity, resize, screenshot, new-tab, move-tab and lua open"
                 .to_string(),
         ),
     }
@@ -1434,6 +1487,9 @@ WINDOW COMMANDS:
     new-window [cmd] [args] Open a new window in the running process (prints
                             the new window's id)
     close-window <id>       Close window <id>
+    move-tab <n> --window <id> | --new-window
+                            Move tab n (1-indexed) to window <id> or detach it
+                            into a new window (prints the destination window id)
     focus                   Focus the target ultty window
     fullscreen              Toggle fullscreen on the target window
     opacity <0.0-1.0>       Set target window opacity
@@ -2510,6 +2566,42 @@ mod tests {
         );
         assert!(parse_cli_request(&args("close-window")).is_err());
         assert!(parse_cli_request(&args("close-window nope")).is_err());
+
+        assert_eq!(
+            parse_cli_request(&args("move-tab 2 --window 1")).unwrap(),
+            ControlRequest::MoveTab {
+                tab: 1,
+                window: Some(1),
+                new_window: false,
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("move-tab 2 --new-window")).unwrap(),
+            ControlRequest::MoveTab {
+                tab: 1,
+                window: None,
+                new_window: true,
+            }
+        );
+        assert_eq!(
+            parse_cli_request(&args("--window 1 move-tab 2")).unwrap(),
+            ControlRequest::MoveTab {
+                tab: 1,
+                window: Some(1),
+                new_window: false,
+            }
+        );
+        for bad in [
+            "move-tab",
+            "move-tab 0 --new-window",
+            "move-tab 2",
+            "move-tab 2 --window nope",
+            "move-tab 2 --window 1 --new-window",
+            "--window 1 move-tab 2 --new-window",
+            "--window 1 move-tab 2 --window 2",
+        ] {
+            assert!(parse_cli_request(&args(bad)).is_err(), "{bad}");
+        }
 
         assert_eq!(
             parse_cli_request(&args("--window 3 focus")).unwrap(),

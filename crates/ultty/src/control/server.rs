@@ -255,6 +255,7 @@ impl ControlServer {
                 "list_windows",
                 "new_window",
                 "close_window",
+                "move_tab",
                 "run_command",
                 "run_command_and_wait",
                 "split_pane",
@@ -1049,6 +1050,25 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
             let window = parts.next()?.parse().ok()?;
             Some(ControlRequest::CloseWindow { window })
         }
+        "move-tab" => {
+            let tab = parse_display_tab_index(parts.next()?)?;
+            match parts.next()? {
+                "--new-window" if parts.next().is_none() => Some(ControlRequest::MoveTab {
+                    tab,
+                    window: None,
+                    new_window: true,
+                }),
+                "--window" => {
+                    let window = parts.next()?.parse().ok()?;
+                    parts.next().is_none().then_some(ControlRequest::MoveTab {
+                        tab,
+                        window: Some(window),
+                        new_window: false,
+                    })
+                }
+                _ => None,
+            }
+        }
         "switch-tab" => {
             let index = parse_display_tab_index(parts.next()?)?;
             Some(ControlRequest::SwitchTab { index })
@@ -1268,7 +1288,9 @@ pub fn format_response(response: &ControlResponse, format: OutputFormat) -> Stri
                 }
                 out
             }
-            ControlData::WindowOpened { window, .. } => format!("{window}\n"),
+            ControlData::WindowOpened { window, .. } | ControlData::TabMoved { window, .. } => {
+                format!("{window}\n")
+            }
             ControlData::Tabs { tabs } => {
                 let mut out = String::new();
                 for tab in tabs {
@@ -1750,6 +1772,24 @@ mod tests {
             Some(ControlRequest::CloseWindow { window: 2 })
         );
         assert_eq!(parse_request_only(b"close-window"), None);
+        assert_eq!(
+            parse_request_only(b"move-tab 2 --window 1"),
+            Some(ControlRequest::MoveTab {
+                tab: 1,
+                window: Some(1),
+                new_window: false,
+            })
+        );
+        assert_eq!(
+            parse_request_only(b"move-tab 2 --new-window"),
+            Some(ControlRequest::MoveTab {
+                tab: 1,
+                window: None,
+                new_window: true,
+            })
+        );
+        assert_eq!(parse_request_only(b"move-tab 0 --new-window"), None);
+        assert_eq!(parse_request_only(b"move-tab 2"), None);
     }
 
     #[test]
@@ -2426,7 +2466,7 @@ mod tests {
             panic!("expected Description");
         };
         assert_eq!(schema_version, 2);
-        for op in ["list_windows", "new_window", "close_window"] {
+        for op in ["list_windows", "new_window", "close_window", "move_tab"] {
             assert!(
                 supported_operations.iter().any(|item| item == op),
                 "missing operation {op}"

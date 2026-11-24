@@ -421,7 +421,7 @@ impl Renderer {
         (bg_v, bg_i, text_v, text_i)
     }
 
-    /// Draw the main menu over everything else, when it is open.
+    /// Draw the main menu or tab context menu over everything else, when open.
     pub(super) fn render_main_menu(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -430,6 +430,78 @@ impl Renderer {
     ) {
         let (bg_v, bg_i, text_v, text_i) = self.build_main_menu_vertices(tab_bar);
         self.draw_overlay_layers(encoder, view, (&bg_v, &bg_i), (&text_v, &text_i));
+        let (bg_v, bg_i, text_v, text_i) = self.build_tab_menu_vertices(tab_bar);
+        self.draw_overlay_layers(encoder, view, (&bg_v, &bg_i), (&text_v, &text_i));
+    }
+
+    fn build_tab_menu_vertices(
+        &mut self,
+        tab_bar: &TabBarState,
+    ) -> (Vec<Vertex>, Vec<u32>, Vec<Vertex>, Vec<u32>) {
+        let (mut bg_v, mut bg_i, mut text_v, mut text_i) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let Some(menu) = tab_bar.tab_menu.as_ref() else {
+            return (bg_v, bg_i, text_v, text_i);
+        };
+        let Some(layout) = tab_bar.tab_menu_layout(self.cell_width, self.cell_height) else {
+            return (bg_v, bg_i, text_v, text_i);
+        };
+        let bg = self.color_scheme.background;
+        let panel = lighten(bg, 0.045);
+        let border = lighten(bg, 0.17);
+        let hover = lighten(bg, 0.11);
+        let fg = self.color_scheme.foreground;
+        let height = layout.height();
+        let px = |logical: f32| tab_bar.scaled(logical);
+        let line = px(1.0);
+        self.emit_rounded_rect(
+            &mut bg_v,
+            &mut bg_i,
+            layout.x,
+            layout.y,
+            layout.width,
+            height,
+            px(CHROME_BUTTON_RADIUS + 1.0),
+            border,
+        );
+        self.emit_rounded_rect(
+            &mut bg_v,
+            &mut bg_i,
+            layout.x + line,
+            layout.y + line,
+            layout.width - 2.0 * line,
+            height - 2.0 * line,
+            px(CHROME_BUTTON_RADIUS),
+            panel,
+        );
+        for (index, item) in menu.items.iter().enumerate() {
+            let item_y = layout.y + layout.padding + index as f32 * layout.item_height;
+            if menu.hovered == Some(index) {
+                self.emit_rounded_rect(
+                    &mut bg_v,
+                    &mut bg_i,
+                    layout.x + px(4.0),
+                    item_y + px(2.0),
+                    layout.width - px(8.0),
+                    layout.item_height - px(4.0),
+                    px(CHROME_BUTTON_RADIUS - 2.0),
+                    hover,
+                );
+            }
+            let text_y = item_y + (layout.item_height - self.cell_height) / 2.0;
+            let text_x = layout.x + 2.0 * self.cell_width;
+            let (v, idx) = self.text_renderer.build_label_vertices(
+                &item.label,
+                text_x,
+                text_y,
+                layout.width - 3.0 * self.cell_width,
+                fg,
+            );
+            let base = text_v.len() as u32;
+            text_v.extend(v);
+            text_i.extend(idx.iter().map(|i| i + base));
+        }
+        (bg_v, bg_i, text_v, text_i)
     }
 
     /// A pane outline with a divider: vertical for split right, horizontal
