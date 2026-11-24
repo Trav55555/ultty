@@ -249,6 +249,12 @@ if [ "$SHARD" = all ] || [ "$SHARD" = core ]; then
   queue_check accessibility-no-bus env ULTTY="$ULTTY_BIN" scripts/e2e/accessibility-no-bus.sh "$OUT/accessibility"
   queue_check runtime-file-cleanup env ULTTY="$ULTTY_BIN" scripts/e2e/runtime-file-cleanup.sh "$OUT/runtime-file-cleanup"
   queue_check exec-flag env ULTTY="$ULTTY_BIN" ULTTYCTL="$ULTTYCTL_BIN" scripts/e2e/exec-flag.sh "$OUT/exec-flag"
+  if command -v xdotool >/dev/null 2>&1; then
+    queue_check multi-window env ULTTY="$ULTTY_BIN" ULTTYCTL="$ULTTYCTL_BIN" \
+      scripts/e2e/multi-window.sh "$OUT/multi-window"
+  else
+    record_skip multi-window "needs xdotool"
+  fi
 fi
 
 if [ "$SHARD" = all ] || [ "$SHARD" = native-lua ]; then
