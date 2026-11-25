@@ -37,15 +37,29 @@ pub struct ConfigWatcher {
 }
 
 impl ConfigWatcher {
-    /// Create a new config watcher.
+    /// Create a new config watcher for the default config file.
     ///
     /// `wake` is called from the watcher's thread after each change.
     ///
     /// Returns None if the config file doesn't exist or watching fails.
     pub fn new(wake: impl Fn() + Send + 'static) -> Option<Self> {
-        let config_path = Config::config_path()?;
+        Self::for_path(None, wake)
+    }
 
-        // Ensure config file exists
+    /// Create a new config watcher for `path`, or the default config file when `None`.
+    ///
+    /// `wake` is called from the watcher's thread after each change.
+    ///
+    /// Returns None if the config file doesn't exist or watching fails.
+    pub fn for_path(
+        path: Option<&std::path::Path>,
+        wake: impl Fn() + Send + 'static,
+    ) -> Option<Self> {
+        let config_path = match path {
+            Some(path) => path.to_path_buf(),
+            None => Config::config_path()?,
+        };
+
         if !config_path.exists() {
             tracing::debug!("Config file does not exist, skipping watcher");
             return None;
@@ -58,7 +72,12 @@ impl ConfigWatcher {
         let (tx, rx) = mpsc::channel();
 
         // Watch the parent directory (more reliable than watching the file directly)
-        let watch_path = config_path.parent()?.to_path_buf();
+        let parent = config_path.parent()?;
+        let watch_path = if parent.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            parent.to_path_buf()
+        };
         let config_filename = config_path.file_name()?.to_os_string();
 
         let sender = tx.clone();
