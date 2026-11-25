@@ -117,6 +117,18 @@ until the T4 numbers say it pays.
    is dropped and the next frame is drawn by the GPU. The CPU's last frame
    stays on screen until the GPU's first present replaces it.
 
+   On Wayland the softbuffer surface is dropped earlier, before the worker
+   configures the swapchain (#237). With explicit sync, Mesa binds
+   `wp_linux_drm_syncobj_surface_v1` to the window's `wl_surface` when it
+   makes the swapchain, and a `wl_shm` buffer attached after that has no
+   acquire point: the compositor reports a protocol error and disconnects
+   Ultty. So once the device is ready, the worker sends
+   `AppEvent::RetireCpuFrames` and waits for the main thread to drop the
+   CPU frames before it configures. From then until the renderer arrives
+   (the configure and the pipelines, about 55 ms on the T4) nothing is
+   presented; the compositor should keep showing the last CPU frame, as it
+   does at the handover (not yet checked pixel by pixel).
+
 ### Can one window go from softbuffer to a wgpu surface?
 
 This is the crux; a window that cannot switch makes the idea moot on that

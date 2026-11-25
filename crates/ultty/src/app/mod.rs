@@ -146,6 +146,12 @@ enum AppEvent {
     ShutdownSignal,
     /// The GPU setup finished, or failed; see `gpu`.
     Renderer(gpu::Handoff),
+    /// The GPU setup is about to configure the window's surface: drop its
+    /// CPU frames, then answer on `retired` (see `cpu_frames`).
+    RetireCpuFrames {
+        window_key: WindowKey,
+        retired: std::sync::mpsc::Sender<()>,
+    },
     /// Global hotkey pressed to toggle the quick terminal (ADR 0028).
     #[cfg(all(unix, not(target_os = "macos")))]
     ToggleQuickHotkey {
@@ -579,6 +585,7 @@ impl WindowState {
             })
             .flatten();
         let (fonts_sender, fonts_receiver) = std::sync::mpsc::channel();
+        let retire_cpu_frames = cpu_frames.is_some() && paced_by_frame_callbacks;
         gpu::spawn_setup(
             key,
             event_loop.owned_display_handle(),
@@ -587,6 +594,7 @@ impl WindowState {
             config.colors.clone(),
             fonts_receiver,
             paced_by_frame_callbacks,
+            retire_cpu_frames,
             event_proxy,
         )?;
         if let Some(cpu) = cpu_frames.as_mut() {
@@ -2939,6 +2947,15 @@ impl ApplicationHandler<AppEvent> for AppHandler {
                     }
                     app.update_and_schedule(event_loop);
                 }
+            }
+            AppEvent::RetireCpuFrames {
+                window_key,
+                retired,
+            } => {
+                if let Some(app) = self.app.as_mut() {
+                    app.with_window(window_key, |ctx| ctx.win.retire_cpu_frames());
+                }
+                let _ = retired.send(());
             }
             AppEvent::Renderer(gpu::Handoff { window_key, result }) => {
                 let Some(app) = self.app.as_mut() else {
