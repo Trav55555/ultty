@@ -582,6 +582,25 @@ impl Renderer {
         fonts: Fonts,
         paced_by_frame_callbacks: bool,
     ) -> anyhow::Result<Self> {
+        let (device, queue) = Self::request_device(adapter).await?;
+        Self::from_device(
+            surface,
+            adapter,
+            device,
+            queue,
+            width,
+            height,
+            fonts,
+            paced_by_frame_callbacks,
+        )
+    }
+
+    /// The device and queue a renderer on `adapter` draws with, as
+    /// [`Self::new`] requests them; pass them to [`Self::with_shared_device`]
+    /// to configure the surface later.
+    pub async fn request_device(
+        adapter: &wgpu::Adapter,
+    ) -> anyhow::Result<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("ultty_device"),
@@ -596,16 +615,7 @@ impl Renderer {
             })
             .await?;
         tracing::debug!(target: "ultty::startup", "GPU device ready");
-        Self::from_device(
-            surface,
-            adapter,
-            Arc::new(device),
-            Arc::new(queue),
-            width,
-            height,
-            fonts,
-            paced_by_frame_callbacks,
-        )
+        Ok((Arc::new(device), Arc::new(queue)))
     }
 
     #[allow(clippy::too_many_arguments)]

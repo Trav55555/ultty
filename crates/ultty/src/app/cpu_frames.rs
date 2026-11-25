@@ -9,13 +9,24 @@
 //! dropped before the GPU's first present, and the GPU draws every frame from
 //! then on.
 //!
+//! On Wayland the CPU frames are retired earlier, before the GPU setup
+//! configures the surface (see [`configure_after_retiring`]). softbuffer's
+//! `wl_shm` buffers and the Vulkan swapchain share the window's `wl_surface`,
+//! and on a compositor with explicit sync, Mesa binds
+//! `wp_linux_drm_syncobj_surface_v1` to it when the swapchain is made. From
+//! then on a buffer attached without an acquire point is a protocol error,
+//! and the compositor disconnects Ultty (#237). So the worker asks the main
+//! thread to drop the softbuffer surface, and waits for its answer, before it
+//! configures. Until the renderer arrives nothing is presented; the
+//! compositor should keep showing the last CPU frame.
+//!
 //! The softbuffer surface is made before the GPU setup starts. On macOS
 //! both attach a sublayer to the view, and the later one is drawn on top;
 //! softbuffer does not remove its layer when dropped, so the GPU's must be
 //! the later.
 
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 use anyhow::{Context as _, Result};
 use ultty::config::ColorConfig;
@@ -67,7 +78,32 @@ impl CpuFrames {
     }
 }
 
+/// Run `configure` once the window's CPU frames are retired: `request` asks
+/// the main thread to retire them, handing it the sender to answer on, and
+/// this waits for the answer. A request dropped unanswered (the window or
+/// the event loop is gone, and its CPU frames with it) counts as one.
+pub(super) fn configure_after_retiring<T>(
+    request: impl FnOnce(mpsc::Sender<()>),
+    configure: impl FnOnce() -> T,
+) -> T {
+    let (retired, answer) = mpsc::channel();
+    request(retired);
+    let _ = answer.recv();
+    configure()
+}
+
 impl WindowState {
+    /// Drop the CPU frames: nothing is presented with softbuffer again.
+    pub(super) fn retire_cpu_frames(&mut self) {
+        if self.cpu_frames.take().is_some() {
+            tracing::debug!(
+                target: "ultty::startup",
+                window = self.key.raw(),
+                "CPU frames retired"
+            );
+        }
+    }
+
     /// Whether a frame can be drawn: by the GPU renderer, or on the CPU
     /// until it arrives.
     pub(super) fn can_draw(&self) -> bool {
@@ -150,5 +186,63 @@ impl WindowCtx<'_> {
             .manager
             .clear_window_active_dirty(self.win.key);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    use super::configure_after_retiring;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Step {
+        CpuPresent,
+        Retired,
+        Configured,
+    }
+
+    #[test]
+    fn the_surface_is_configured_only_after_the_cpu_frames_are_retired() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (requests, main_thread) = mpsc::channel::<mpsc::Sender<()>>();
+        let worker = {
+            let log = Arc::clone(&log);
+            thread::spawn(move || {
+                configure_after_retiring(
+                    |retired| requests.send(retired).unwrap(),
+                    || log.lock().unwrap().push(Step::Configured),
+                );
+            })
+        };
+
+        let retired = main_thread.recv().unwrap();
+        for _ in 0..3 {
+            thread::sleep(Duration::from_millis(10));
+            log.lock().unwrap().push(Step::CpuPresent);
+        }
+        log.lock().unwrap().push(Step::Retired);
+        let _ = retired.send(());
+        worker.join().unwrap();
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                Step::CpuPresent,
+                Step::CpuPresent,
+                Step::CpuPresent,
+                Step::Retired,
+                Step::Configured,
+            ],
+            "the main thread presents until it retires; the worker configures after"
+        );
+    }
+
+    #[test]
+    fn a_request_dropped_unanswered_does_not_block_the_setup() {
+        let configured = configure_after_retiring(drop, || true);
+        assert!(configured);
     }
 }

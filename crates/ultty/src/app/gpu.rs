@@ -29,7 +29,7 @@ use winit::dpi::PhysicalSize;
 use winit::event_loop::{EventLoopProxy, OwnedDisplayHandle};
 use winit::window::Window;
 
-use super::{AppEvent, WindowCtx};
+use super::{cpu_frames, AppEvent, WindowCtx};
 
 /// Process-wide GPU objects shared across windows (ADR 0027).
 #[derive(Clone)]
@@ -281,7 +281,7 @@ impl WindowCtx<'_> {
         };
         starting.clone().apply_to(&mut gpu.renderer);
         self.win.renderer = RendererState::Ready(gpu);
-        self.win.cpu_frames = None;
+        self.win.retire_cpu_frames();
         tracing::debug!(
             target: "ultty::startup",
             window = self.win.key.raw(),
@@ -350,6 +350,12 @@ pub(super) fn setup_with_shared(
 /// [`Fonts`]) and `colors`. The result comes back through `proxy` as
 /// [`AppEvent::Renderer`]. `paced_by_frame_callbacks` is as for
 /// [`Renderer::with_config`].
+///
+/// With `retire_cpu_frames`, the worker asks the main thread to retire the
+/// window's CPU frames ([`AppEvent::RetireCpuFrames`]) and waits until it
+/// has before it configures the surface. Ultty asks for it on Wayland, where
+/// the CPU frames and the swapchain share the window's `wl_surface`; see
+/// [`cpu_frames::configure_after_retiring`].
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_setup(
     window_key: WindowKey,
@@ -359,11 +365,21 @@ pub(super) fn spawn_setup(
     colors: ColorConfig,
     fonts: mpsc::Receiver<Fonts>,
     paced_by_frame_callbacks: bool,
+    retire_cpu_frames: bool,
     proxy: EventLoopProxy<AppEvent>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("ultty-gpu-setup".into())
         .spawn(move || {
+            let retire = retire_cpu_frames.then(|| {
+                let proxy = proxy.clone();
+                move |retired| {
+                    let _ = proxy.send_event(AppEvent::RetireCpuFrames {
+                        window_key,
+                        retired,
+                    });
+                }
+            });
             let result = setup(
                 display,
                 window,
@@ -371,6 +387,7 @@ pub(super) fn spawn_setup(
                 &colors,
                 fonts,
                 paced_by_frame_callbacks,
+                retire,
             );
             let _ = proxy.send_event(AppEvent::Renderer(Handoff { window_key, result }));
         })
@@ -384,6 +401,7 @@ fn setup(
     colors: &ColorConfig,
     fonts: mpsc::Receiver<Fonts>,
     paced_by_frame_callbacks: bool,
+    retire_cpu_frames: Option<impl FnOnce(mpsc::Sender<()>)>,
 ) -> Result<Box<Gpu>> {
     let primary = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY);
     let (instance, surface, adapter) = match request_gpu(&display, &window, primary) {
@@ -416,15 +434,24 @@ fn setup(
     let fonts = fonts
         .recv()
         .map_err(|_| anyhow::anyhow!("Startup ended before the fonts were measured"))?;
-    let renderer = pollster::block_on(Renderer::with_fonts(
-        &surface,
-        &adapter,
-        size.width,
-        size.height,
-        colors,
-        fonts,
-        paced_by_frame_callbacks,
-    ))?;
+    let (device, queue) = pollster::block_on(Renderer::request_device(&adapter))?;
+    let configure = || {
+        Renderer::with_shared_device(
+            &surface,
+            &adapter,
+            device,
+            queue,
+            size.width,
+            size.height,
+            colors,
+            fonts,
+            paced_by_frame_callbacks,
+        )
+    };
+    let renderer = match retire_cpu_frames {
+        Some(request) => cpu_frames::configure_after_retiring(request, configure),
+        None => configure(),
+    }?;
     let shared = SharedGpu {
         instance: Arc::new(instance),
         adapter: Arc::new(adapter),
