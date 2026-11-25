@@ -150,7 +150,16 @@ impl App {
 
     /// Reload configuration from disk and apply it across every open window.
     pub(super) fn reload_config(&mut self) {
-        let mut new_config = Config::load();
+        let mut new_config = match Config::load_with_options(
+            self.shared.config_path.as_deref(),
+            &self.shared.config_overrides,
+        ) {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::warn!("Failed to reload configuration: {err}");
+                return;
+            }
+        };
         if new_config
             .behavior
             .keep_start_only(&self.shared.config.behavior)

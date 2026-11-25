@@ -2,13 +2,14 @@
 //!
 //! This is the entry point for the terminal emulator binary.
 
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Result;
 
 mod app;
 
-use app::StartupCommand;
+use app::{LaunchOptions, StartupCommand};
 
 /// Counts Rust heap for soaks; see `ultty::heap_stats`.
 #[cfg(feature = "heap-stats")]
@@ -16,51 +17,104 @@ use app::StartupCommand;
 static GLOBAL: ultty::heap_stats::Counting = ultty::heap_stats::Counting;
 
 fn main() -> Result<ExitCode> {
-    let (command, new_process, quick) = match invocation(std::env::args().skip(1)) {
-        Ok(Invocation::Attach { args }) => {
-            let _log = ultty::logging::init(&ultty::config::LogConfig::load());
-            ultty::viewer::cli::run(args)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Ok(Invocation::Run {
-            command,
-            new_process,
-            quick,
-        }) => (command, new_process, quick),
-        Ok(Invocation::Version) => {
-            println!("{}", version_output());
-            return Ok(ExitCode::SUCCESS);
-        }
-        Ok(Invocation::ListThemes) => {
-            use std::io::IsTerminal;
-            let config = ultty::config::Config::load();
-            let themes: Vec<_> = config
-                .colors
-                .theme_names()
-                .into_iter()
-                .filter_map(|name| config.colors.get_theme(&name).cloned().map(|t| (name, t)))
-                .collect();
-            print!(
-                "{}",
-                ultty::themes::format_listing(&themes, std::io::stdout().is_terminal())
-            );
-            return Ok(ExitCode::SUCCESS);
-        }
-        Ok(Invocation::Help) => {
-            print!("{}", usage());
-            return Ok(ExitCode::SUCCESS);
-        }
-        Err(message) => {
-            eprint!("ultty: {message}\n\n{}", usage());
+    let (command, new_process, quick, config_path, config_overrides, working_dir) =
+        match invocation(std::env::args().skip(1)) {
+            Ok(Invocation::Attach { args }) => {
+                let _log = ultty::logging::init(&ultty::config::LogConfig::load());
+                ultty::viewer::cli::run(args)?;
+                return Ok(ExitCode::SUCCESS);
+            }
+            Ok(Invocation::Run {
+                command,
+                new_process,
+                quick,
+                config_path,
+                config_overrides,
+                working_dir,
+            }) => (
+                command,
+                new_process,
+                quick,
+                config_path,
+                config_overrides,
+                working_dir,
+            ),
+            Ok(Invocation::Version) => {
+                println!("{}", version_output());
+                return Ok(ExitCode::SUCCESS);
+            }
+            Ok(Invocation::ListThemes {
+                config_path,
+                config_overrides,
+            }) => {
+                use std::io::IsTerminal;
+                let config_path = match config_path.map(resolve_path).transpose() {
+                    Ok(path) => path,
+                    Err(err) => {
+                        eprintln!("ultty: {err}");
+                        return Ok(ExitCode::from(2));
+                    }
+                };
+                let config = match ultty::config::Config::load_with_options(
+                    config_path.as_deref(),
+                    &config_overrides,
+                ) {
+                    Ok(config) => config,
+                    Err(err) => {
+                        eprintln!("ultty: {err}");
+                        return Ok(ExitCode::from(2));
+                    }
+                };
+                let themes: Vec<_> = config
+                    .colors
+                    .theme_names()
+                    .into_iter()
+                    .filter_map(|name| config.colors.get_theme(&name).cloned().map(|t| (name, t)))
+                    .collect();
+                print!(
+                    "{}",
+                    ultty::themes::format_listing(&themes, std::io::stdout().is_terminal())
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            Ok(Invocation::Help) => {
+                print!("{}", usage());
+                return Ok(ExitCode::SUCCESS);
+            }
+            Err(message) => {
+                eprint!("ultty: {message}\n\n{}", usage());
+                return Ok(ExitCode::from(2));
+            }
+        };
+
+    let config_path = match config_path.map(resolve_path).transpose() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("ultty: {err}");
             return Ok(ExitCode::from(2));
         }
     };
+    let working_dir = match working_dir.map(resolve_working_directory).transpose() {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("ultty: {err}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    let config =
+        match ultty::config::Config::load_with_options(config_path.as_deref(), &config_overrides) {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("ultty: {err}");
+                return Ok(ExitCode::from(2));
+            }
+        };
 
-    let _log = ultty::logging::init(&ultty::config::LogConfig::load());
+    let _log = ultty::logging::init(&config.log);
 
-    let config = ultty::config::Config::load();
+    let custom_config = config_path.is_some() || !config_overrides.is_empty();
     if quick {
-        if !new_process && command.is_none() {
+        if !new_process && !custom_config && command.is_none() && working_dir.is_none() {
             let token = ultty::control::single_instance::current_activation_token();
             if let ultty::control::single_instance::QuickHandoffOutcome::Toggled {
                 pid,
@@ -77,8 +131,8 @@ fn main() -> Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
         }
-    } else if config.behavior.single_instance && !new_process {
-        if let Some(launch) = single_instance_launch(&command) {
+    } else if config.behavior.single_instance && !new_process && !custom_config {
+        if let Some(launch) = single_instance_launch(&command, working_dir.as_deref()) {
             if let ultty::control::single_instance::HandoffOutcome::Opened { pid, window } =
                 ultty::control::single_instance::try_open_in_existing_instance(&launch)
             {
@@ -94,16 +148,48 @@ fn main() -> Result<ExitCode> {
         ultty::platform::vulkan_icd::narrow_to_detected_gpu();
     }
 
-    app::App::run(command, config, quick)?;
+    let options = LaunchOptions {
+        config_path,
+        config_overrides,
+        working_dir,
+        start_quick: quick,
+    };
+    app::App::run(command, config, options)?;
     Ok(ExitCode::SUCCESS)
+}
+
+fn resolve_path(path: PathBuf) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(&path))
+        .map_err(|err| format!("cannot resolve '{}': {err}", path.display()))
+}
+
+fn resolve_working_directory(dir: PathBuf) -> Result<PathBuf, String> {
+    let resolved = resolve_path(dir)?;
+    match std::fs::metadata(&resolved) {
+        Ok(meta) if meta.is_dir() => Ok(resolved),
+        Ok(_) => Err(format!(
+            "working directory '{}' is not a directory",
+            resolved.display()
+        )),
+        Err(err) => Err(format!("working directory '{}': {err}", resolved.display())),
+    }
 }
 
 fn single_instance_launch(
     command: &Option<StartupCommand>,
+    explicit_working_dir: Option<&Path>,
 ) -> Option<ultty::control::single_instance::NewWindowLaunch> {
-    let working_dir = std::env::current_dir()
-        .ok()
-        .and_then(|path| path.into_os_string().into_string().ok());
+    let working_dir = explicit_working_dir
+        .map(|path| path.to_string_lossy().into_owned())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|path| path.into_os_string().into_string().ok())
+        });
     match command {
         None => Some(ultty::control::single_instance::NewWindowLaunch {
             command: None,
@@ -134,11 +220,36 @@ enum Invocation {
         command: Option<StartupCommand>,
         new_process: bool,
         quick: bool,
+        config_path: Option<PathBuf>,
+        config_overrides: Vec<String>,
+        working_dir: Option<PathBuf>,
     },
     Version,
     /// Print the theme names (with colour swatches on a terminal).
-    ListThemes,
+    ListThemes {
+        config_path: Option<PathBuf>,
+        config_overrides: Vec<String>,
+    },
     Help,
+}
+
+fn take_flag_value<I>(
+    args: &mut std::iter::Peekable<I>,
+    flag: &str,
+    expected: &str,
+) -> Result<String, String>
+where
+    I: Iterator<Item = String>,
+{
+    if args
+        .peek()
+        .is_some_and(|value| !value.is_empty() && !value.starts_with('-'))
+    {
+        args.next()
+            .ok_or_else(|| format!("'{flag}' needs {expected}"))
+    } else {
+        Err(format!("'{flag}' needs {expected}"))
+    }
 }
 
 /// Parse the arguments after the program name.
@@ -153,8 +264,12 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
     let mut list_themes = false;
     let mut new_process = false;
     let mut quick = false;
+    let mut config_path = None;
+    let mut config_overrides = Vec::new();
+    let mut working_dir = None;
     let mut unknown = None;
     let mut command = None;
+    let mut option_error = None;
     let mut selection_error = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -168,6 +283,26 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
             "--list-themes" => list_themes = true,
             "--new-process" => new_process = true,
             "--quick" => quick = true,
+            "--config" => match take_flag_value(&mut args, "--config", "a file path") {
+                Ok(path) => config_path = Some(PathBuf::from(path)),
+                Err(err) => {
+                    option_error.get_or_insert(err);
+                }
+            },
+            "--working-directory" => {
+                match take_flag_value(&mut args, "--working-directory", "a directory") {
+                    Ok(dir) => working_dir = Some(PathBuf::from(dir)),
+                    Err(err) => {
+                        option_error.get_or_insert(err);
+                    }
+                }
+            }
+            "-o" | "--option" => match take_flag_value(&mut args, &arg, "KEY=VALUE") {
+                Ok(spec) => config_overrides.push(spec),
+                Err(err) => {
+                    option_error.get_or_insert(err);
+                }
+            },
             "--profile" | "--workspace" => {
                 if command.is_some() {
                     selection_error =
@@ -207,7 +342,30 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
                 break;
             }
             _ => {
-                unknown.get_or_insert(arg);
+                if let Some(value) = arg.strip_prefix("--config=") {
+                    if value.is_empty() {
+                        option_error
+                            .get_or_insert_with(|| "'--config' needs a file path".to_owned());
+                    } else {
+                        config_path = Some(PathBuf::from(value));
+                    }
+                } else if let Some(value) = arg.strip_prefix("--working-directory=") {
+                    if value.is_empty() {
+                        option_error.get_or_insert_with(|| {
+                            "'--working-directory' needs a directory".to_owned()
+                        });
+                    } else {
+                        working_dir = Some(PathBuf::from(value));
+                    }
+                } else if let Some(value) = arg.strip_prefix("--option=") {
+                    if value.is_empty() {
+                        option_error.get_or_insert_with(|| "'--option' needs KEY=VALUE".to_owned());
+                    } else {
+                        config_overrides.push(value.to_owned());
+                    }
+                } else {
+                    unknown.get_or_insert(arg);
+                }
             }
         }
     }
@@ -215,10 +373,16 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
         return Ok(Invocation::Version);
     }
     if list_themes {
-        return Ok(Invocation::ListThemes);
+        return Ok(Invocation::ListThemes {
+            config_path,
+            config_overrides,
+        });
     }
     if let Some(arg) = unknown {
         return Err(format!("unknown argument '{arg}'"));
+    }
+    if let Some(error) = option_error {
+        return Err(error);
     }
     if let Some(error) = selection_error {
         return Err(error);
@@ -236,6 +400,9 @@ fn invocation(args: impl IntoIterator<Item = String>) -> Result<Invocation, Stri
         command,
         new_process,
         quick,
+        config_path,
+        config_overrides,
+        working_dir,
     })
 }
 
@@ -247,18 +414,21 @@ GPU-accelerated terminal emulator. Opens a window running your shell.
 Usage: ultty [OPTIONS] [-e COMMAND [ARGS]...]
 
 Options:
-  -e COMMAND [ARGS]...  Run COMMAND in the first tab instead of your shell.
-                        Everything after -e is passed to COMMAND.
-                        Does not restore or save the session.
-                        -- does the same.
-  -h, --help            Print this help and exit
-  -V, --version         Print the version and exit
-  --list-themes         Print the available colour themes and exit
-  --new-process         Always start a new process even with behavior.single_instance.
-  --quick               Toggle the running instance's quick terminal, or start one.
-  --profile NAME        Launch configured tabs and panes instead of restoring.
-  --workspace NAME      Open a saved layout in fresh shells; does not resume jobs.
-  --attach NAME         Attach to a live session host; close the window to detach.
+  -e COMMAND [ARGS]...      Run COMMAND in the first tab instead of your shell.
+                            Everything after -e is passed to COMMAND.
+                            Does not restore or save the session.
+                            -- does the same.
+  --config PATH             Load configuration from PATH instead of the default file.
+  -o, --option KEY=VALUE    Override a config key (repeatable, e.g. -o font.size=16).
+  --working-directory DIR   Start the initial shell or command in DIR.
+  -h, --help                Print this help and exit
+  -V, --version             Print the version and exit
+  --list-themes             Print the available colour themes and exit
+  --new-process             Always start a new process even with behavior.single_instance.
+  --quick                   Toggle the running instance's quick terminal, or start one.
+  --profile NAME            Launch configured tabs and panes instead of restoring.
+  --workspace NAME          Open a saved layout in fresh shells; does not resume jobs.
+  --attach NAME             Attach to a live session host; close the window to detach.
 
 Configuration: ~/.config/ultty/config.toml
 Your themes:   ~/.config/ultty/themes/NAME.toml
@@ -279,12 +449,26 @@ fn version_output() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::{
-        invocation, single_instance_launch, usage, version_output, Invocation, StartupCommand,
+        invocation, resolve_working_directory, single_instance_launch, usage, version_output,
+        Invocation, StartupCommand,
     };
 
     fn args(args: &[&str]) -> Vec<String> {
         args.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    fn run_default() -> Invocation {
+        Invocation::Run {
+            command: None,
+            new_process: false,
+            quick: false,
+            config_path: None,
+            config_overrides: Vec::new(),
+            working_dir: None,
+        }
     }
 
     fn run_command(program: &str, command_args: &[&str]) -> Result<Invocation, String> {
@@ -295,19 +479,103 @@ mod tests {
             }),
             new_process: false,
             quick: false,
+            config_path: None,
+            config_overrides: Vec::new(),
+            working_dir: None,
         })
     }
 
     #[test]
     fn no_arguments_run_the_shell() {
+        assert_eq!(invocation(args(&[])), Ok(run_default()));
+    }
+
+    #[test]
+    fn test_config_option_and_working_directory_flags_parse() {
         assert_eq!(
-            invocation(args(&[])),
+            invocation(args(&[
+                "--config",
+                "/tmp/alt.toml",
+                "-o",
+                "font.size=18",
+                "--option=behavior.cursor_blink=false",
+                "--option",
+                "colors.theme=dracula",
+                "--working-directory",
+                "/tmp",
+            ])),
             Ok(Invocation::Run {
                 command: None,
                 new_process: false,
                 quick: false,
+                config_path: Some(PathBuf::from("/tmp/alt.toml")),
+                config_overrides: args(&[
+                    "font.size=18",
+                    "behavior.cursor_blink=false",
+                    "colors.theme=dracula",
+                ]),
+                working_dir: Some(PathBuf::from("/tmp")),
             })
         );
+        assert_eq!(
+            invocation(args(&[
+                "--config=/tmp/one.toml",
+                "--working-directory=/var/tmp",
+                "-e",
+                "echo",
+                "--config",
+                "-o",
+            ])),
+            Ok(Invocation::Run {
+                command: Some(StartupCommand::Exec {
+                    program: "echo".to_owned(),
+                    args: args(&["--config", "-o"]),
+                }),
+                new_process: false,
+                quick: false,
+                config_path: Some(PathBuf::from("/tmp/one.toml")),
+                config_overrides: Vec::new(),
+                working_dir: Some(PathBuf::from("/var/tmp")),
+            })
+        );
+    }
+
+    #[test]
+    fn test_config_option_and_working_directory_missing_values_error() {
+        for bad in [
+            vec!["--config"],
+            vec!["--config="],
+            vec!["--working-directory"],
+            vec!["--working-directory="],
+            vec!["-o"],
+            vec!["--option"],
+            vec!["--option="],
+        ] {
+            assert!(
+                invocation(args(&bad)).is_err(),
+                "expected error for {bad:?}"
+            );
+        }
+        assert_eq!(
+            invocation(args(&["--config", "--help"])),
+            Ok(Invocation::Help)
+        );
+        assert_eq!(
+            invocation(args(&["--working-directory", "--version"])),
+            Ok(Invocation::Version)
+        );
+    }
+
+    #[test]
+    fn test_resolve_working_directory_validates_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = resolve_working_directory(dir.path().to_path_buf()).unwrap();
+        assert_eq!(resolved, dir.path());
+
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, "hi").unwrap();
+        assert!(resolve_working_directory(file).is_err());
+        assert!(resolve_working_directory(dir.path().join("missing")).is_err());
     }
 
     #[test]
@@ -318,6 +586,9 @@ mod tests {
                 command: None,
                 new_process: true,
                 quick: false,
+                config_path: None,
+                config_overrides: Vec::new(),
+                working_dir: None,
             })
         );
         assert_eq!(
@@ -329,6 +600,9 @@ mod tests {
                 }),
                 new_process: true,
                 quick: false,
+                config_path: None,
+                config_overrides: Vec::new(),
+                working_dir: None,
             })
         );
         assert_eq!(
@@ -345,6 +619,9 @@ mod tests {
                 command: None,
                 new_process: false,
                 quick: true,
+                config_path: None,
+                config_overrides: Vec::new(),
+                working_dir: None,
             })
         );
         assert_eq!(
@@ -353,6 +630,9 @@ mod tests {
                 command: None,
                 new_process: true,
                 quick: true,
+                config_path: None,
+                config_overrides: Vec::new(),
+                working_dir: None,
             })
         );
         assert!(invocation(args(&["--quick", "--profile", "dev"])).is_err());
@@ -361,24 +641,34 @@ mod tests {
 
     #[test]
     fn single_instance_launch_maps_shell_and_exec_but_skips_profile_and_workspace() {
-        let shell = single_instance_launch(&None).expect("bare launch hands off");
+        let shell = single_instance_launch(&None, None).expect("bare launch hands off");
         assert!(shell.command.is_none());
         assert!(shell.args.is_empty());
         assert!(shell.working_dir.is_some());
 
-        let exec = single_instance_launch(&Some(StartupCommand::Exec {
-            program: "htop".to_owned(),
-            args: args(&["-d", "5"]),
-        }))
+        let with_dir = single_instance_launch(&None, Some(Path::new("/tmp/proj")))
+            .expect("bare launch with dir hands off");
+        assert_eq!(with_dir.working_dir.as_deref(), Some("/tmp/proj"));
+
+        let exec = single_instance_launch(
+            &Some(StartupCommand::Exec {
+                program: "htop".to_owned(),
+                args: args(&["-d", "5"]),
+            }),
+            Some(Path::new("/tmp/work")),
+        )
         .expect("-e launch hands off");
         assert_eq!(exec.command.as_deref(), Some("htop"));
         assert_eq!(exec.args, args(&["-d", "5"]));
+        assert_eq!(exec.working_dir.as_deref(), Some("/tmp/work"));
 
         assert!(
-            single_instance_launch(&Some(StartupCommand::Profile("work".to_owned()))).is_none()
+            single_instance_launch(&Some(StartupCommand::Profile("work".to_owned())), None)
+                .is_none()
         );
         assert!(
-            single_instance_launch(&Some(StartupCommand::Workspace("dev".to_owned()))).is_none()
+            single_instance_launch(&Some(StartupCommand::Workspace("dev".to_owned())), None)
+                .is_none()
         );
     }
 
@@ -390,6 +680,9 @@ mod tests {
                 command: Some(StartupCommand::Profile("remote".to_owned())),
                 new_process: false,
                 quick: false,
+                config_path: None,
+                config_overrides: Vec::new(),
+                working_dir: None,
             })
         );
         assert!(invocation(args(&["--profile"])).is_err());
@@ -415,11 +708,24 @@ mod tests {
     fn list_themes_is_an_information_flag_like_version() {
         assert_eq!(
             invocation(args(&["--list-themes"])),
-            Ok(Invocation::ListThemes)
+            Ok(Invocation::ListThemes {
+                config_path: None,
+                config_overrides: Vec::new(),
+            })
+        );
+        assert_eq!(
+            invocation(args(&["--config", "/tmp/c.toml", "--list-themes"])),
+            Ok(Invocation::ListThemes {
+                config_path: Some(PathBuf::from("/tmp/c.toml")),
+                config_overrides: Vec::new(),
+            })
         );
         assert_eq!(
             invocation(args(&["--list-themes", "--bogus"])),
-            Ok(Invocation::ListThemes)
+            Ok(Invocation::ListThemes {
+                config_path: None,
+                config_overrides: Vec::new(),
+            })
         );
         assert_eq!(
             invocation(args(&["--list-themes", "-h"])),
@@ -508,6 +814,9 @@ mod tests {
         let usage = usage();
         for flag in [
             "-e COMMAND [ARGS]...",
+            "--config PATH",
+            "-o, --option KEY=VALUE",
+            "--working-directory DIR",
             "-h, --help",
             "-V, --version",
             "--list-themes",

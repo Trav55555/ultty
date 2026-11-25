@@ -76,6 +76,19 @@ pub enum StartupCommand {
     Workspace(String),
 }
 
+/// Per-invocation options resolved from the CLI before the event loop starts.
+#[derive(Debug, Default, Clone)]
+pub struct LaunchOptions {
+    /// Custom config file path from `--config`, if given.
+    pub config_path: Option<std::path::PathBuf>,
+    /// Repeatable `-o` / `--option` overrides in `KEY=VALUE` form.
+    pub config_overrides: Vec<String>,
+    /// Explicit initial working directory from `--working-directory`, if given.
+    pub working_dir: Option<std::path::PathBuf>,
+    /// Start with only the quick terminal window open (`ultty --quick`).
+    pub start_quick: bool,
+}
+
 /// Time window for detecting double/triple clicks.
 pub(super) const CLICK_THRESHOLD: Duration = Duration::from_millis(500);
 
@@ -202,6 +215,8 @@ struct ProcessState {
     runtime: ultty::runtime::SessionRuntime,
     session_file: Option<std::path::PathBuf>,
     config: Config,
+    config_path: Option<std::path::PathBuf>,
+    config_overrides: Vec<String>,
     config_watcher: Option<ConfigWatcher>,
     clipboard: Option<Clipboard>,
     shortcuts_list: Vec<(String, String)>,
@@ -680,9 +695,10 @@ impl App {
         event_proxy: EventLoopProxy<AppEvent>,
         startup_command: Option<&StartupCommand>,
         config: Config,
-        start_quick: bool,
+        options: LaunchOptions,
     ) -> Result<Self> {
         tracing::info!("Loaded configuration");
+        let start_quick = options.start_quick;
 
         #[cfg(all(unix, not(target_os = "macos")))]
         let is_wayland =
@@ -690,7 +706,7 @@ impl App {
         #[cfg(not(all(unix, not(target_os = "macos"))))]
         let is_wayland = false;
 
-        let restored_session = if start_quick {
+        let restored_session = if start_quick || options.working_dir.is_some() {
             None
         } else {
             Self::load_startup_session(&config, startup_command)?
@@ -749,6 +765,10 @@ impl App {
             rows,
             &mut protocol_server,
             startup_command,
+            options
+                .working_dir
+                .as_deref()
+                .and_then(std::path::Path::to_str),
             restored_session.as_ref(),
         )?;
         tracing::debug!(target: "ultty::startup", "shell started");
@@ -788,7 +808,7 @@ impl App {
         }
 
         let watcher_proxy = event_proxy.clone();
-        let config_watcher = ConfigWatcher::new(move || {
+        let config_watcher = ConfigWatcher::for_path(options.config_path.as_deref(), move || {
             let _ = watcher_proxy.send_event(AppEvent::RuntimeReadable);
         });
         if config_watcher.is_some() {
@@ -812,6 +832,8 @@ impl App {
                 )
             },
             config,
+            config_path: options.config_path,
+            config_overrides: options.config_overrides,
             config_watcher,
             clipboard,
             shortcuts_list,
@@ -1675,6 +1697,7 @@ impl App {
             rows,
             protocol_server,
             startup_command,
+            None,
             session.as_ref(),
         )
     }
@@ -1685,16 +1708,20 @@ impl App {
         rows: u16,
         protocol_server: &mut Option<ProtocolServer>,
         startup_command: Option<&StartupCommand>,
+        working_dir: Option<&str>,
         restored_session: Option<&ultty::session::SessionData>,
     ) -> Result<TerminalManager> {
         if let Some(command) = startup_command {
             return match command {
-                StartupCommand::Exec { program, args } => {
-                    TerminalManager::with_command_tab(cols, rows, program, args, &mut |tab_id| {
-                        tab_shell_env(protocol_server, &config.terminal, tab_id)
-                    })
-                    .map_err(|e| anyhow::anyhow!("Failed to start '{}': {}", program, e))
-                }
+                StartupCommand::Exec { program, args } => TerminalManager::with_command_tab_in_dir(
+                    cols,
+                    rows,
+                    program,
+                    args,
+                    working_dir,
+                    &mut |tab_id| tab_shell_env(protocol_server, &config.terminal, tab_id),
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to start '{}': {}", program, e)),
                 StartupCommand::Profile(name) => {
                     let profile = config
                         .profiles
@@ -1706,6 +1733,7 @@ impl App {
                         &config.terminal,
                         cols,
                         rows,
+                        working_dir,
                         protocol_server,
                     )
                 }
@@ -1758,6 +1786,7 @@ impl App {
                     &config.terminal,
                     cols,
                     rows,
+                    working_dir,
                     protocol_server,
                 );
             } else {
@@ -1769,7 +1798,7 @@ impl App {
         }
 
         // No profile configured, use default shell
-        TerminalManager::with_tab_env(cols, rows, &mut |tab_id| {
+        TerminalManager::with_tab_env_in_dir(cols, rows, working_dir, &mut |tab_id| {
             tab_shell_env(protocol_server, &config.terminal, tab_id)
         })
         .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e))
@@ -1781,6 +1810,7 @@ impl App {
         terminal: &TerminalConfig,
         cols: u16,
         rows: u16,
+        default_working_dir: Option<&str>,
         protocol_server: &mut Option<ProtocolServer>,
     ) -> Result<TerminalManager> {
         // Validate the complete profile before spawning any process.
@@ -1790,9 +1820,12 @@ impl App {
             }
         }
         if profile.tabs.is_empty() {
-            return TerminalManager::with_tab_env(cols, rows, &mut |tab_id| {
-                tab_shell_env(protocol_server, terminal, tab_id)
-            })
+            return TerminalManager::with_tab_env_in_dir(
+                cols,
+                rows,
+                default_working_dir,
+                &mut |tab_id| tab_shell_env(protocol_server, terminal, tab_id),
+            )
             .map_err(|e| anyhow::anyhow!("Failed to create terminal manager: {}", e));
         }
         let mut manager = TerminalManager::empty(cols, rows);
@@ -1807,7 +1840,8 @@ impl App {
                 let working_dir = tab_config
                     .working_dir
                     .as_deref()
-                    .or(profile.working_dir.as_deref());
+                    .or(profile.working_dir.as_deref())
+                    .or(default_working_dir);
 
                 let title = tab_config.title.as_deref();
 
@@ -1903,11 +1937,10 @@ impl App {
 
     /// Run the application. The first tab runs `startup_command`, or the
     /// configured shell, profile or restored session when there is none.
-    /// When `start_quick` is `true`, only the quick terminal window is opened.
     pub fn run(
         startup_command: Option<StartupCommand>,
         config: Config,
-        start_quick: bool,
+        options: LaunchOptions,
     ) -> Result<()> {
         let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
         let signal_proxy = event_loop.create_proxy();
@@ -1923,7 +1956,7 @@ impl App {
             proxy: event_loop.create_proxy(),
             startup_command,
             config: Some(config),
-            start_quick,
+            options: Some(options),
             app: None,
             init_error: None,
         };
@@ -2857,8 +2890,8 @@ struct AppHandler {
     /// Configuration loaded in `main` before the event loop and any threads
     /// start; taken once on the first `resumed`.
     config: Option<Config>,
-    /// Start with only the quick terminal window open (`ultty --quick`).
-    start_quick: bool,
+    /// Per-invocation CLI options; taken once on the first `resumed`.
+    options: Option<LaunchOptions>,
     app: Option<App>,
     /// A startup failure, returned from [`App::run`] after the loop exits.
     init_error: Option<anyhow::Error>,
@@ -2875,12 +2908,13 @@ impl ApplicationHandler<AppEvent> for AppHandler {
             return;
         }
         let config = self.config.take().unwrap_or_else(Config::load);
+        let options = self.options.take().unwrap_or_default();
         match App::new(
             event_loop,
             self.proxy.clone(),
             self.startup_command.as_ref(),
             config,
-            self.start_quick,
+            options,
         ) {
             Ok(mut app) => {
                 let primary = WindowKey::PRIMARY;
@@ -3208,6 +3242,7 @@ mod tests {
             &TerminalConfig::default(),
             80,
             24,
+            None,
             &mut None,
         );
         assert!(result
