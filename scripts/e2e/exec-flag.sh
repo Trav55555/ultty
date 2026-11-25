@@ -74,6 +74,43 @@ grep -q "^Usage: ultty" "$out/bogus.err" || fail "no usage after the error"
 [ ! -s "$out/bogus.out" ] || fail "ultty --bogus wrote to stdout"
 echo "bad argument: refused with status 2"
 
+# Bad --config, --working-directory, and -o values are also refused with
+# status 2 before opening any window.
+status=0
+env -u WAYLAND_DISPLAY -u DISPLAY "$ULTTY" --config "$out/missing.toml" >"$out/missing-cfg.out" 2>"$out/missing-cfg.err" || status=$?
+[ "$status" -eq 2 ] || fail "missing --config exited $status, want 2"
+grep -q "^ultty: " "$out/missing-cfg.err" || fail "no error for missing --config"
+
+status=0
+env -u WAYLAND_DISPLAY -u DISPLAY "$ULTTY" --working-directory "$out/no-such-dir" >"$out/missing-dir.out" 2>"$out/missing-dir.err" || status=$?
+[ "$status" -eq 2 ] || fail "missing --working-directory exited $status, want 2"
+grep -q "working directory" "$out/missing-dir.err" || fail "no error for missing --working-directory"
+
+status=0
+env -u WAYLAND_DISPLAY -u DISPLAY "$ULTTY" -o bogus.key=1 >"$out/bad-opt.out" 2>"$out/bad-opt.err" || status=$?
+[ "$status" -eq 2 ] || fail "bad -o exited $status, want 2"
+grep -q "unknown config section" "$out/bad-opt.err" || fail "no error for bad -o section"
+echo "bad --config/--working-directory/-o: refused with status 2"
+
+# --config with --list-themes loads themes defined in the alternate config.
+mkdir -p "$out/alt-cfg"
+cat >"$out/alt-cfg/alt.toml" <<'EOF'
+[terminal]
+term = "xterm-256color"
+
+[behavior]
+cursor_blink = false
+
+[colors.themes.e2e-custom-theme]
+name = "E2E Custom Theme"
+foreground = "#f8f8f2"
+background = "#282a36"
+cursor = "#f8f8f2"
+EOF
+env -u WAYLAND_DISPLAY -u DISPLAY "$ULTTY" --config "$out/alt-cfg/alt.toml" --list-themes >"$out/alt-themes.out"
+grep -qx "e2e-custom-theme" "$out/alt-themes.out" || fail "--config --list-themes missed custom theme"
+echo "--config --list-themes: includes custom theme"
+
 Xvfb -displayfd 3 -screen 0 1280x800x24 -nolisten tcp 3>"$out/display" 2>"$out/xvfb.log" &
 xvfb_pid=$!
 for _ in $(seq 50); do [ -s "$out/display" ] && break; sleep 0.1; done
@@ -170,5 +207,35 @@ kill -TERM "$ultty_pid"
 wait_exit "SIGTERM"
 ! cmp -s "$session" "$out/session.before" || fail "the control window did not save its session"
 echo "control: a window without -e restores and saves the session"
+
+# --working-directory with -e starts the command in the requested directory.
+workdir="$out/work-dir-check"
+mkdir -p "$workdir"
+workdir_real=$(cd "$workdir" && pwd -P)
+start_ultty /bin/false workdir-exec --working-directory "$workdir" -e /bin/sh -c 'printf "CWD=%s\n" "$(pwd -P)"; sleep 5'
+ctl wait-for "CWD=$workdir_real" --timeout 4000 >/dev/null || fail "--working-directory -e did not start in $workdir_real"
+kill -TERM "$ultty_pid"
+wait_exit "SIGTERM (--working-directory -e)"
+echo "--working-directory -e: command started in requested directory"
+
+# Bare --working-directory starts the shell in that directory and skips session restore.
+start_ultty /bin/sh workdir-shell --working-directory "$workdir"
+[ "$(tab_count)" -eq 1 ] || fail "bare --working-directory should open 1 tab, not restore saved tabs"
+ctl send-text $'printf "SHELLCWD=%s\\n" "$(pwd -P)"\n' >/dev/null
+ctl wait-for "SHELLCWD=$workdir_real" --timeout 4000 >/dev/null || fail "bare --working-directory shell did not start in $workdir_real"
+kill -TERM "$ultty_pid"
+wait_exit "SIGTERM (bare --working-directory)"
+echo "--working-directory: initial shell started in requested directory"
+
+# --config and repeatable -o overrides apply at startup (-o wins over --config).
+start_ultty /bin/false config-override \
+    --config "$out/alt-cfg/alt.toml" \
+    -o terminal.term=xterm-ultty \
+    --option=behavior.opacity=0.85 \
+    -e /bin/sh -c 'printf "TERM=%s\n" "$TERM"; sleep 5'
+ctl wait-for "TERM=xterm-ultty" --timeout 4000 >/dev/null || fail "-o terminal.term=xterm-ultty did not override --config"
+kill -TERM "$ultty_pid"
+wait_exit "SIGTERM (--config and -o)"
+echo "--config and -o: overrides applied and took precedence"
 
 echo "exec-flag: ok"

@@ -9,6 +9,34 @@ keys keep their defaults. The full set of keys is defined in
 This page covers what programs running in a pane are told and allowed to do,
 and the settings that change how panes behave.
 
+## Command-line options
+
+You can override the config file, individual keys, or the initial working
+directory for a single launch without editing `config.toml`:
+
+```sh
+ultty --config /path/to/custom.toml
+ultty -o font.size=16 -o colors.theme=dracula -o behavior.cursor_blink=false
+ultty --working-directory ~/projects/app
+ultty --working-directory ~/projects/app -e htop
+```
+
+- `--config PATH` (or `--config=PATH`) loads configuration from `PATH` instead
+  of the default file, watches `PATH` for hot-reload, and loads user themes from
+  `themes/` next to `PATH`. Missing or invalid files exit with status `2` before
+  opening a window. `--list-themes` also honours `--config`.
+- `-o KEY=VALUE` / `--option KEY=VALUE` (or `--option=KEY=VALUE`) overrides any
+  dotted TOML key (such as `font.size=16`, `behavior.opacity=0.85`,
+  `colors.theme=dracula`, or `terminal.term=xterm-ultty`). The flag is
+  repeatable (later values win), overrides survive config hot-reload, and
+  unknown top-level sections or type mismatches exit with status `2`.
+- `--working-directory DIR` (or `--working-directory=DIR`) starts the initial
+  shell or `-e` command in `DIR` (and skips session restore when launching a
+  shell). Nonexistent paths or non-directories exit with status `2`.
+- Passing `--config` or `-o` bypasses `behavior.single_instance` handoff so the
+  custom configuration is never silently ignored by an existing process; passing
+  only `--working-directory` forwards `DIR` to the running instance.
+
 ## Themes
 
 Ultty bundles 94 colour themes: its original six (`everforest-dark`,
