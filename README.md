@@ -265,8 +265,12 @@ A keystroke's echo is drawn without waiting for the 16 ms frame interval. Key
 press to pixels on screen was measured on a Tesla T4 under X11 (XTest
 injection, then polling the window's pixels): 3.6 ms median idle, level with
 Alacritty, 5.5 ms under 10 MiB/s of output and 22 ms under maximum output
-([T4 comparison](docs/perf/2026-11-08-t4-comparison.md)). Wayland and the
-development workstation are not measured yet. The `input_latency` bench
+([T4 comparison](docs/perf/2026-11-08-t4-comparison.md)). On the development
+workstation (RX 7900, Wayland) it is 1.0 ms median idle, level with GNOME
+Terminal, and the lowest of four terminals under maximum output, at 27 ms
+against Alacritty's 31 ms
+([workstation Wayland latency](docs/perf/2026-11-25-workstation-wayland-latency.md)).
+The `input_latency` bench
 measures only parsing and grid updates, in nanoseconds to microseconds.
 
 Run the published benchmark set:
