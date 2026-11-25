@@ -291,7 +291,7 @@ process).
 position = "top"     # top, bottom, left, right, center
 size = "40%"         # percentage (10%-100%) or pixels (e.g. "420px")
 autohide = true      # hide when the quick terminal loses focus
-# hotkey = "ctrl+grave"  # built-in global hotkey on X11 ([keybindings] syntax)
+# hotkey = "ctrl+grave"  # built-in global hotkey on X11 and Wayland GlobalShortcuts portal
 ```
 
 Toggle the quick terminal from a desktop or compositor shortcut bound to

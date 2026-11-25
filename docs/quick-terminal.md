@@ -35,7 +35,7 @@ while a quick terminal exists (even when hidden).
 position = "top"     # top, bottom, left, right, center
 size = "40%"         # percentage of the monitor axis (10%-100%) or pixels (e.g. "420px")
 autohide = true      # hide when the quick terminal loses focus
-hotkey = "ctrl+grave" # built-in global hotkey on X11 (uses [keybindings] syntax)
+hotkey = "ctrl+grave" # built-in global hotkey on X11 and Wayland GlobalShortcuts portal
 ```
 
 ## Platform behavior & compositor snippets
@@ -46,13 +46,20 @@ hotkey = "ctrl+grave" # built-in global hotkey on X11 (uses [keybindings] syntax
   directly via `XGrabKey` (updating live on config reload and logging a clear
   warning if another client already holds the grab). You can still bind
   `ultty --quick` in your WM if you prefer.
-- **Wayland (Slice 1):** Ultty creates an `xdg_toplevel` with app ID
+- **Wayland (Slices 1 & 4):** Ultty creates an `xdg_toplevel` with app ID
   `ultty-quick` (dropped on hide, recreated on show while keeping tabs/PTYs
-  alive). Because Wayland clients cannot self-position ordinary toplevels
-  without `wlr-layer-shell` (planned for ADR 0028 Slice 2), placement and
-  floating/sticky behavior come from your compositor's window rules below. On
-  GNOME (which has no layer shell or built-in window rules), the quick terminal
-  behaves as an ordinary window that toggles open and closed.
+  alive). If `quick_terminal.hotkey` is set, Ultty registers it through the
+  XDG `org.freedesktop.portal.GlobalShortcuts` portal (supported on KDE
+  Plasma 5.27+, GNOME 48+, and Hyprland with `xdg-desktop-portal-hyprland`)
+  and forwards the portal's `activation_token` so the quick window receives
+  focus. On compositors without the `GlobalShortcuts` portal (such as sway or
+  niri), Ultty logs a graceful fallback message and you bind `ultty --quick`
+  in your compositor config. Because Wayland clients cannot self-position
+  ordinary toplevels without `wlr-layer-shell` (planned for ADR 0028 Slice 2),
+  placement and floating/sticky behavior come from your compositor's window
+  rules below. On GNOME (which has no layer shell or built-in window rules),
+  the quick terminal behaves as an ordinary window that toggles open and
+  closed.
 
 ### sway
 
