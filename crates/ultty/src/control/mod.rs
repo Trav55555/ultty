@@ -1,5 +1,6 @@
 //! Local authenticated automation and reusable runtime control semantics.
 
+pub mod audit;
 pub mod auth;
 pub mod common;
 pub mod events;

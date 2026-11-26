@@ -102,7 +102,7 @@ accesskit_winit = { version = "0.34.2", default-features = false, features = ["a
 notify-rust = { version = "4.10", optional = true }
 
 # PTY
-nix = { version = "0.29", features = ["term", "process", "signal", "fs", "hostname"] }
+nix = { version = "0.29", features = ["term", "process", "signal", "fs", "hostname", "socket"] }
 libc = "0.2"
 signal-hook = "0.3"
 polling = "3.4"

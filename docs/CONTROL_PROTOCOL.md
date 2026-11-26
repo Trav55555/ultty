@@ -186,3 +186,46 @@ the current recipe. `ultty --workspace NAME` opens it with fresh shells. These a
 layout/directory recipes, not retained processes or reconnectable runtime sessions.
 `focus_pane`, `zoom_pane` and `swap_panes` use stable explicit pane IDs; swaps are
 limited to one tab. These operations remain authenticated and owner-scoped.
+
+## Audit log
+
+Every control socket, a window's and `ultty-session`'s, records who used it
+under the tracing target `ultty::audit`, in the [log file](configuration.md#log-file)
+(`~/.local/state/ultty/ultty.log`) and on stderr. One connection gives up to
+three kinds of line, each with the connection id (`conn`), the socket
+(`transport=local` or `transport=session-host`) and the peer's pid:
+
+```text
+pid=4242 2026-11-25T10:00:00.000000Z  INFO ultty::audit: control connection conn=101 transport=local peer_pid=5151 peer_uid=1000 peer_gid=1000 peer_exe=/usr/bin/ulttyctl
+pid=4242 2026-11-25T10:00:00.000010Z  INFO ultty::audit: control request kind=send_text pane=3 bytes=10 with_token=true conn=101 transport=local peer_pid=5151
+pid=4242 2026-11-25T10:00:00.000020Z  INFO ultty::audit: control authentication succeeded conn=101 transport=local peer_pid=5151
+```
+
+- **Connection**: the peer's pid, uid and gid from `SO_PEERCRED` and its
+  executable from `/proc/<pid>/exe` (Linux; `-` where unknown), written when
+  the connection sends its first request. A connection that closes without
+  one, such as `ulttyctl` probing for a live instance, is DEBUG.
+- **Request**: the operation (`kind`, as in `describe`), the pane, window or
+  tab it names, and for requests that carry text (`send_text`, `send_raw`,
+  `run_command`, `run_command_and_wait`, `new_tab`, `new_window`,
+  `split_pane`, `push_override`, `search`, `wait_for`, `workspace_save`) the
+  text's length in `bytes`. Each command of a `batch` gets its own line.
+  Unreadable (malformed or oversized) requests are WARN with their size.
+- **Authentication**: success, or failure at WARN with
+  `reason=wrong_token` or `reason=token_unavailable`.
+- **Refusal**: every error reply, with its `code`; 403 at WARN.
+
+Status queries (`ping`, `version`, `describe`, `get_info`, `list_windows`,
+`list_tabs`, `list_panes`, `workspace_list`, `program_status`, `images`,
+`job_status`, `wait_job`) are DEBUG, and so are the connection and
+authentication lines of a connection that asks only those, so a poller does
+not fill the log. Everything that changes state or reads what is on screen
+(`get_text`, `get_selection`, `search`, `last_command`, `regions`,
+`wait_for`, `subscribe`, `screenshot`) is INFO. `RUST_LOG=ultty::audit=debug`
+(or `[log] level`) records the rest.
+
+Never recorded: tokens (presented or expected), the text a request types or
+sends, commands and their arguments, search and wait patterns, override
+sources, titles, working directories, screenshot paths, and the messages of
+error replies (some echo what the request named). MCP tool calls arrive
+through `ulttyctl mcp` and appear as that process's connections.

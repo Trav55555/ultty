@@ -9,10 +9,10 @@ use super::control_wait::{Condition, PendingControlWait, WaitMatcher};
 use super::{App, ProcessState, WindowCtx};
 use std::io;
 use std::time::{Duration, Instant};
+use ultty::control::auth::control_request_requires_auth;
 pub(super) use ultty::control::auth::write_auth_token;
 #[cfg(test)]
 use ultty::control::auth::AUTH_TOKEN_BYTES;
-use ultty::control::auth::{control_request_requires_auth, read_auth_token, token_matches};
 #[cfg(test)]
 use ultty::control::common::plain_search_match;
 pub(super) use ultty::control::common::terminal_working_directory;
@@ -1956,33 +1956,25 @@ impl ProcessState {
     ) -> Result<(), ultty_protocol::control::ControlResponse> {
         use ultty_protocol::control::ControlResponse;
 
-        let expected = self
+        let authenticated = self
             .control_server
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| io::Error::other("control server not running"))
-            .and_then(|server| read_auth_token(server.token_path()));
-        let expected = match expected {
-            Ok(expected) => expected,
-            Err(e) => {
-                tracing::warn!("Control auth token unavailable: {}", e);
-                return Err(ControlResponse::Error {
-                    code: 500,
-                    message: "Control auth token unavailable".to_string(),
-                });
-            }
-        };
-
-        if !token_matches(token, &expected) {
-            return Err(ControlResponse::Error {
+            .and_then(|server| server.authenticate(client_key, token));
+        match authenticated {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(ControlResponse::Error {
                 code: 403,
                 message: "Invalid token".to_string(),
-            });
+            }),
+            Err(e) => {
+                tracing::warn!("Control auth token unavailable: {}", e);
+                Err(ControlResponse::Error {
+                    code: 500,
+                    message: "Control auth token unavailable".to_string(),
+                })
+            }
         }
-
-        if let Some(ref mut server) = self.control_server {
-            server.set_client_authenticated(client_key, true);
-        }
-        Ok(())
     }
 
     fn pane_foreground_pgrp(&self, pane: TerminalId) -> Option<i32> {
@@ -2250,6 +2242,7 @@ fn invalid_spawn_options() -> ultty_protocol::control::ControlResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ultty::control::auth::{read_auth_token, token_matches};
 
     #[test]
     fn test_semantic_acknowledgement_requires_exact_session_and_request() {

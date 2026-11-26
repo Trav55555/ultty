@@ -15,6 +15,8 @@ use ultty_protocol::control::{
     ControlRequest, ControlResponse, EventCursor, OutputFormat, OwnerRef, ResyncReason,
 };
 
+use super::audit::{self, AuthOutcome, PeerIdentity, Transport};
+use super::auth::{read_auth_token, token_matches};
 use super::paths::{control_dir, ControlEndpoint};
 
 const LISTENER_KEY: usize = 0;
@@ -53,10 +55,18 @@ pub struct ControlServer {
     event_sequence: u64,
     history: VecDeque<(ControlEventRecord, Vec<u8>)>,
     history_bytes: usize,
+    transport: Transport,
 }
 
 struct ClientState {
     stream: UnixStream,
+    /// Who connected, for the audit trail.
+    peer: PeerIdentity,
+    /// The audit trail has recorded who this client is.
+    announced: bool,
+    /// Everything this client asked for is a status query, so its
+    /// connection and authentication are recorded at DEBUG.
+    routine: bool,
     output_format: OutputFormat,
     authenticated: bool,
     /// Request bytes received so far.
@@ -82,6 +92,15 @@ struct ClientState {
 }
 
 impl ClientState {
+    /// Record who this client is, once, at the level its requests deserve.
+    fn announce(&mut self, transport: Transport, key: usize, routine: bool) {
+        if !self.announced {
+            self.announced = true;
+            self.routine = routine;
+            audit::connection(transport, key, &self.peer, routine);
+        }
+    }
+
     /// Write as much of the reply as the socket takes now.
     ///
     /// Returns `Ok(true)` once the whole reply is out.
@@ -210,7 +229,14 @@ impl ControlServer {
             event_sequence: 0,
             history: VecDeque::new(),
             history_bytes: 0,
+            transport: Transport::Local,
         })
+    }
+
+    /// Name the socket this server is in the audit trail; the default is
+    /// [`Transport::Local`].
+    pub fn set_audit_transport(&mut self, transport: Transport) {
+        self.transport = transport;
     }
 
     /// Stable identity for this server lifetime.
@@ -441,10 +467,14 @@ impl ControlServer {
                         self.poller.add(&stream, Event::readable(key))?;
                     }
 
+                    let peer = PeerIdentity::of(&stream);
                     self.clients.insert(
                         key,
                         ClientState {
                             stream,
+                            peer,
+                            announced: false,
+                            routine: false,
                             output_format: OutputFormat::Text,
                             authenticated: false,
                             request: Vec::new(),
@@ -469,6 +499,7 @@ impl ControlServer {
     }
 
     fn handle_client_event(&mut self, key: usize) -> io::Result<()> {
+        let transport = self.transport;
         let Some(client) = self.clients.get_mut(&key) else {
             return Ok(());
         };
@@ -483,6 +514,9 @@ impl ControlServer {
             }
             Ok(ReadOutcome::Gone) => {
                 debug!("Control client disconnected: {}", key);
+                if !client.announced {
+                    audit::connection_without_request(transport, key, &client.peer);
+                }
                 self.remove_client(key);
                 return Ok(());
             }
@@ -502,6 +536,8 @@ impl ControlServer {
 
         let Some(data) = data else {
             warn!("Control client {} sent an oversized request", key);
+            client.announce(transport, key, false);
+            audit::unreadable_request(transport, key, &client.peer, MAX_REQUEST_BYTES + 1);
             let response = ControlResponse::Error {
                 code: 413,
                 message: format!("request exceeds {MAX_REQUEST_BYTES} bytes"),
@@ -513,9 +549,16 @@ impl ControlServer {
         match parse_request(&data) {
             Some(parsed) => {
                 client.output_format = parsed.output_format;
+                let summaries = audit::summaries(&parsed.request);
+                client.announce(transport, key, summaries.iter().all(|s| s.routine));
+                for summary in summaries {
+                    audit::request(transport, key, &client.peer, &summary);
+                }
                 self.pending_requests.push((key, parsed.request));
             }
             None => {
+                client.announce(transport, key, false);
+                audit::unreadable_request(transport, key, &client.peer, data.len());
                 // A client that spoke JSON reads a JSON reply.
                 if data.trim_ascii_start().starts_with(b"{") {
                     client.output_format = OutputFormat::Json;
@@ -809,6 +852,9 @@ impl ControlServer {
             warn!("Control client {} already has a reply", client_key);
             return;
         }
+        if let ControlResponse::Error { code, .. } = response {
+            audit::refusal(self.transport, client_key, &client.peer, *code);
+        }
         client
             .reply
             .extend_from_slice(format_response(response, client.output_format).as_bytes());
@@ -834,6 +880,33 @@ impl ControlServer {
         if let Some(client) = self.clients.get_mut(&client_key) {
             client.output_format = format;
         }
+    }
+
+    /// Check `token` against this server's token file and, when it matches,
+    /// mark the client authenticated. Records the attempt in the audit
+    /// trail, never the token.
+    ///
+    /// Fails when the token file cannot be read; then no token matches.
+    pub fn authenticate(&mut self, client_key: usize, token: &str) -> io::Result<bool> {
+        let expected = read_auth_token(&self.token_path);
+        let outcome = match &expected {
+            Ok(expected) if token_matches(token, expected) => AuthOutcome::Accepted,
+            Ok(_) => AuthOutcome::WrongToken,
+            Err(_) => AuthOutcome::TokenUnavailable,
+        };
+        if let Some(client) = self.clients.get_mut(&client_key) {
+            audit::authentication(
+                self.transport,
+                client_key,
+                &client.peer,
+                outcome,
+                client.routine,
+            );
+            if outcome == AuthOutcome::Accepted {
+                client.authenticated = true;
+            }
+        }
+        expected.map(|_| outcome == AuthOutcome::Accepted)
     }
 
     pub fn set_client_authenticated(&mut self, client_key: usize, authenticated: bool) {
@@ -2729,5 +2802,174 @@ mod tests {
         sender.join().unwrap();
         assert!(reply.starts_with("ERROR 413:"), "{reply}");
         assert!(server.take_pending_requests().is_empty());
+    }
+
+    /// Collects everything a test subscriber writes.
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Send `request` as one client and answer it the way the app does for
+    /// a token-carrying request: authenticate, then accept or refuse.
+    fn exchange_with_auth(server: &mut ControlServer, request: &[u8]) -> String {
+        let mut client = UnixStream::connect(server.socket_path()).unwrap();
+        client.write_all(request).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        for (key, request) in poll_until_pending(server) {
+            let response = match request {
+                ControlRequest::WithToken { token, .. }
+                    if server.authenticate(key, &token).unwrap() =>
+                {
+                    ControlResponse::Data(ControlData::Pong)
+                }
+                _ => ControlResponse::Error {
+                    code: 403,
+                    message: "Invalid token".into(),
+                },
+            };
+            server.send_response(key, &response);
+        }
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).unwrap();
+        reply
+    }
+
+    /// Run `body` with `subscriber` as this thread's default.
+    ///
+    /// While only one dispatcher exists, tracing caches a callsite's
+    /// interest from whichever thread reaches it first; another test's
+    /// thread, with no subscriber, would cache the audit callsites as
+    /// disabled. A second live dispatcher makes tracing consult every
+    /// dispatcher instead.
+    fn with_test_subscriber<T>(
+        subscriber: impl tracing::Subscriber + Send + Sync + 'static,
+        body: impl FnOnce() -> T,
+    ) -> T {
+        let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+        tracing::subscriber::with_default(subscriber, body)
+    }
+
+    #[test]
+    fn test_audit_trail_records_peer_auth_and_lengths_but_never_secrets() {
+        use std::os::unix::fs::MetadataExt;
+
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let captured = captured.clone();
+                move || captured.clone()
+            })
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        let token = with_test_subscriber(subscriber, || {
+            let mut server = test_server("audit");
+            let token = super::super::auth::write_auth_token(server.token_path()).unwrap();
+            drop(UnixStream::connect(server.socket_path()).unwrap());
+            server.poll(Some(Duration::from_millis(50))).unwrap();
+
+            let refused =
+                exchange_with_auth(&mut server, b"token deadbeef send-text secret-xyz-typed");
+            assert!(refused.starts_with("ERROR 403"), "{refused}");
+            let typed = json_request(ControlRequest::WithToken {
+                token: token.clone(),
+                request: Box::new(ControlRequest::SendText {
+                    text: "secret-xyz-typed".into(),
+                    target: Some(4),
+                }),
+            });
+            let accepted = exchange_with_auth(&mut server, &typed);
+            assert!(accepted.contains("pong"), "{accepted}");
+            let run = json_request(ControlRequest::WithToken {
+                token: token.clone(),
+                request: Box::new(ControlRequest::RunCommand {
+                    command: "export API_KEY=secret-xyz-command".into(),
+                    args: Vec::new(),
+                    target: None,
+                }),
+            });
+            exchange_with_auth(&mut server, &run);
+            let ping = json_request(ControlRequest::WithToken {
+                token: token.clone(),
+                request: Box::new(ControlRequest::Ping),
+            });
+            exchange_with_auth(&mut server, &ping);
+            token
+        });
+        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+
+        let me = fs::metadata("/proc/self").unwrap();
+        let peer = format!(
+            "peer_pid={} peer_uid={} peer_gid={} peer_exe={}",
+            std::process::id(),
+            me.uid(),
+            me.gid(),
+            std::env::current_exe().unwrap().display()
+        );
+        let lines: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("ultty::audit"))
+            .collect();
+        let line_with = |needle: &str| {
+            lines
+                .iter()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no audit line with {needle:?} in:\n{log}"))
+                .to_string()
+        };
+        let connections: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("control connection conn="))
+            .collect();
+        assert_eq!(connections.len(), 4, "{log}");
+        assert_eq!(
+            connections
+                .iter()
+                .filter(|line| line.contains(" DEBUG "))
+                .count(),
+            1,
+            "only the status query's connection is DEBUG:\n{log}"
+        );
+        assert!(
+            line_with("kind=ping with_token=true").contains(" DEBUG "),
+            "{log}"
+        );
+        assert!(
+            line_with("control connection conn=").contains(&peer),
+            "{log}"
+        );
+        assert!(
+            line_with("closed without a request").contains(" DEBUG "),
+            "{log}"
+        );
+        assert!(line_with("authentication failed reason=wrong_token").contains(" WARN "));
+        assert!(line_with("refused code=403").contains(" WARN "));
+        assert!(line_with("authentication succeeded").contains(" INFO "));
+        let typed = line_with("kind=send_text pane=4 bytes=16 with_token=true");
+        assert!(
+            typed.contains(" INFO ") && typed.contains("transport=local"),
+            "{typed}"
+        );
+        assert!(line_with("kind=send_text bytes=16 with_token=true").contains(" INFO "));
+        assert!(line_with("kind=run_command bytes=33 with_token=true").contains(" INFO "));
+        assert!(
+            !log.contains("secret-xyz"),
+            "a secret reached the log:\n{log}"
+        );
+        assert!(!log.contains(&token), "the token reached the log:\n{log}");
+        assert!(
+            !log.contains("deadbeef"),
+            "a presented token reached the log:\n{log}"
+        );
     }
 }
