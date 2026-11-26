@@ -34,6 +34,8 @@ pub struct Config {
     pub images: ImagesConfig,
     /// Quick terminal (drop-down/toggled window, ADR 0028)
     pub quick_terminal: QuickTerminalConfig,
+    /// The log file and filter
+    pub log: LogConfig,
 }
 
 impl Config {
@@ -1359,6 +1361,48 @@ impl ImagesConfig {
     /// clamped.
     pub fn storage_limit_bytes(&self) -> usize {
         self.storage_limit.saturating_mul(1 << 20)
+    }
+}
+
+/// The `[log]` section: Ultty's log file and filter. See
+/// [`crate::logging::LogSettings`] for how the environment overrides it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct LogConfig {
+    /// Write the log file as well as stderr.
+    pub file: bool,
+    /// Where the log file goes instead of the state directory.
+    pub path: Option<PathBuf>,
+    /// Filter directives, as in `RUST_LOG`; the default is
+    /// [`crate::logging::DEFAULT_LOG_FILTER`].
+    pub level: Option<String>,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            file: true,
+            path: None,
+            level: None,
+        }
+    }
+}
+
+impl LogConfig {
+    /// Read just `[log]` from the config file, before logging starts. A
+    /// missing or unreadable file gives the defaults; [`Config::load`]
+    /// reports its errors once logging is up.
+    pub fn load() -> Self {
+        #[derive(Deserialize)]
+        struct LogOnly {
+            #[serde(default)]
+            log: LogConfig,
+        }
+        Config::config_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|contents| toml::from_str::<LogOnly>(&contents).ok())
+            .map(|only| only.log)
+            .unwrap_or_default()
     }
 }
 

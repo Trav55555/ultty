@@ -730,3 +730,40 @@ platforms until hardware handover is verified there. Read at start; restart
 Ultty after changing it. For a single launch, `ULTTY_CPU_FIRST_FRAMES=1`
 forces it on and `ULTTY_CPU_FIRST_FRAMES=0` forces it off regardless of
 `config.toml`.
+
+## Log file
+
+```toml
+[log]
+file = true                  # default; false logs to stderr only
+# path = "/var/tmp/ultty.log"  # absolute path instead of the state directory
+# level = "ultty=debug"        # RUST_LOG syntax; default "ultty=info,wgpu=warn"
+```
+
+Ultty writes its log to stderr and to `$XDG_STATE_HOME/ultty/ultty.log`
+(`~/.local/state/ultty/ultty.log` when `XDG_STATE_HOME` is unset or not
+absolute). It logs the file's location at startup. The log may hold paths
+and window titles, so Ultty creates the directory with mode 0700 and the
+file with mode 0600. `ultty-session` writes to the same file.
+
+The file is rotated at 10 MiB, keeping three older files (`ultty.log.1`,
+the newest, to `ultty.log.3`). Several Ultty processes can share the file:
+each line starts with `pid=<pid>`, lines are appended whole, and when two
+processes reach the cap together only one rotates it. Lines are written on a
+background thread so a slow disk never stalls a window; if that thread falls
+behind, new lines are dropped and a `dropped N log lines` line records how
+many.
+
+`level` applies to stderr and the file alike. Environment variables win over
+`[log]`:
+
+| Variable | Effect |
+|----------|--------|
+| `RUST_LOG` | the filter, replacing `level` |
+| `ULTTY_LOG_FILE=0` | no log file (tests, benchmarks) |
+| `ULTTY_LOG_FILE=1` | the default file even when `file = false` |
+| `ULTTY_LOG_FILE=<path>` | log to `<path>` instead |
+
+The control plane's audit trail (target `ultty::audit`) goes to the same
+file; see [CONTROL_PROTOCOL.md](CONTROL_PROTOCOL.md#audit-log). `[log]` is
+read at start; restart Ultty after changing it.
