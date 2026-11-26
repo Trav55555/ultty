@@ -30,7 +30,7 @@ impl Drop for NativeDirectory {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_writer(io::stderr).init();
+    let _log = ultty::logging::init(&ultty::config::LogConfig::load());
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         None | Some("--help" | "-h") => {

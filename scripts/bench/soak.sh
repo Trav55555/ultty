@@ -37,6 +37,8 @@
 #                      GPU instance)
 #   SOAK_NO_BUILD=1    use the binaries already in target/release
 set -euo pipefail
+# Test and benchmark runs stay out of the user's Ultty log file.
+export ULTTY_LOG_FILE=0
 cd "$(dirname "$0")/../.."
 minutes=${1:-150}
 out=${2:-target/soak-$(date +%Y%m%d-%H%M%S)}

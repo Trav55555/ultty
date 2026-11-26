@@ -61,6 +61,55 @@ pub fn resolve_control_target(
         })
 }
 
+/// Resolve the pane `request` acts on, once, the way its handler would;
+/// record it in the audit trail with the pane's foreground program; and pin
+/// it into the request, so the handler acts on exactly that pane even when
+/// the request named none. Requests without a pane target, or whose target
+/// does not resolve, are left alone for the handler to answer.
+pub fn pin_control_target(
+    server: &super::ControlServer,
+    client_key: usize,
+    manager: &crate::terminal_manager::TerminalManager,
+    request: &mut ultty_protocol::control::ControlRequest,
+) {
+    use super::audit::{pane_slot, PaneSlot, RequestSummary, ResolvedTarget, TargetChoice};
+
+    let summary = RequestSummary::of(request);
+    let (choice, pane) = match pane_slot(request) {
+        None => return,
+        Some(PaneSlot::Optional(slot)) => {
+            let choice = if slot.is_some() {
+                TargetChoice::Explicit
+            } else {
+                TargetChoice::Focused
+            };
+            let Ok(pane) = resolve_control_target(manager, *slot) else {
+                return;
+            };
+            *slot = Some(pane.raw() as u64);
+            (choice, pane)
+        }
+        Some(PaneSlot::Required(id)) => match resolve_control_target(manager, Some(id)) {
+            Ok(pane) => (TargetChoice::Explicit, pane),
+            Err(_) => return,
+        },
+    };
+    let foreground = manager
+        .terminal(pane)
+        .and_then(|terminal| terminal.event_loop.input_recipient_name());
+    server.audit_target(
+        client_key,
+        &ResolvedTarget {
+            kind: summary.kind,
+            routine: summary.routine,
+            choice,
+            window: None,
+            pane: Some(pane.raw() as u64),
+            foreground: foreground.as_deref(),
+        },
+    );
+}
+
 /// Every pane in every tab: tabs in order, each tab's panes in layout order.
 pub fn pane_infos(
     manager: &crate::terminal_manager::TerminalManager,

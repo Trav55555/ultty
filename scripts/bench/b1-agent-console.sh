@@ -32,6 +32,8 @@
 # Needs Xvfb, xdotool, alacritty, ghostty, and python3 with Pillow (built
 # with XCB, for screenshots of the display).
 set -euo pipefail
+# Test and benchmark runs stay out of the user's Ultty log file.
+export ULTTY_LOG_FILE=0
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$ROOT/scripts/bench"

@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use std::path::Path;
 
+use ultty::control::audit::RequestSummary;
 use ultty::control::format_response;
 use ultty::control::paths::{control_dir, ControlEndpoint, InstanceError, InstanceRequest};
 use ultty_protocol::control::{
@@ -39,6 +40,8 @@ fn main() {
 
     let args: Vec<String> = args.into_iter().filter(|a| a != "--json").collect();
     let args = remove_flag_with_value(args, "--read-timeout");
+    let (args, verbose) = take_verbose_flag(args);
+    let verbose = Verbose(verbose);
     let (args, pid_flag) = match take_pid_flag(args) {
         Ok(parsed) => parsed,
         Err(e) => {
@@ -58,7 +61,7 @@ fn main() {
             eprintln!("error: instance flags must precede mcp");
             std::process::exit(2);
         }
-        std::process::exit(match run_mcp(instance) {
+        std::process::exit(match run_mcp(instance, verbose) {
             Ok(()) => 0,
             Err(error) => {
                 eprintln!("error: {error}");
@@ -78,7 +81,7 @@ fn main() {
     default_split_target(&mut request, caller_pane);
     default_window_target(&mut request, caller_pane);
     let read_timeout = read_timeout_for(&request, timeout_secs);
-    let endpoint = match find_instance(instance) {
+    let endpoint = match find_instance(instance, verbose) {
         Ok(endpoint) => endpoint,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -89,7 +92,8 @@ fn main() {
         request,
         ControlRequest::Subscribe { .. } | ControlRequest::SubscribeV2 { .. }
     );
-    let request = with_auth_token(request, read_auth_token(&endpoint.token));
+    let request = with_auth_token(request, read_auth_token(&endpoint.token, verbose));
+    verbose.request(&request);
     // Always ask for JSON so the reply can be parsed and the exit status set
     // from it; text output is rendered here with the server's formatter.
     let envelope = ControlEnvelope {
@@ -100,6 +104,7 @@ fn main() {
         serde_json::to_string(&envelope).expect("control request envelope should serialize");
 
     if subscribe {
+        verbose.note("streaming events until ultty closes the connection");
         match stream_events(&endpoint.socket, &command, &mut std::io::stdout()) {
             Ok(()) => std::process::exit(0),
             Err(e) => {
@@ -109,8 +114,10 @@ fn main() {
         }
     }
 
+    let started = Instant::now();
     let response = match send_command(&endpoint.socket, &command, read_timeout)
         .and_then(|raw| parse_response(&raw))
+        .inspect(|response| verbose.response(response, started.elapsed()))
     {
         Ok(response) => response,
         Err(e) => {
@@ -245,11 +252,83 @@ fn select_instance(
 }
 
 /// Find exactly the selected instance. Only absent selection discovers newest.
-fn find_instance(request: InstanceRequest) -> Result<ControlEndpoint, String> {
+fn find_instance(request: InstanceRequest, verbose: Verbose) -> Result<ControlEndpoint, String> {
     let dir = control_dir().map_err(|e| format!("cannot use the control directory: {}", e))?;
+    verbose.note(format_args!("control directory {}", dir.display()));
     match ultty::control::paths::find_instance(&dir, request) {
-        Ok(found) => Ok(found.endpoint),
+        Ok(found) => {
+            verbose.instance(request, &dir, &found.endpoint);
+            Ok(found.endpoint)
+        }
         Err(e) => Err(instance_error_message(e, request, &dir)),
+    }
+}
+
+/// `-v`: narrate on stderr how ulttyctl picks an instance and what it
+/// sends, without ever printing a token or the text a request carries.
+#[derive(Debug, Clone, Copy)]
+struct Verbose(bool);
+
+impl Verbose {
+    fn note(self, message: impl std::fmt::Display) {
+        if self.0 {
+            eprintln!("ulttyctl: {message}");
+        }
+    }
+
+    fn instance(self, request: InstanceRequest, dir: &Path, endpoint: &ControlEndpoint) {
+        if !self.0 {
+            return;
+        }
+        let pid = endpoint
+            .pid()
+            .map_or_else(|| "?".to_owned(), |pid| pid.to_string());
+        match request {
+            InstanceRequest::Exact(_) => {
+                self.note(format_args!("instance pid {pid}, named by --pid"))
+            }
+            InstanceRequest::Own(_) => self.note(format_args!(
+                "instance pid {pid}, named by ULTTY_PID (the ultty this shell runs in)"
+            )),
+            InstanceRequest::Newest => {
+                let skipped: Vec<String> = ultty::control::paths::running_instance_candidates(dir)
+                    .into_iter()
+                    .take_while(|candidate| candidate != endpoint)
+                    .filter_map(|candidate| candidate.pid())
+                    .map(|pid| pid.to_string())
+                    .collect();
+                self.note(format_args!(
+                    "instance pid {pid}, the newest listening ultty (no --pid or ULTTY_PID)"
+                ));
+                if !skipped.is_empty() {
+                    self.note(format_args!(
+                        "skipped newer sockets that are not listening: pid {}",
+                        skipped.join(", ")
+                    ));
+                }
+            }
+        }
+        self.note(format_args!("socket {}", endpoint.socket.display()));
+    }
+
+    fn request(self, request: &ControlRequest) {
+        self.note(format_args!("request {}", RequestSummary::of(request)));
+    }
+
+    fn response(self, response: &ControlResponse, elapsed: Duration) {
+        let kind = match response {
+            ControlResponse::Ok => "ok".to_owned(),
+            ControlResponse::Text { .. } => "text".to_owned(),
+            ControlResponse::Error { code, .. } => format!("error code={code}"),
+            ControlResponse::Data(data) => serde_json::to_value(data)
+                .ok()
+                .and_then(|value| value.get("type")?.as_str().map(str::to_owned))
+                .map_or_else(|| "data".to_owned(), |kind| format!("data {kind}")),
+        };
+        self.note(format_args!(
+            "response {kind} in {:.1} ms",
+            elapsed.as_secs_f64() * 1000.0
+        ));
     }
 }
 
@@ -290,17 +369,28 @@ fn selected_pid(value: Option<std::ffi::OsString>) -> Result<Option<u32>, String
 ///
 /// `ULTTY_AUTH_TOKEN` overrides the file so scripts can pass a token in
 /// explicitly.
-fn read_auth_token(token_path: &Path) -> Option<String> {
+fn read_auth_token(token_path: &Path, verbose: Verbose) -> Option<String> {
     if let Ok(token) = std::env::var("ULTTY_AUTH_TOKEN") {
         let token = token.trim().to_string();
         if !token.is_empty() {
+            verbose.note("auth token from ULTTY_AUTH_TOKEN");
             return Some(token);
         }
     }
-    std::fs::read_to_string(token_path)
+    let token = std::fs::read_to_string(token_path)
         .ok()
         .map(|token| token.trim().to_string())
-        .filter(|token| !token.is_empty())
+        .filter(|token| !token.is_empty());
+    verbose.note(format_args!(
+        "auth token file {} ({})",
+        token_path.display(),
+        if token.is_some() {
+            "read"
+        } else {
+            "missing or empty; sending without a token"
+        }
+    ));
+    token
 }
 
 /// Wrap a request so it authenticates in the same round trip.
@@ -317,6 +407,22 @@ fn with_auth_token(request: ControlRequest, token: Option<String>) -> ControlReq
         },
         (request, None) => request,
     }
+}
+
+/// Take `-v`/`--verbose` from among the global flags before the command.
+fn take_verbose_flag(mut args: Vec<String>) -> (Vec<String>, bool) {
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-v" | "--verbose" => {
+                args.remove(index);
+                return (args, true);
+            }
+            "--pane" | "--window" | "--pid" => index += 2,
+            _ => break,
+        }
+    }
+    (args, false)
 }
 
 /// Take `--pid <pid>` from among the global flags before the command, like
@@ -1274,13 +1380,16 @@ struct PinnedInstance {
     endpoint: ControlEndpoint,
     token: Option<String>,
     owner: OwnerRef,
+    verbose: Verbose,
 }
 
 impl PinnedInstance {
-    fn discover(instance: InstanceRequest) -> Result<Self, String> {
-        let endpoint = find_instance(instance)?;
-        let token = read_auth_token(&endpoint.token);
-        Self::discover_at(endpoint, token)
+    fn discover(instance: InstanceRequest, verbose: Verbose) -> Result<Self, String> {
+        let endpoint = find_instance(instance, verbose)?;
+        let token = read_auth_token(&endpoint.token, verbose);
+        let mut pinned = Self::discover_at(endpoint, token)?;
+        pinned.verbose = verbose;
+        Ok(pinned)
     }
 
     fn discover_at(endpoint: ControlEndpoint, token: Option<String>) -> Result<Self, String> {
@@ -1304,6 +1413,7 @@ impl PinnedInstance {
                     endpoint,
                     token,
                     owner,
+                    verbose: Verbose(false),
                 })
             }
             other => Err(format!(
@@ -1327,15 +1437,18 @@ impl PinnedInstance {
         };
         let command = serde_json::to_string(&envelope)
             .map_err(|e| format!("failed to encode request: {e}"))?;
+        self.verbose.request(&envelope.request);
+        let started = Instant::now();
         send_command(&self.endpoint.socket, &command, read_timeout)
             .and_then(|raw| parse_response(&raw))
+            .inspect(|response| self.verbose.response(response, started.elapsed()))
     }
 }
 
 /// Serve MCP on stdin and stdout, pinned to the initial owner and token.
 /// Restart MCP explicitly to select a different terminal owner.
-fn run_mcp(instance: InstanceRequest) -> std::io::Result<()> {
-    let owner = PinnedInstance::discover(instance).map_err(std::io::Error::other)?;
+fn run_mcp(instance: InstanceRequest, verbose: Verbose) -> std::io::Result<()> {
+    let owner = PinnedInstance::discover(instance, verbose).map_err(std::io::Error::other)?;
     let mut send = |request| owner.send(request);
     // Screenshots go to the private control directory, not a shared /tmp.
     let screenshot_dir = control_dir().ok();
@@ -1437,6 +1550,11 @@ GLOBAL FLAGS:
     --pid <pid>             Talk only to the ultty with this pid; fail if it
                             is not running or not listening yet, never use
                             another. Goes before the command
+    -v, --verbose           Explain on stderr which ultty was chosen and why,
+                            the socket and token file used (never the token),
+                            each request (text as a byte count only) and the
+                            reply with its round-trip time. Goes before the
+                            command
     -V, --version           Show ulttyctl version without connecting to Ultty
     -h, --help              Show this help
 
@@ -1611,8 +1729,8 @@ mod tests {
     use super::{
         default_split_target, default_window_target, exit_status, parse_cli_request,
         parse_response, read_response, read_timeout_for, response_is_failure, select_instance,
-        selected_pid, should_print_version, take_pid_flag, version_output, with_auth_token,
-        LuaOpen, PinnedInstance,
+        selected_pid, should_print_version, take_pid_flag, take_verbose_flag, version_output,
+        with_auth_token, LuaOpen, PinnedInstance, Verbose,
     };
 
     use std::io::Write;
@@ -1877,6 +1995,7 @@ mod tests {
                 pid: 100,
                 epoch: "pinned-epoch".into(),
             },
+            verbose: Verbose(false),
         };
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1917,6 +2036,7 @@ mod tests {
                 pid: 100,
                 epoch: "pinned-epoch".into(),
             },
+            verbose: Verbose(false),
         };
         assert!(owner.send(ControlRequest::GetInfo).is_err());
         assert!(
@@ -2140,6 +2260,19 @@ mod tests {
 
     fn args(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn verbose_flag_is_taken_only_before_the_command() {
+        assert_eq!(take_verbose_flag(args("-v ping")), (args("ping"), true));
+        assert_eq!(
+            take_verbose_flag(args("--pid 42 --verbose --pane 3 text")),
+            (args("--pid 42 --pane 3 text"), true)
+        );
+        assert_eq!(
+            take_verbose_flag(args("send-text -v")),
+            (args("send-text -v"), false)
+        );
     }
 
     #[test]

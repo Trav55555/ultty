@@ -5,14 +5,10 @@
 use std::process::ExitCode;
 
 use anyhow::Result;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod app;
 
 use app::StartupCommand;
-
-/// The log filter when `RUST_LOG` is unset.
-const DEFAULT_LOG_FILTER: &str = "ultty=info,wgpu=warn";
 
 /// Counts Rust heap for soaks; see `ultty::heap_stats`.
 #[cfg(feature = "heap-stats")]
@@ -22,7 +18,7 @@ static GLOBAL: ultty::heap_stats::Counting = ultty::heap_stats::Counting;
 fn main() -> Result<ExitCode> {
     let (command, new_process, quick) = match invocation(std::env::args().skip(1)) {
         Ok(Invocation::Attach { args }) => {
-            initialize_logging();
+            let _log = ultty::logging::init(&ultty::config::LogConfig::load());
             ultty::viewer::cli::run(args)?;
             return Ok(ExitCode::SUCCESS);
         }
@@ -60,7 +56,7 @@ fn main() -> Result<ExitCode> {
         }
     };
 
-    initialize_logging();
+    let _log = ultty::logging::init(&ultty::config::LogConfig::load());
 
     let config = ultty::config::Config::load();
     if quick {
@@ -123,16 +119,6 @@ fn single_instance_launch(
         }
         Some(StartupCommand::Profile(_) | StartupCommand::Workspace(_)) => None,
     }
-}
-
-fn initialize_logging() {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| DEFAULT_LOG_FILTER.into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
 }
 
 /// What the command line asks for.
@@ -276,11 +262,13 @@ Options:
 
 Configuration: ~/.config/ultty/config.toml
 Your themes:   ~/.config/ultty/themes/NAME.toml
-Logging:       RUST_LOG (default \"{DEFAULT_LOG_FILTER}\")
+Logging:       RUST_LOG or [log] level (default \"{filter}\")
+Log file:      ~/.local/state/ultty/ultty.log; ULTTY_LOG_FILE=0 turns it off
 Control a running Ultty with ulttyctl (ulttyctl --help).
 
 {version}
 ",
+        filter = ultty::logging::DEFAULT_LOG_FILTER,
         version = version_output()
     )
 }

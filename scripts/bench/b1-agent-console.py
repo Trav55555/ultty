@@ -64,6 +64,9 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageFilter, ImageGrab
 
+# Test and benchmark runs stay out of the user's Ultty log file.
+os.environ.setdefault("ULTTY_LOG_FILE", "0")
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 FIXTURES = ROOT / "examples" / "agent-console" / "fixtures"

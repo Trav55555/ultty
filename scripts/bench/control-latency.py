@@ -27,6 +27,9 @@ import subprocess
 import sys
 import time
 
+# Test and benchmark runs stay out of the user's Ultty log file.
+os.environ.setdefault("ULTTY_LOG_FILE", "0")
+
 
 def control_paths(pid):
     base = os.environ.get("XDG_RUNTIME_DIR") or os.path.join("/tmp", f"ultty-{os.getuid()}")

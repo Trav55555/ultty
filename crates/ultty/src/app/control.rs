@@ -9,18 +9,18 @@ use super::control_wait::{Condition, PendingControlWait, WaitMatcher};
 use super::{App, ProcessState, WindowCtx};
 use std::io;
 use std::time::{Duration, Instant};
+use ultty::control::auth::control_request_requires_auth;
 pub(super) use ultty::control::auth::write_auth_token;
 #[cfg(test)]
 use ultty::control::auth::AUTH_TOKEN_BYTES;
-use ultty::control::auth::{control_request_requires_auth, read_auth_token, token_matches};
 #[cfg(test)]
 use ultty::control::common::plain_search_match;
 pub(super) use ultty::control::common::terminal_working_directory;
 use ultty::control::common::{
     buffer_text, build_command_line, control_pane_snapshot, input_acceptance, job_id,
-    job_is_running, key_to_bytes, pane_infos, process_job_response, program_status_response,
-    resolve_control_target, search_response, send_pty_input, shell_command_response,
-    submit_control_shell_command, terminal_info,
+    job_is_running, key_to_bytes, pane_infos, pin_control_target, process_job_response,
+    program_status_response, resolve_control_target, search_response, send_pty_input,
+    shell_command_response, submit_control_shell_command, terminal_info,
 };
 use ultty::terminal_manager::{SplitDirection, TerminalId, WindowKey};
 use winit::dpi::PhysicalSize;
@@ -146,6 +146,7 @@ impl App {
                     _ => break,
                 }
             }
+            self.shared.pin_control_target(client_key, &mut request);
 
             if let ControlRequest::SubscribeV2 { ref cursor, target } = request {
                 if let Some(response) = self.shared.auth_error_for_request(client_key, &request) {
@@ -1245,6 +1246,12 @@ impl App {
                     Ok(key) => key,
                     Err(response) => return response,
                 };
+                self.shared.audit_window_target(
+                    client_key,
+                    "screenshot",
+                    window.is_some() || pane.is_some(),
+                    key,
+                );
                 let result = self
                     .with_window(key, |ctx| {
                         if ctx.app.runtime.manager.window_pane_count(ctx.win.key) > 1 {
@@ -1342,7 +1349,8 @@ impl App {
             ControlRequest::Batch { commands } => {
                 let results: Vec<ControlResponse> = commands
                     .into_iter()
-                    .map(|cmd| {
+                    .map(|mut cmd| {
+                        self.shared.pin_control_target(client_key, &mut cmd);
                         self.process_control_request(client_key, cmd, event_loop, should_exit)
                     })
                     .collect();
@@ -1956,33 +1964,25 @@ impl ProcessState {
     ) -> Result<(), ultty_protocol::control::ControlResponse> {
         use ultty_protocol::control::ControlResponse;
 
-        let expected = self
+        let authenticated = self
             .control_server
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| io::Error::other("control server not running"))
-            .and_then(|server| read_auth_token(server.token_path()));
-        let expected = match expected {
-            Ok(expected) => expected,
-            Err(e) => {
-                tracing::warn!("Control auth token unavailable: {}", e);
-                return Err(ControlResponse::Error {
-                    code: 500,
-                    message: "Control auth token unavailable".to_string(),
-                });
-            }
-        };
-
-        if !token_matches(token, &expected) {
-            return Err(ControlResponse::Error {
+            .and_then(|server| server.authenticate(client_key, token));
+        match authenticated {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(ControlResponse::Error {
                 code: 403,
                 message: "Invalid token".to_string(),
-            });
+            }),
+            Err(e) => {
+                tracing::warn!("Control auth token unavailable: {}", e);
+                Err(ControlResponse::Error {
+                    code: 500,
+                    message: "Control auth token unavailable".to_string(),
+                })
+            }
         }
-
-        if let Some(ref mut server) = self.control_server {
-            server.set_client_authenticated(client_key, true);
-        }
-        Ok(())
     }
 
     fn pane_foreground_pgrp(&self, pane: TerminalId) -> Option<i32> {
@@ -2022,6 +2022,54 @@ impl ProcessState {
             };
         }
         input_acceptance(terminal.event_loop.send_input(&bytes))
+    }
+
+    /// Resolve, record and pin the pane an authorised request acts on; see
+    /// [`pin_control_target`].
+    fn pin_control_target(
+        &self,
+        client_key: usize,
+        request: &mut ultty_protocol::control::ControlRequest,
+    ) {
+        if self.auth_error_for_request(client_key, request).is_some() {
+            return;
+        }
+        if let Some(server) = self.control_server.as_ref() {
+            pin_control_target(server, client_key, &self.runtime.manager, request);
+        }
+    }
+
+    /// Record the window a window-scoped request resolved to, and the pane
+    /// focused in it, with that pane's foreground program.
+    fn audit_window_target(
+        &self,
+        client_key: usize,
+        kind: &'static str,
+        explicit: bool,
+        key: WindowKey,
+    ) {
+        use ultty::control::audit::{ResolvedTarget, TargetChoice};
+
+        let Some(server) = self.control_server.as_ref() else {
+            return;
+        };
+        let terminal = self.runtime.manager.window_focused_terminal(key);
+        let foreground = terminal.and_then(|terminal| terminal.event_loop.input_recipient_name());
+        server.audit_target(
+            client_key,
+            &ResolvedTarget {
+                kind,
+                routine: false,
+                choice: if explicit {
+                    TargetChoice::Explicit
+                } else {
+                    TargetChoice::Focused
+                },
+                window: Some(key.raw() as u64),
+                pane: terminal.map(|terminal| terminal.id.raw() as u64),
+                foreground: foreground.as_deref(),
+            },
+        );
     }
 
     fn auth_error_for_request(
@@ -2250,6 +2298,7 @@ fn invalid_spawn_options() -> ultty_protocol::control::ControlResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ultty::control::auth::{read_auth_token, token_matches};
 
     #[test]
     fn test_semantic_acknowledgement_requires_exact_session_and_request() {

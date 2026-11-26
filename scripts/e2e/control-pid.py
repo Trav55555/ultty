@@ -20,6 +20,9 @@ import tempfile
 import time
 import traceback
 
+# Test and benchmark runs stay out of the user's Ultty log file.
+os.environ.setdefault("ULTTY_LOG_FILE", "0")
+
 
 def digest(path):
     with open(path, "rb") as source:

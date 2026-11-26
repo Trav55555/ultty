@@ -18,6 +18,9 @@ import subprocess
 import sys
 import time
 
+# Test and benchmark runs stay out of the user's Ultty log file.
+os.environ.setdefault("ULTTY_LOG_FILE", "0")
+
 
 HERE = Path(__file__).resolve().parent
 

@@ -56,6 +56,8 @@
 # Exit status is non-zero if any measurement failed; the failures are listed
 # at the end of report.md and on stderr.
 set -euo pipefail
+# Test and benchmark runs stay out of the user's Ultty log file.
+export ULTTY_LOG_FILE=0
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$ROOT/scripts/bench"

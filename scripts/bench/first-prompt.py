@@ -89,6 +89,9 @@ import time
 import zlib
 from datetime import datetime, timezone
 
+# Test and benchmark runs stay out of the user's Ultty log file.
+os.environ.setdefault("ULTTY_LOG_FILE", "0")
+
 TITLE = "first-prompt-probe"
 PROMPT = "startup-probe-prompt$ "
 LAUNCH_TIMEOUT_S = 30

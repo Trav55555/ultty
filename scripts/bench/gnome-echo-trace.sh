@@ -17,6 +17,8 @@
 # Extra environment for Ultty (for example MESA_VK_WSI_PRESENT_MODE) can be
 # passed with ULTTY_ENV="NAME=value ...".
 set -euo pipefail
+# Test and benchmark runs stay out of the user's Ultty log file.
+export ULTTY_LOG_FILE=0
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -56,7 +58,7 @@ runtime=$(mktemp -d /tmp/ultty-echo.XXXX)
 # shortly after the session ends.
 cleanup() { for _ in 1 2 3 4 5; do rm -rf "$runtime" 2>/dev/null && return; sleep 1; done; }
 trap cleanup EXIT
-env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" LANG=C.UTF-8 \
+env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" LANG=C.UTF-8 ULTTY_LOG_FILE=0 \
   XDG_RUNTIME_DIR="$runtime" XDG_CONFIG_HOME="$xdg/config" XDG_DATA_HOME="$xdg/data" \
   XDG_CACHE_HOME="$xdg/cache" XDG_STATE_HOME="$xdg/state" \
   ULTTY="$ULTTY" OUT="$OUT" KEYS="$KEYS" ULTTY_ENV="${ULTTY_ENV:-}" \

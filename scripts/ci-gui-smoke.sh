@@ -9,6 +9,8 @@
 # counter-app, agent-transcript, agent-console, ulttui-lua, and the
 # ultty-client inline-surface example.
 set -euo pipefail
+# Test and benchmark runs stay out of the user's Ultty log file.
+export ULTTY_LOG_FILE=0
 
 SHARD="all"
 JOBS="${GUI_SMOKE_JOBS:-2}"

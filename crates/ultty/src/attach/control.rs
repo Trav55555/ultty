@@ -12,14 +12,14 @@ use ultty_protocol::control::{
 
 use super::host::HostState;
 use super::wire::{Command, LayoutCommand, Reply};
-use crate::control::auth::{
-    control_request_requires_auth, read_auth_token, token_matches, write_auth_token,
-};
+use crate::control::audit::Transport;
+use crate::control::auth::{control_request_requires_auth, write_auth_token};
 use crate::control::common::{
     buffer_text, build_command_line, control_pane_snapshot, input_acceptance, job_id,
-    job_is_running, key_to_bytes, pane_infos, process_job_response, program_status_response,
-    resolve_control_target, search_response, send_pty_input, shell_command_response,
-    submit_control_shell_command, terminal_info, terminal_working_directory,
+    job_is_running, key_to_bytes, pane_infos, pin_control_target, process_job_response,
+    program_status_response, resolve_control_target, search_response, send_pty_input,
+    shell_command_response, submit_control_shell_command, terminal_info,
+    terminal_working_directory,
 };
 use crate::control::events::{control_event, open_panes, pane_changes};
 use crate::control::wait::{Condition, PendingControlWait, WaitMatcher};
@@ -87,7 +87,8 @@ impl HostControl {
     /// Bind this process's control endpoint with the attachment owner's epoch.
     /// Create before launching children so inherited `ULTTY_PID` is usable.
     pub fn new(owner: OwnerRef) -> io::Result<Self> {
-        let server = ControlServer::new_with_owner(owner)?;
+        let mut server = ControlServer::new_with_owner(owner)?;
+        server.set_audit_transport(Transport::SessionHost);
         write_auth_token(server.token_path())?;
         Ok(Self {
             server,
@@ -138,9 +139,13 @@ impl HostControl {
     }
 
     fn authenticate(&mut self, client: usize, token: &str) -> bool {
-        let valid = read_auth_token(self.server.token_path())
-            .is_ok_and(|expected| token_matches(token, &expected));
-        self.server.set_client_authenticated(client, valid);
+        let valid = self
+            .server
+            .authenticate(client, token)
+            .is_ok_and(|valid| valid);
+        if !valid {
+            self.server.set_client_authenticated(client, false);
+        }
         valid
     }
 
@@ -184,6 +189,7 @@ impl HostControl {
         if control_request_requires_auth(&request) && !self.server.is_client_authenticated(client) {
             return Some(error(403, "Authentication required"));
         }
+        pin_control_target(&self.server, client, &host.runtime.manager, &mut request);
         if batch
             && matches!(
                 request,
@@ -924,6 +930,7 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     use super::*;
+    use crate::control::auth::read_auth_token;
     use crate::runtime::SessionRuntime;
     use crate::terminal_manager::TerminalManager;
     use ultty_protocol::control::{ControlEnvelope, OutputFormat};

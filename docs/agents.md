@@ -53,6 +53,10 @@ claude mcp add ultty -- ulttyctl mcp
 instance exits or has no control socket; it never selects another instance.
 An invalid `ULTTY_PID` also fails unless `--pid` overrides it. When both
 selections are absent, the CLI discovers the most recently started instance.
+`ulttyctl -v` (`--verbose`) says on stderr which instance it chose and why,
+the socket and token file it used (never the token), each request (text as a
+byte count only) and the reply with its round-trip time; with `mcp` it does so
+for every tool call.
 
 MCP authenticates discovery once, selects the window's random owner epoch and
 authentication token, and pins both for every call. It requires control schema 2. Restart MCP explicitly after replacing that

@@ -28,6 +28,9 @@ import subprocess
 import time
 import traceback
 
+# Test and benchmark runs stay out of the user's Ultty log file.
+os.environ.setdefault("ULTTY_LOG_FILE", "0")
+
 
 BUDGET_SECONDS = 180
 SSH_OPTIONS = ["-T", "-oBatchMode=yes", "-oConnectTimeout=5",
@@ -157,7 +160,7 @@ class Gate:
         self.remote_binary = manifest["remote_session_bin"]
         for path in (self.remote_root, self.remote_binary):
             assert path.startswith("/") and "\x00" not in path
-        self.environment = []
+        self.environment = ["ULTTY_LOG_FILE=0"]
         for field, variable in (("remote_runtime", "XDG_RUNTIME_DIR"), ("remote_tmpdir", "TMPDIR")):
             if manifest.get(field) is not None:
                 self.environment.append(variable + "=" + manifest[field])
