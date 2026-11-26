@@ -177,7 +177,9 @@ impl RequestSummary {
                 summary.pane = *target;
                 ("subscribe", false)
             }
-            ControlRequest::SendText { text: sent, target } => {
+            ControlRequest::SendText {
+                text: sent, target, ..
+            } => {
                 summary.pane = *target;
                 summary.bytes = text(&[sent]);
                 ("send_text", false)
@@ -186,7 +188,7 @@ impl RequestSummary {
                 summary.pane = *target;
                 ("send_key", false)
             }
-            ControlRequest::SendRaw { data, target } => {
+            ControlRequest::SendRaw { data, target, .. } => {
                 summary.pane = *target;
                 summary.bytes = Some(data.len());
                 ("send_raw", false)
@@ -223,6 +225,7 @@ impl RequestSummary {
                 command,
                 args,
                 target,
+                ..
             } => {
                 summary.pane = *target;
                 summary.bytes = program(Some(command), args);
@@ -475,9 +478,50 @@ pub fn target(
     }
 }
 
+/// Why an input request was refused before it reached a PTY (#241).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputRefusal<'a> {
+    /// It named no pane.
+    TargetRequired,
+    /// Its pane's foreground program is a terminal multiplexer client,
+    /// which would forward the input to a pane of its own.
+    Multiplexer {
+        /// The pane it named.
+        pane: u64,
+        /// That pane's foreground program, as `target` records it.
+        program: &'a str,
+    },
+}
+
+/// Record an input request refused before it reached a PTY. WARN: input
+/// that would have gone somewhere the caller did not name.
+pub fn input_refused(
+    transport: Transport,
+    conn: usize,
+    peer: &PeerIdentity,
+    kind: &str,
+    refusal: InputRefusal<'_>,
+) {
+    let mut line = String::from("control input refused");
+    match refusal {
+        InputRefusal::TargetRequired => {
+            line.push_str(&format!(" reason=target_required kind={kind}"));
+        }
+        InputRefusal::Multiplexer { pane, program } => line.push_str(&format!(
+            " reason=multiplexer kind={kind} pane={pane} fg={}",
+            printable(program)
+        )),
+    }
+    tracing::warn!(
+        target: "ultty::audit",
+        "{line} conn={conn} transport={transport} peer_pid={}",
+        OrDash(peer.pid),
+    );
+}
+
 /// The request inside any `with_token` and `with_owner` wrappers, and
 /// whether a token wrapper was among them.
-fn unwrap_envelopes(mut request: &ControlRequest) -> (&ControlRequest, bool) {
+pub fn unwrap_envelopes(mut request: &ControlRequest) -> (&ControlRequest, bool) {
     let mut with_token = false;
     loop {
         match request {
@@ -616,6 +660,7 @@ mod tests {
             request: Box::new(ControlRequest::SendText {
                 text: "hunter2".into(),
                 target: Some(3),
+                through_multiplexer: false,
             }),
         });
         assert_eq!(
@@ -627,6 +672,7 @@ mod tests {
             command: "echo".into(),
             args: vec!["secret".into()],
             target: None,
+            through_multiplexer: false,
         });
         assert_eq!(run.to_string(), "kind=run_command bytes=10");
     }
@@ -667,6 +713,7 @@ mod tests {
                 ControlRequest::SendRaw {
                     data: vec![1, 2, 3],
                     target: None,
+                    through_multiplexer: false,
                 },
             ],
         };

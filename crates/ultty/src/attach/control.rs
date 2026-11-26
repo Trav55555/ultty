@@ -189,7 +189,11 @@ impl HostControl {
         if control_request_requires_auth(&request) && !self.server.is_client_authenticated(client) {
             return Some(error(403, "Authentication required"));
         }
-        pin_control_target(&self.server, client, &host.runtime.manager, &mut request);
+        if let Err(response) =
+            pin_control_target(&self.server, client, &host.runtime.manager, &mut request)
+        {
+            return Some(response);
+        }
         if batch
             && matches!(
                 request,
@@ -393,11 +397,11 @@ impl HostControl {
                     .unwrap_or_default();
                 ControlResponse::Data(ControlData::Regions { scenes })
             }
-            ControlRequest::SendRaw { data, target } => {
+            ControlRequest::SendRaw { data, target, .. } => {
                 let pane = resolve_control_target(&host.runtime.manager, target)?;
                 send_pty_input(&mut host.runtime.manager, pane, &data)
             }
-            ControlRequest::SendText { text, target } => {
+            ControlRequest::SendText { text, target, .. } => {
                 let pane = resolve_control_target(&host.runtime.manager, target)?;
                 let terminal = host
                     .runtime
@@ -419,6 +423,7 @@ impl HostControl {
                 key,
                 modifiers,
                 target,
+                ..
             } => {
                 let pane = resolve_control_target(&host.runtime.manager, target)?;
                 let terminal = host
@@ -460,6 +465,7 @@ impl HostControl {
                 command,
                 args,
                 target,
+                ..
             } => {
                 let pane = resolve_control_target(&host.runtime.manager, target)?;
                 send_pty_input(
@@ -605,6 +611,7 @@ impl HostControl {
                 command,
                 timeout_ms,
                 target,
+                ..
             } => {
                 let timeout = timeout(timeout_ms)?;
                 let pane = resolve_control_target(&host.runtime.manager, target)?;
@@ -928,6 +935,7 @@ fn spawned(
 mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
+    use std::path::Path;
 
     use super::*;
     use crate::control::auth::read_auth_token;
@@ -973,8 +981,19 @@ mod tests {
         }
     }
 
+    /// A host's control socket is named after the process, so tests that
+    /// open one take turns.
+    static HOST_SOCKET: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn host_socket_turn() -> std::sync::MutexGuard<'static, ()> {
+        HOST_SOCKET
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn test_host_control_real_dispatch_owner_capabilities_and_retained_job() {
+        let _turn = host_socket_turn();
         let owner = super::super::auth::new_owner().unwrap();
         let runtime = SessionRuntime::new(TerminalManager::empty(80, 24), None, (80, 24)).unwrap();
         let mut host = HostState::new(runtime, owner.clone(), [80, 24]).unwrap();
@@ -1077,5 +1096,265 @@ mod tests {
             ),
             ControlResponse::Error { code: 5, .. }
         ));
+    }
+
+    /// A session host with one authenticated control bridge; `authenticated`
+    /// wraps a request in its token and owner.
+    struct Fixture {
+        host: HostState,
+        bridge: HostControl,
+        token: String,
+        owner: OwnerRef,
+        _turn: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let turn = host_socket_turn();
+            let owner = super::super::auth::new_owner().unwrap();
+            let runtime =
+                SessionRuntime::new(TerminalManager::empty(80, 24), None, (80, 24)).unwrap();
+            let host = HostState::new(runtime, owner.clone(), [80, 24]).unwrap();
+            let bridge = HostControl::new(owner.clone()).unwrap();
+            let token = read_auth_token(bridge.server.token_path()).unwrap();
+            Self {
+                host,
+                bridge,
+                token,
+                owner,
+                _turn: turn,
+            }
+        }
+
+        fn send(&mut self, request: ControlRequest) -> ControlResponse {
+            let request = ControlRequest::WithToken {
+                token: self.token.clone(),
+                request: Box::new(ControlRequest::WithOwner {
+                    owner: self.owner.clone(),
+                    request: Box::new(request),
+                }),
+            };
+            exchange(&mut self.bridge, &mut self.host, request)
+        }
+
+        /// Open a tab running `program -c script args...`. Unless `program`
+        /// is named like a shell, which `ListPanes` never reports, wait
+        /// until it is the pane's foreground program.
+        fn open(&mut self, program: &Path, script: &str, args: &[&Path]) -> u64 {
+            let mut argv = vec!["-c".to_string(), script.to_string()];
+            argv.push(program.display().to_string());
+            argv.extend(args.iter().map(|arg| arg.display().to_string()));
+            let opened = self.send(ControlRequest::NewTab {
+                title: None,
+                command: Some(program.display().to_string()),
+                args: argv,
+                working_dir: None,
+                window: None,
+                pane: None,
+            });
+            let ControlResponse::Data(ControlData::TabOpened { pane, .. }) = opened else {
+                panic!("spawn failed: {opened:?}");
+            };
+            let name = program.file_name().unwrap().to_str().unwrap().to_string();
+            if name == "sh" {
+                return pane;
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let ControlResponse::Data(ControlData::Panes { panes }) =
+                    self.send(ControlRequest::ListPanes)
+                else {
+                    panic!("no pane list");
+                };
+                let foreground = panes
+                    .iter()
+                    .find(|info| info.id == pane)
+                    .and_then(|info| info.foreground.clone());
+                if foreground.as_deref() == Some(name.as_str()) {
+                    return pane;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "pane {pane} never ran {name}: {foreground:?}"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+
+        /// Pump the host until `sink` holds `expected`, or fail.
+        fn await_sink(&mut self, sink: &Path, expected: &str) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let events = self.host.step(Instant::now(), false).unwrap();
+                self.bridge.poll(&mut self.host, &events).unwrap();
+                let got = std::fs::read_to_string(sink).unwrap_or_default();
+                if got == expected {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{} holds {got:?}, not {expected:?}",
+                    sink.display()
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    /// A pane script that appends each line it reads to `$1`, so what was
+    /// typed into the pane can be read back.
+    const SINK: &str = r#"while IFS= read -r line; do printf '%s\n' "$line" >> "$1"; done"#;
+
+    /// A copy of `/bin/sh` named `name`, so a pane can run a program whose
+    /// process name is `name` without the real program.
+    fn shell_named(dir: &Path, name: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::copy("/bin/sh", &path).unwrap();
+        path
+    }
+
+    fn send_text(text: &str, target: Option<u64>, through_multiplexer: bool) -> ControlRequest {
+        ControlRequest::SendText {
+            text: text.to_string(),
+            target,
+            through_multiplexer,
+        }
+    }
+
+    fn untargeted_inputs() -> Vec<ControlRequest> {
+        vec![
+            send_text("untargeted\n", None, false),
+            ControlRequest::SendKey {
+                key: ultty_protocol::Key::Enter,
+                modifiers: ultty_protocol::Modifiers::default(),
+                target: None,
+                through_multiplexer: true,
+            },
+            ControlRequest::SendRaw {
+                data: b"raw\n".to_vec(),
+                target: None,
+                through_multiplexer: false,
+            },
+            ControlRequest::RunCommand {
+                command: "echo".into(),
+                args: vec!["run".into()],
+                target: None,
+                through_multiplexer: false,
+            },
+            ControlRequest::RunCommandAndWait {
+                command: "echo wait".into(),
+                timeout_ms: 1000,
+                target: None,
+                through_multiplexer: false,
+            },
+        ]
+    }
+
+    /// #241: input that names no pane reaches no PTY, alone or in a batch;
+    /// named input, and reading without a target, still work.
+    #[test]
+    fn test_host_refuses_untargeted_input_before_any_pty() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = dir.path().join("sink");
+        let mut fixture = Fixture::new();
+        let pane = fixture.open(&shell_named(dir.path(), "reader"), SINK, &[&sink]);
+
+        for request in untargeted_inputs() {
+            let response = fixture.send(request.clone());
+            let ControlResponse::Error { code, message } = response else {
+                panic!("{request:?} was not refused: {response:?}");
+            };
+            assert_eq!(code, crate::control::common::TARGET_REQUIRED, "{message}");
+            assert!(
+                message.contains("--pane N") && message.contains("--focused"),
+                "{message}"
+            );
+        }
+        let batch = fixture.send(ControlRequest::Batch {
+            commands: vec![
+                send_text("batched-untargeted\n", None, false),
+                send_text("batched\n", Some(pane), false),
+            ],
+        });
+        let ControlResponse::Data(ControlData::BatchResults { results }) = batch else {
+            panic!("batch failed: {batch:?}");
+        };
+        assert!(
+            matches!(
+                results.as_slice(),
+                [
+                    ControlResponse::Error {
+                        code: crate::control::common::TARGET_REQUIRED,
+                        ..
+                    },
+                    ControlResponse::Ok
+                ]
+            ),
+            "{results:?}"
+        );
+        assert_eq!(
+            fixture.send(send_text("named\n", Some(pane), false)),
+            ControlResponse::Ok
+        );
+        fixture.await_sink(&sink, "batched\nnamed\n");
+
+        let read = fixture.send(ControlRequest::GetText {
+            include_scrollback: false,
+            scrollback_lines: None,
+            target: None,
+        });
+        assert!(
+            matches!(read, ControlResponse::Text { .. }),
+            "reading the focused pane needs no target: {read:?}"
+        );
+    }
+
+    /// #241: input stops at a tmux, screen or zellij client unless the
+    /// request asks to go through it; other programs are not refused.
+    #[test]
+    fn test_host_refuses_input_to_a_multiplexer_client_unless_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fixture = Fixture::new();
+        for name in ["tmux", "screen", "zellij"] {
+            let sink = dir.path().join(format!("{name}.sink"));
+            let pane = fixture.open(&shell_named(dir.path(), name), SINK, &[&sink]);
+            for request in [
+                send_text("stopped\n", Some(pane), false),
+                ControlRequest::RunCommand {
+                    command: "echo".into(),
+                    args: Vec::new(),
+                    target: Some(pane),
+                    through_multiplexer: false,
+                },
+            ] {
+                let response = fixture.send(request);
+                let ControlResponse::Error { code, message } = response else {
+                    panic!("input to {name} was not refused: {response:?}");
+                };
+                assert_eq!(
+                    code,
+                    crate::control::common::MULTIPLEXER_TARGET,
+                    "{message}"
+                );
+                assert!(
+                    message.contains(&format!("forwarded by {name}"))
+                        && message.contains("--through-multiplexer"),
+                    "{message}"
+                );
+            }
+            assert_eq!(
+                fixture.send(send_text("through\n", Some(pane), true)),
+                ControlResponse::Ok
+            );
+            fixture.await_sink(&sink, "through\n");
+        }
+
+        let sink = dir.path().join("sh.sink");
+        let pane = fixture.open(Path::new("/bin/sh"), SINK, &[&sink]);
+        assert_eq!(
+            fixture.send(send_text("plain\n", Some(pane), false)),
+            ControlResponse::Ok
+        );
+        fixture.await_sink(&sink, "plain\n");
     }
 }

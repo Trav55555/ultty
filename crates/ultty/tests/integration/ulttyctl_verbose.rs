@@ -33,7 +33,15 @@ fn test_ulttyctl_verbose_narrates_selection_request_and_reply_but_not_secrets() 
     });
 
     let output = Command::new(env!("CARGO_BIN_EXE_ulttyctl"))
-        .args(["--pid", &pid.to_string(), "-v", "send-text", "secret-xyz"])
+        .args([
+            "--pid",
+            &pid.to_string(),
+            "-v",
+            "--pane",
+            "1",
+            "send-text",
+            "secret-xyz",
+        ])
         .env("XDG_RUNTIME_DIR", runtime.path())
         .env_remove("ULTTY_PID")
         .env_remove("ULTTY_PANE")
@@ -55,7 +63,7 @@ fn test_ulttyctl_verbose_narrates_selection_request_and_reply_but_not_secrets() 
             "ulttyctl: auth token file {} (read)",
             endpoint.token.display()
         ),
-        "ulttyctl: request kind=send_text bytes=10 with_token=true".to_owned(),
+        "ulttyctl: request kind=send_text pane=1 bytes=10 with_token=true".to_owned(),
         "ulttyctl: response ok in ".to_owned(),
     ] {
         assert!(

@@ -5,6 +5,11 @@ use std::io;
 use crate::terminal_manager::TerminalId;
 
 const PANE_NOT_FOUND: u16 = 6;
+/// Input to a PTY that names no pane (#241).
+pub const TARGET_REQUIRED: u16 = 16;
+/// Input to a pane whose foreground program is a terminal multiplexer
+/// client, without `through_multiplexer` (#241).
+pub const MULTIPLEXER_TARGET: u16 = 17;
 const INPUT_UNAVAILABLE: u16 = 11;
 const INPUT_QUEUE_FULL: u16 = 12;
 const INPUT_FAILED: u16 = 13;
@@ -61,22 +66,80 @@ pub fn resolve_control_target(
         })
 }
 
+/// The terminal multiplexers whose client, running in a pane, forwards that
+/// pane's input to a pane of its own that Ultty cannot see.
+const MULTIPLEXERS: [&str; 3] = ["tmux", "screen", "zellij"];
+
+/// The multiplexer `program` (a process name, as `ps -o comm` shows it) is
+/// a client of, if any. The name must match exactly, case and all, or be
+/// that name followed by `: ` and a role: tmux names its processes
+/// `tmux: client` and `tmux: server`.
+pub fn multiplexer_client(program: &str) -> Option<&'static str> {
+    MULTIPLEXERS.into_iter().find(|name| {
+        program
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(": "))
+    })
+}
+
+/// The refusal for input that names no pane.
+fn target_required(kind: &str) -> ultty_protocol::control::ControlResponse {
+    ultty_protocol::control::ControlResponse::Error {
+        code: TARGET_REQUIRED,
+        message: format!(
+            "{kind} needs an explicit target pane: name a pane with --pane N \
+             (ulttyctl panes lists them) or pass --focused (JSON: set \"target\")"
+        ),
+    }
+}
+
+/// The refusal for input to a pane whose foreground program is `multiplexer`.
+fn multiplexer_target(
+    pane: TerminalId,
+    multiplexer: &str,
+) -> ultty_protocol::control::ControlResponse {
+    ultty_protocol::control::ControlResponse::Error {
+        code: MULTIPLEXER_TARGET,
+        message: format!(
+            "Pane {} runs a {multiplexer} client: the input would be forwarded by \
+             {multiplexer} to its own active pane; pass --through-multiplexer to send \
+             anyway (JSON: \"through_multiplexer\": true)",
+            pane.raw()
+        ),
+    }
+}
+
 /// Resolve the pane `request` acts on, once, the way its handler would;
 /// record it in the audit trail with the pane's foreground program; and pin
 /// it into the request, so the handler acts on exactly that pane even when
 /// the request named none. Requests without a pane target, or whose target
 /// does not resolve, are left alone for the handler to answer.
+///
+/// Input to a PTY ([`ControlRequest::pty_input`]) is refused here, before
+/// it reaches one, when it names no pane, or when the pane's foreground
+/// program is a terminal multiplexer client and the request did not ask to
+/// go through it (#241). Both refusals are recorded in the audit trail.
+///
+/// [`ControlRequest::pty_input`]: ultty_protocol::control::ControlRequest::pty_input
 pub fn pin_control_target(
     server: &super::ControlServer,
     client_key: usize,
     manager: &crate::terminal_manager::TerminalManager,
     request: &mut ultty_protocol::control::ControlRequest,
-) {
-    use super::audit::{pane_slot, PaneSlot, RequestSummary, ResolvedTarget, TargetChoice};
+) -> Result<(), ultty_protocol::control::ControlResponse> {
+    use super::audit::{
+        pane_slot, unwrap_envelopes, InputRefusal, PaneSlot, RequestSummary, ResolvedTarget,
+        TargetChoice,
+    };
 
     let summary = RequestSummary::of(request);
+    let input = unwrap_envelopes(request).0.pty_input();
+    if input.is_some_and(|input| input.target.is_none()) {
+        server.audit_input_refused(client_key, summary.kind, InputRefusal::TargetRequired);
+        return Err(target_required(summary.kind));
+    }
     let (choice, pane) = match pane_slot(request) {
-        None => return,
+        None => return Ok(()),
         Some(PaneSlot::Optional(slot)) => {
             let choice = if slot.is_some() {
                 TargetChoice::Explicit
@@ -84,19 +147,34 @@ pub fn pin_control_target(
                 TargetChoice::Focused
             };
             let Ok(pane) = resolve_control_target(manager, *slot) else {
-                return;
+                return Ok(());
             };
             *slot = Some(pane.raw() as u64);
             (choice, pane)
         }
         Some(PaneSlot::Required(id)) => match resolve_control_target(manager, Some(id)) {
             Ok(pane) => (TargetChoice::Explicit, pane),
-            Err(_) => return,
+            Err(_) => return Ok(()),
         },
     };
     let foreground = manager
         .terminal(pane)
         .and_then(|terminal| terminal.event_loop.input_recipient_name());
+    if let (Some(input), Some(program)) = (input, foreground.as_deref()) {
+        if let Some(multiplexer) =
+            multiplexer_client(program).filter(|_| !input.through_multiplexer)
+        {
+            server.audit_input_refused(
+                client_key,
+                summary.kind,
+                InputRefusal::Multiplexer {
+                    pane: pane.raw() as u64,
+                    program,
+                },
+            );
+            return Err(multiplexer_target(pane, multiplexer));
+        }
+    }
     server.audit_target(
         client_key,
         &ResolvedTarget {
@@ -108,6 +186,7 @@ pub fn pin_control_target(
             foreground: foreground.as_deref(),
         },
     );
+    Ok(())
 }
 
 /// Every pane in every tab: tabs in order, each tab's panes in layout order.
@@ -637,4 +716,29 @@ pub fn image_placements(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::multiplexer_client;
+
+    #[test]
+    fn test_multiplexer_clients_match_by_exact_name_or_tmux_role() {
+        for (program, multiplexer) in [
+            ("tmux", Some("tmux")),
+            ("tmux: client", Some("tmux")),
+            ("tmux: server", Some("tmux")),
+            ("screen", Some("screen")),
+            ("zellij", Some("zellij")),
+            ("Tmux", None),
+            ("SCREEN", None),
+            ("tmuxinator", None),
+            ("screenfetch", None),
+            ("tmux:client", None),
+            ("sh", None),
+            ("", None),
+        ] {
+            assert_eq!(multiplexer_client(program), multiplexer, "{program:?}");
+        }
+    }
 }
