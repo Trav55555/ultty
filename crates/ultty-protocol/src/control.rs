@@ -143,24 +143,42 @@ pub enum ControlRequest {
 
     SendText {
         text: String,
-        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        /// Pane to type into (an id from `ListPanes`). Required: input
+        /// without one is refused (#241).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<u64>,
+        /// Send even when the pane's foreground program is a terminal
+        /// multiplexer client (tmux, screen, zellij), which forwards input
+        /// to a pane of its own that Ultty cannot see. Refused without it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        through_multiplexer: bool,
     },
 
     SendKey {
         key: Key,
         modifiers: Modifiers,
-        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        /// Pane to type into (an id from `ListPanes`). Required: input
+        /// without one is refused (#241).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<u64>,
+        /// Send even when the pane's foreground program is a terminal
+        /// multiplexer client (tmux, screen, zellij), which forwards input
+        /// to a pane of its own that Ultty cannot see. Refused without it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        through_multiplexer: bool,
     },
 
     SendRaw {
         data: Vec<u8>,
-        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        /// Pane to type into (an id from `ListPanes`). Required: input
+        /// without one is refused (#241).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<u64>,
+        /// Send even when the pane's foreground program is a terminal
+        /// multiplexer client (tmux, screen, zellij), which forwards input
+        /// to a pane of its own that Ultty cannot see. Refused without it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        through_multiplexer: bool,
     },
 
     NewTab {
@@ -235,9 +253,15 @@ pub enum ControlRequest {
     RunCommand {
         command: String,
         args: Vec<String>,
-        /// Pane to act on (an id from `ListPanes`); the focused pane when omitted.
+        /// Pane to type into (an id from `ListPanes`). Required: input
+        /// without one is refused (#241).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<u64>,
+        /// Send even when the pane's foreground program is a terminal
+        /// multiplexer client (tmux, screen, zellij), which forwards input
+        /// to a pane of its own that Ultty cannot see. Refused without it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        through_multiplexer: bool,
     },
 
     /// Inspect a direct child launched by NewTab or SplitPane. The returned
@@ -262,9 +286,15 @@ pub enum ControlRequest {
         command: String,
         /// Maximum wait duration; timing out does not cancel the command.
         timeout_ms: u64,
-        /// The focused pane when omitted.
+        /// Pane to type into (an id from `ListPanes`). Required: input
+        /// without one is refused (#241).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<u64>,
+        /// Send even when the pane's foreground program is a terminal
+        /// multiplexer client (tmux, screen, zellij), which forwards input
+        /// to a pane of its own that Ultty cannot see. Refused without it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        through_multiplexer: bool,
     },
 
     /// Open a pane next to `target` (the focused pane when omitted), running
@@ -530,6 +560,87 @@ pub enum ControlRequest {
     Ping,
 
     Version,
+}
+
+/// Where a request that writes to a pane's PTY sends its input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PtyInput {
+    /// The pane it names, if any.
+    pub target: Option<u64>,
+    /// Whether it may pass through a terminal multiplexer client.
+    pub through_multiplexer: bool,
+}
+
+impl ControlRequest {
+    /// The addressing of a request that writes to a pane's PTY
+    /// (`send_text`, `send_key`, `send_raw`, `run_command`,
+    /// `run_command_and_wait`). `None` for every other request, including
+    /// the `with_token` and `with_owner` wrappers themselves.
+    pub fn pty_input(&self) -> Option<PtyInput> {
+        match self {
+            Self::SendText {
+                target,
+                through_multiplexer,
+                ..
+            }
+            | Self::SendKey {
+                target,
+                through_multiplexer,
+                ..
+            }
+            | Self::SendRaw {
+                target,
+                through_multiplexer,
+                ..
+            }
+            | Self::RunCommand {
+                target,
+                through_multiplexer,
+                ..
+            }
+            | Self::RunCommandAndWait {
+                target,
+                through_multiplexer,
+                ..
+            } => Some(PtyInput {
+                target: *target,
+                through_multiplexer: *through_multiplexer,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Set whether this input request may pass through a terminal
+    /// multiplexer client. Returns false, changing nothing, for a request
+    /// that is not input ([`Self::pty_input`] is `None`).
+    pub fn set_through_multiplexer(&mut self, allowed: bool) -> bool {
+        match self {
+            Self::SendText {
+                through_multiplexer,
+                ..
+            }
+            | Self::SendKey {
+                through_multiplexer,
+                ..
+            }
+            | Self::SendRaw {
+                through_multiplexer,
+                ..
+            }
+            | Self::RunCommand {
+                through_multiplexer,
+                ..
+            }
+            | Self::RunCommandAndWait {
+                through_multiplexer,
+                ..
+            } => {
+                *through_multiplexer = allowed;
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 /// What a `WaitFor` request waits for.
@@ -1556,7 +1667,8 @@ mod tests {
             old,
             ControlRequest::SendText {
                 text: "hi".to_string(),
-                target: None
+                target: None,
+                through_multiplexer: false,
             }
         );
         let old: ControlRequest = serde_json::from_str(r#"{"type":"get_selection"}"#).unwrap();
@@ -1567,6 +1679,78 @@ mod tests {
         let targeted: ControlRequest =
             serde_json::from_str(r#"{"type":"get_selection","target":4}"#).unwrap();
         assert_eq!(targeted, ControlRequest::GetSelection { target: Some(4) });
+    }
+
+    /// `through_multiplexer` is additive: absent means false, and false is
+    /// not sent, so requests from older clients parse unchanged.
+    #[test]
+    fn through_multiplexer_is_optional_on_the_wire() {
+        let requests = [
+            ControlRequest::SendText {
+                text: "hi".to_string(),
+                target: Some(3),
+                through_multiplexer: true,
+            },
+            ControlRequest::SendKey {
+                key: Key::Enter,
+                modifiers: Modifiers::default(),
+                target: Some(3),
+                through_multiplexer: true,
+            },
+            ControlRequest::SendRaw {
+                data: vec![1],
+                target: Some(3),
+                through_multiplexer: true,
+            },
+            ControlRequest::RunCommand {
+                command: "ls".to_string(),
+                args: Vec::new(),
+                target: Some(3),
+                through_multiplexer: true,
+            },
+            ControlRequest::RunCommandAndWait {
+                command: "ls".to_string(),
+                timeout_ms: 5,
+                target: Some(3),
+                through_multiplexer: true,
+            },
+        ];
+        for request in requests {
+            let json = serde_json::to_string(&request).unwrap();
+            assert!(json.contains(r#""through_multiplexer":true"#), "{json}");
+            assert_eq!(
+                serde_json::from_str::<ControlRequest>(&json).unwrap(),
+                request
+            );
+            let mut plain = request.clone();
+            assert_eq!(
+                plain.pty_input(),
+                Some(PtyInput {
+                    target: Some(3),
+                    through_multiplexer: true
+                })
+            );
+            assert!(plain.set_through_multiplexer(false));
+            let json = serde_json::to_string(&plain).unwrap();
+            assert!(!json.contains("through_multiplexer"), "{json}");
+            assert_eq!(
+                serde_json::from_str::<ControlRequest>(&json).unwrap(),
+                plain
+            );
+        }
+        let old: ControlRequest =
+            serde_json::from_str(r#"{"type":"run_command","command":"ls","args":[],"target":2}"#)
+                .unwrap();
+        assert_eq!(
+            old.pty_input(),
+            Some(PtyInput {
+                target: Some(2),
+                through_multiplexer: false
+            })
+        );
+        let mut read = ControlRequest::GetSelection { target: Some(2) };
+        assert_eq!(read.pty_input(), None);
+        assert!(!read.set_through_multiplexer(true));
     }
 
     #[test]
@@ -1686,6 +1870,7 @@ mod tests {
                 command: "false".into(),
                 timeout_ms: 1000,
                 target: Some(4),
+                through_multiplexer: false,
             },
             ControlRequest::ProgramStatus { target: Some(4) },
             ControlRequest::WorkspaceSave { name: "dev".into() },

@@ -12,4 +12,5 @@ mod self_check;
 mod shell_integration;
 mod shutdown_signals;
 mod ulttui_layout;
+mod ulttyctl_targets;
 mod ulttyctl_verbose;

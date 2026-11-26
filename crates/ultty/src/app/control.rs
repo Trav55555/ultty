@@ -146,7 +146,10 @@ impl App {
                     _ => break,
                 }
             }
-            self.shared.pin_control_target(client_key, &mut request);
+            if let Err(response) = self.shared.pin_control_target(client_key, &mut request) {
+                responses.push((client_key, response));
+                continue;
+            }
 
             if let ControlRequest::SubscribeV2 { ref cursor, target } = request {
                 if let Some(response) = self.shared.auth_error_for_request(client_key, &request) {
@@ -804,7 +807,7 @@ impl App {
                 ControlResponse::Data(ControlData::Selection { text })
             }
 
-            ControlRequest::SendText { text, target } => {
+            ControlRequest::SendText { text, target, .. } => {
                 let pane = match resolve_control_target(&self.shared.runtime.manager, target) {
                     Ok(pane) => pane,
                     Err(response) => return response,
@@ -826,6 +829,7 @@ impl App {
                 key,
                 modifiers,
                 target,
+                ..
             } => {
                 let pane = match resolve_control_target(&self.shared.runtime.manager, target) {
                     Ok(pane) => pane,
@@ -844,7 +848,7 @@ impl App {
                 self.shared.forward_key_to_pty(pane, &key, modifiers)
             }
 
-            ControlRequest::SendRaw { data, target } => {
+            ControlRequest::SendRaw { data, target, .. } => {
                 let pane = match resolve_control_target(&self.shared.runtime.manager, target) {
                     Ok(pane) => pane,
                     Err(response) => return response,
@@ -1043,6 +1047,7 @@ impl App {
                 command,
                 args,
                 target,
+                ..
             } => {
                 let pane = match resolve_control_target(&self.shared.runtime.manager, target) {
                     Ok(pane) => pane,
@@ -1349,10 +1354,17 @@ impl App {
             ControlRequest::Batch { commands } => {
                 let results: Vec<ControlResponse> = commands
                     .into_iter()
-                    .map(|mut cmd| {
-                        self.shared.pin_control_target(client_key, &mut cmd);
-                        self.process_control_request(client_key, cmd, event_loop, should_exit)
-                    })
+                    .map(
+                        |mut cmd| match self.shared.pin_control_target(client_key, &mut cmd) {
+                            Ok(()) => self.process_control_request(
+                                client_key,
+                                cmd,
+                                event_loop,
+                                should_exit,
+                            ),
+                            Err(response) => response,
+                        },
+                    )
                     .collect();
                 ControlResponse::Data(ControlData::BatchResults { results })
             }
@@ -1868,6 +1880,7 @@ impl ProcessState {
             command,
             timeout_ms,
             target,
+            ..
         } = request
         else {
             return Some(ControlResponse::Error {
@@ -2024,18 +2037,20 @@ impl ProcessState {
         input_acceptance(terminal.event_loop.send_input(&bytes))
     }
 
-    /// Resolve, record and pin the pane an authorised request acts on; see
-    /// [`pin_control_target`].
+    /// Resolve, record and pin the pane an authorised request acts on, or
+    /// refuse misdirected input; see [`pin_control_target`]. An
+    /// unauthorised request passes untouched, for its handler to refuse.
     fn pin_control_target(
         &self,
         client_key: usize,
         request: &mut ultty_protocol::control::ControlRequest,
-    ) {
+    ) -> Result<(), ultty_protocol::control::ControlResponse> {
         if self.auth_error_for_request(client_key, request).is_some() {
-            return;
+            return Ok(());
         }
-        if let Some(server) = self.control_server.as_ref() {
-            pin_control_target(server, client_key, &self.runtime.manager, request);
+        match self.control_server.as_ref() {
+            Some(server) => pin_control_target(server, client_key, &self.runtime.manager, request),
+            None => Ok(()),
         }
     }
 
@@ -2722,6 +2737,7 @@ mod tests {
         assert!(control_request_requires_auth(&ControlRequest::SendText {
             text: "hello".to_string(),
             target: None,
+            through_multiplexer: false,
         }));
         assert!(control_request_requires_auth(&ControlRequest::NewTab {
             title: None,
@@ -2759,6 +2775,7 @@ mod tests {
             command: "make".to_string(),
             args: vec!["test".to_string()],
             target: None,
+            through_multiplexer: false,
         }));
         assert!(control_request_requires_auth(&ControlRequest::SplitPane {
             direction: ultty_protocol::control::SplitDirection::Right,

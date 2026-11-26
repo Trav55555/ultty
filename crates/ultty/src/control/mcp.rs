@@ -31,7 +31,10 @@ const DEFAULT_TAIL_LINES: u64 = 200;
 
 const INSTRUCTIONS: &str = "Drive the Ultty terminal. Every pane has a stable id \
 from ultty_list_panes; tools that act on a pane take `pane` and use the focused \
-pane without it. This MCP connection stays pinned to its initial owner epoch and token. \
+pane without it, except the input tools (ultty_type_text, ultty_send_key, \
+ultty_run_command, ultty_run_and_wait), which require it and refuse a pane running \
+a tmux, screen or zellij client unless through_multiplexer is true. \
+This MCP connection stays pinned to its initial owner epoch and token. \
 ultty_run_command types shell text and Enter; its success means input accepted, \
 not execution or completion. Use ultty_new_tab or ultty_split with args to launch \
 a program with exact argument boundaries; args/cwd require command. Use ultty_wait_job \
@@ -190,7 +193,8 @@ impl McpServer<'_, '_> {
             }
             "ultty_type_text" => self.request(ControlRequest::SendText {
                 text: required_str(args, "text")?.to_string(),
-                target: pane,
+                target: Some(input_pane(pane)?),
+                through_multiplexer: optional_bool(args, "through_multiplexer")?,
             })?,
             "ultty_send_key" => {
                 let name = required_str(args, "key")?;
@@ -199,7 +203,8 @@ impl McpServer<'_, '_> {
                 self.request(ControlRequest::SendKey {
                     key,
                     modifiers,
-                    target: pane,
+                    target: Some(input_pane(pane)?),
+                    through_multiplexer: optional_bool(args, "through_multiplexer")?,
                 })?
             }
             "ultty_invoke_action" => {
@@ -227,12 +232,14 @@ impl McpServer<'_, '_> {
             "ultty_run_command" => self.request(ControlRequest::RunCommand {
                 command: required_str(args, "command")?.to_string(),
                 args: Vec::new(),
-                target: pane,
+                target: Some(input_pane(pane)?),
+                through_multiplexer: optional_bool(args, "through_multiplexer")?,
             })?,
             "ultty_run_and_wait" => self.request(ControlRequest::RunCommandAndWait {
                 command: required_str(args, "command")?.to_string(),
                 timeout_ms: optional_u64(args, "timeout_ms")?.unwrap_or(DEFAULT_WAIT_MS),
-                target: pane,
+                target: Some(input_pane(pane)?),
+                through_multiplexer: optional_bool(args, "through_multiplexer")?,
             })?,
             "ultty_program_status" => {
                 self.request(ControlRequest::ProgramStatus { target: pane })?
@@ -475,6 +482,15 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+/// The pane an input tool types into: required, never the focused pane by
+/// default (#241).
+fn input_pane(pane: Option<u64>) -> Result<u64, String> {
+    pane.ok_or_else(|| {
+        "pane is required for input: ultty_list_panes lists them, and marks the focused one"
+            .to_string()
+    })
+}
+
 fn required_str<'a>(args: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
     optional_str(args, key)?.ok_or_else(|| format!("missing argument: {key}"))
 }
@@ -525,6 +541,26 @@ fn pane_property() -> Value {
     })
 }
 
+/// The `pane` of a tool that types into a PTY: required.
+fn input_pane_property() -> Value {
+    json!({
+        "type": "integer",
+        "minimum": 0,
+        "description": "Pane id from ultty_list_panes to type into. Required: \
+                        input never defaults to the focused pane.",
+    })
+}
+
+/// The opt-in for input to a pane whose foreground program is a multiplexer.
+fn through_multiplexer_property() -> Value {
+    json!({
+        "type": "boolean",
+        "description": "Send even though the pane runs a tmux, screen or zellij \
+                        client, which forwards the input to its own active pane. \
+                        Refused without it.",
+    })
+}
+
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
         "name": name,
@@ -566,19 +602,24 @@ fn tools() -> Vec<Value> {
         tool(
             "ultty_type_text",
             "Type text into a pane as if from the keyboard. Does not press Enter.",
-            json!({ "pane": pane_property(), "text": { "type": "string" } }),
-            &["text"],
+            json!({
+                "pane": input_pane_property(),
+                "text": { "type": "string" },
+                "through_multiplexer": through_multiplexer_property(),
+            }),
+            &["pane", "text"],
         ),
         tool(
             "ultty_send_key",
             "Press a key in a pane: enter, tab, escape, backspace, up, down, left, right, \
              home, end, pageup, pagedown, f1-f12, space or a single character.",
             json!({
-                "pane": pane_property(),
+                "pane": input_pane_property(),
                 "key": { "type": "string" },
                 "modifiers": { "type": "string", "description": "Any of ctrl, alt, shift, meta, e.g. \"ctrl+shift\"." },
+                "through_multiplexer": through_multiplexer_property(),
             }),
-            &["key"],
+            &["pane", "key"],
         ),
         tool(
             "ultty_invoke_action",
@@ -598,8 +639,12 @@ fn tools() -> Vec<Value> {
             "Type shell text into the foreground PTY and press Enter. The program \
              there must be a shell. Success means input accepted, not completion. \
              Use ultty_new_tab or ultty_split for argv-preserving process launch.",
-            json!({ "pane": pane_property(), "command": { "type": "string" } }),
-            &["command"],
+            json!({
+                "pane": input_pane_property(),
+                "command": { "type": "string" },
+                "through_multiplexer": through_multiplexer_property(),
+            }),
+            &["pane", "command"],
         ),
         tool(
             "ultty_wait",
@@ -624,11 +669,12 @@ fn tools() -> Vec<Value> {
              edited prompt. Timeout does not cancel the command. Shell marks are \
              observed evidence, not proof of what arbitrary PTY input executed.",
             json!({
-                "pane": pane_property(),
+                "pane": input_pane_property(),
                 "command": { "type": "string" },
                 "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+                "through_multiplexer": through_multiplexer_property(),
             }),
-            &["command"],
+            &["pane", "command"],
         ),
         tool(
             "ultty_program_status",
@@ -842,6 +888,44 @@ mod tests {
         }
     }
 
+    /// #241: input tools name their pane; none falls to the focused pane.
+    #[test]
+    fn test_input_tools_require_a_pane_and_carry_the_multiplexer_opt_in() {
+        let tools = [
+            ("ultty_type_text", json!({"text": "hi"})),
+            ("ultty_send_key", json!({"key": "enter"})),
+            ("ultty_run_command", json!({"command": "ls"})),
+            ("ultty_run_and_wait", json!({"command": "ls"})),
+        ];
+        let listed = super::tools();
+        for (name, arguments) in &tools {
+            let schema = listed.iter().find(|tool| tool["name"] == *name).unwrap();
+            let required = schema["inputSchema"]["required"].as_array().unwrap();
+            assert!(required.contains(&json!("pane")), "{name}");
+            assert_eq!(
+                schema["inputSchema"]["properties"]["through_multiplexer"]["type"], "boolean",
+                "{name}"
+            );
+            let (lines, sent) = exchange(&[call(1, name, arguments.clone())], |_| {
+                panic!("{name} without a pane reached dispatch")
+            });
+            assert!(sent.is_empty(), "{name}");
+            assert_eq!(lines[0]["result"]["isError"], true, "{name}");
+            let mut targeted = arguments.clone();
+            targeted["pane"] = json!(6);
+            targeted["through_multiplexer"] = json!(true);
+            let (_, sent) = exchange(&[call(1, name, targeted)], |_| ControlResponse::Ok);
+            assert_eq!(
+                sent[0].pty_input(),
+                Some(ultty_protocol::control::PtyInput {
+                    target: Some(6),
+                    through_multiplexer: true
+                }),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn test_job_tools_preserve_job_identity_and_timeout() {
         let (_, sent) = exchange(
@@ -930,7 +1014,8 @@ mod tests {
             vec![ControlRequest::RunCommandAndWait {
                 command: "false".to_string(),
                 timeout_ms: 50,
-                target: Some(3)
+                target: Some(3),
+                through_multiplexer: false,
             }]
         );
         assert_eq!(lines[0]["result"]["isError"], true);
@@ -1051,6 +1136,7 @@ mod tests {
                     command: "make test".to_string(),
                     args: Vec::new(),
                     target: Some(4),
+                    through_multiplexer: false,
                 },
                 ControlRequest::GetText {
                     include_scrollback: true,

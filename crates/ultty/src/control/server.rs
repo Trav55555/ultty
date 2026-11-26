@@ -916,6 +916,19 @@ impl ControlServer {
         }
     }
 
+    /// Record in the audit trail that client `client_key`'s input request
+    /// of `kind` was refused, and why.
+    pub fn audit_input_refused(
+        &self,
+        client_key: usize,
+        kind: &str,
+        refusal: audit::InputRefusal<'_>,
+    ) {
+        if let Some(client) = self.clients.get(&client_key) {
+            audit::input_refused(self.transport, client_key, &client.peer, kind, refusal);
+        }
+    }
+
     pub fn set_client_authenticated(&mut self, client_key: usize, authenticated: bool) {
         if let Some(client) = self.clients.get_mut(&client_key) {
             client.authenticated = authenticated;
@@ -1093,7 +1106,11 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
             if text.is_empty() {
                 None
             } else {
-                Some(ControlRequest::SendText { text, target: None })
+                Some(ControlRequest::SendText {
+                    text,
+                    target: None,
+                    through_multiplexer: false,
+                })
             }
         }
         "send-key" => {
@@ -1104,6 +1121,7 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
                 key,
                 modifiers,
                 target: None,
+                through_multiplexer: false,
             })
         }
         "new-tab" => {
@@ -1186,7 +1204,11 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
         "send-raw" => {
             let hex_str: String = parts.collect::<Vec<_>>().join("");
             let data = hex_decode(&hex_str)?;
-            Some(ControlRequest::SendRaw { data, target: None })
+            Some(ControlRequest::SendRaw {
+                data,
+                target: None,
+                through_multiplexer: false,
+            })
         }
         "run" => {
             let command = parts.next()?.to_string();
@@ -1195,6 +1217,7 @@ fn parse_text_command(text: &str) -> Option<ControlRequest> {
                 command,
                 args,
                 target: None,
+                through_multiplexer: false,
             })
         }
         "resize" => {
@@ -1827,6 +1850,7 @@ mod tests {
             Some(ControlRequest::SendText {
                 text: "hello world".to_string(),
                 target: None,
+                through_multiplexer: false,
             })
         );
     }
@@ -1838,6 +1862,7 @@ mod tests {
             Some(ControlRequest::SendRaw {
                 data: vec![0x1b, 0x5b, 0x41],
                 target: None,
+                through_multiplexer: false,
             })
         );
     }
@@ -1928,6 +1953,7 @@ mod tests {
                 request: Box::new(ControlRequest::SendText {
                     text: "hello world".to_string(),
                     target: None,
+                    through_multiplexer: false,
                 }),
             }
         );
@@ -2316,6 +2342,7 @@ mod tests {
             ControlRequest::SendText {
                 text: "hi".to_string(),
                 target: None,
+                through_multiplexer: false,
             }
         );
     }
@@ -2701,6 +2728,7 @@ mod tests {
             .write_all(&json_request(ControlRequest::SendText {
                 text: text.clone(),
                 target: None,
+                through_multiplexer: false,
             }))
             .unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
@@ -2708,7 +2736,11 @@ mod tests {
         let pending = poll_until_pending(&mut server);
         assert_eq!(
             pending[0].1,
-            ControlRequest::SendText { text, target: None }
+            ControlRequest::SendText {
+                text,
+                target: None,
+                through_multiplexer: false
+            }
         );
         server.send_response(pending[0].0, &ControlResponse::Ok);
         assert_eq!(
@@ -2736,6 +2768,7 @@ mod tests {
             ControlRequest::SendText {
                 text: "hello".to_string(),
                 target: None,
+                through_multiplexer: false,
             }
         );
     }
@@ -2844,9 +2877,18 @@ mod tests {
                 ControlRequest::WithToken { token, .. }
                     if server.authenticate(key, token).unwrap() =>
                 {
-                    super::super::common::pin_control_target(server, key, manager, &mut request);
-                    accepted = Some(request);
-                    ControlResponse::Data(ControlData::Pong)
+                    match super::super::common::pin_control_target(
+                        server,
+                        key,
+                        manager,
+                        &mut request,
+                    ) {
+                        Ok(()) => {
+                            accepted = Some(request);
+                            ControlResponse::Data(ControlData::Pong)
+                        }
+                        Err(refusal) => refusal,
+                    }
                 }
                 _ => ControlResponse::Error {
                     code: 403,
@@ -2865,7 +2907,7 @@ mod tests {
         match request {
             Some(ControlRequest::WithToken { request, .. }) => match *request {
                 ControlRequest::SendText { target, .. }
-                | ControlRequest::RunCommand { target, .. } => target,
+                | ControlRequest::GetText { target, .. } => target,
                 other => panic!("unexpected request {other:?}"),
             },
             other => panic!("unexpected request {other:?}"),
@@ -2925,6 +2967,7 @@ mod tests {
                 request: Box::new(ControlRequest::SendText {
                     text: "secret-xyz-typed".into(),
                     target: Some(other),
+                    through_multiplexer: false,
                 }),
             });
             let (accepted, pinned) = exchange_with_auth(&mut server, &manager, &typed);
@@ -2932,8 +2975,9 @@ mod tests {
             assert_eq!(pinned_target(pinned), Some(other));
             let untargeted = json_request(ControlRequest::WithToken {
                 token: token.clone(),
-                request: Box::new(ControlRequest::SendText {
-                    text: "secret-xyz-untargeted".into(),
+                request: Box::new(ControlRequest::GetText {
+                    include_scrollback: false,
+                    scrollback_lines: None,
                     target: None,
                 }),
             });
@@ -2949,9 +2993,12 @@ mod tests {
                     command: "export API_KEY=secret-xyz-command".into(),
                     args: Vec::new(),
                     target: None,
+                    through_multiplexer: false,
                 }),
             });
-            exchange_with_auth(&mut server, &manager, &run);
+            let (refused, pinned) = exchange_with_auth(&mut server, &manager, &run);
+            assert!(refused.contains("\"code\":16"), "{refused}");
+            assert!(pinned.is_none(), "untargeted input is refused, not pinned");
             let ping = json_request(ControlRequest::WithToken {
                 token: token.clone(),
                 request: Box::new(ControlRequest::Ping),
@@ -3015,30 +3062,29 @@ mod tests {
             typed.contains(" INFO ") && typed.contains("transport=local"),
             "{typed}"
         );
-        assert!(line_with("kind=send_text bytes=16 with_token=true").contains(" INFO "));
         assert!(line_with("kind=run_command bytes=33 with_token=true").contains(" INFO "));
         let explicit = line_with(&format!(
             "control target kind=send_text target=explicit pane={other} fg="
         ));
         assert!(explicit.contains(" INFO "), "{explicit}");
         let untargeted = line_with(&format!(
-            "control target kind=send_text target=focused pane={focused} fg="
+            "control target kind=get_text target=focused pane={focused} fg="
         ));
         assert!(untargeted.contains(" INFO "), "{untargeted}");
         assert!(
             !untargeted.contains("fg=-"),
             "the focused shell's name is recorded:\n{untargeted}"
         );
-        line_with(&format!(
-            "control target kind=run_command target=focused pane={focused} fg="
-        ));
+        let refused = line_with("control input refused reason=target_required kind=run_command");
+        assert!(refused.contains(" WARN "), "{refused}");
+        line_with("control request refused code=16");
         assert_eq!(
             lines
                 .iter()
                 .filter(|line| line.contains("control target"))
                 .count(),
-            3,
-            "no target line for the refused request or the ping:\n{log}"
+            2,
+            "no target line for the refused requests or the ping:\n{log}"
         );
         assert!(
             !log.contains("secret-xyz"),

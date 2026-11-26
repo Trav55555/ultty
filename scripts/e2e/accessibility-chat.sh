@@ -126,7 +126,7 @@ ctl wait-for --quiet 500 --timeout 30000 >/dev/null || fail "the shell never set
 /usr/bin/python3 -I scripts/e2e/atspi_terminal.py "$ultty_pid" --timeout 30 >/dev/null ||
     fail "no terminal object on the AT-SPI bus"
 
-ctl send-text "exec $(printf %q "$CHAT") 2>$(printf %q "$out/chat.log")"$'\r' >/dev/null ||
+ctl --focused send-text "exec $(printf %q "$CHAT") 2>$(printf %q "$out/chat.log")"$'\r' >/dev/null ||
     fail "ulttyctl send-text failed"
 # The transcript is a polite live log, the input is named.
 semantics() {
@@ -158,9 +158,9 @@ converse() {
     local key i
     for ((i = 0; i < ${#message}; i++)); do
         key=${message:i:1}
-        ctl send-key "$key" >/dev/null || fail "ulttyctl send-key failed"
+        ctl --focused send-key "$key" >/dev/null || fail "ulttyctl send-key failed"
     done
-    ctl send-key enter >/dev/null || fail "ulttyctl send-key failed"
+    ctl --focused send-key enter >/dev/null || fail "ulttyctl send-key failed"
     # While the reply streams, it is a polite log of its own. Polled as
     # fast as ulttyctl answers, for at most 10 s (the reply takes 40 ms a
     # word; the markdown one about 1.5 s).

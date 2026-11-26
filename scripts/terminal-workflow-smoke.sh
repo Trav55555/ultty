@@ -23,7 +23,7 @@ initial_tab_count() {
 START_TAB_COUNT="$(initial_tab_count)"
 
 cleanup() {
-  "$ULTTYCTL" send-key c ctrl >/dev/null 2>&1 || true
+  "$ULTTYCTL" --focused send-key c ctrl >/dev/null 2>&1 || true
   while [[ "$(initial_tab_count)" -gt "$START_TAB_COUNT" ]]; do
     "$ULTTYCTL" close-tab >/dev/null 2>&1 || break
   done

@@ -130,7 +130,7 @@ listener_pid=$!
 for _ in $(seq 100); do [ -e "$out/listening" ] && break; sleep 0.1; done
 [ -e "$out/listening" ] || fail "the announcement listener did not start"
 
-ctl send-text "exec $(printf %q "$LIVE_REGION") 12 30 2>$(printf %q "$out/live-region.log")"$'\r' >/dev/null ||
+ctl --focused send-text "exec $(printf %q "$LIVE_REGION") 12 30 2>$(printf %q "$out/live-region.log")"$'\r' >/dev/null ||
     fail "ulttyctl send-text failed"
 wait "$listener_pid" || fail "no announcements within 60 s: $(cat "$out/listener.log")"
 unset listener_pid

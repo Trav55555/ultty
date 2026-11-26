@@ -28,11 +28,46 @@ and owner epoch for every subsequent call. It fails against older control schema
 restart the MCP process explicitly to choose another owner. Separate invocations
 of the CLI are separate discoveries unless a custom client pins `with_owner`.
 
+## Targets
+
+A request that reads or acts on a pane names it with `target` (an id from
+`list_panes`); a read without one, such as `get_text` or `search`, uses the
+focused pane. Input does not (#241):
+
+- `send_text`, `send_key`, `send_raw`, `run_command` and
+  `run_command_and_wait` without a `target` are refused with code 16
+  (`TARGET_REQUIRED`), and so is each such command inside a `batch`.
+  Nothing reaches a PTY. `ulttyctl` refuses the same commands before
+  connecting unless they carry `--pane <id>` or `--focused`; `--focused`
+  asks `list_panes` for the focused pane and sends its id, so the request on
+  the wire always names one. `ulttyctl` never fills the target in from
+  `ULTTY_PANE`, which names the pane ulttyctl itself runs in.
+- Input to a pane whose foreground program is a terminal multiplexer client
+  (process name `tmux`, `screen` or `zellij`, exactly, or tmux's own
+  `tmux: client`) is refused with code 17 (`MULTIPLEXER_TARGET`): the client
+  would forward it to its own active pane, which Ultty cannot see. Set
+  `through_multiplexer: true` on the request (`ulttyctl
+  --through-multiplexer`, MCP `through_multiplexer`) to send it anyway.
+
+Why: every process started inside Ultty inherits `ULTTY_SOCKET` and can read
+the token, so an untargeted request typed into whatever pane had focus,
+usually the one the user was working in. In the incident behind #241 a test
+suite's `ulttyctl send-text` reached a tmux client in the focused pane, and
+tmux delivered it to a live agent prompt in its own active pane. A target
+stops at the multiplexer boundary: Ultty knows the pane hosting the tmux
+client, not which tmux pane is active.
+
+`through_multiplexer` is an optional field (default `false`, omitted when
+false), so requests from older clients parse unchanged; they are refused
+only where the rules above apply. Both refusals are recorded in the [audit
+log](#audit-log) at WARN.
+
 ## Input and completion
 
 `send_text`, `send_key`, `send_raw` and legacy `run_command` acknowledge queue
 acceptance. Missing/closed input returns code 11, full queues code 12, other input
-failure code 13, and unsupported input code 4. Native fan-out failure may indicate
+failure code 13, and unsupported input code 4; a missing target code 16 and a
+multiplexer target code 17 ([Targets](#targets)). Native fan-out failure may indicate
 partial delivery: retries may duplicate input in earlier recipients.
 
 `run_command` is shell text. Its `args` are joined with spaces without escaping;
@@ -222,6 +257,10 @@ pid=4242 2026-11-25T10:00:00.000020Z  INFO ultty::audit: control authentication 
   captured as `window=` and that window's focused pane.
 - **Authentication**: success, or failure at WARN with
   `reason=wrong_token` or `reason=token_unavailable`.
+- **Input refused** (WARN): input stopped before any PTY ([Targets](#targets)),
+  with why: `control input refused reason=target_required kind=send_text`,
+  or `reason=multiplexer kind=send_text pane=7 fg=tmux:?client` (the space
+  in tmux's process name shows as `?`).
 - **Refusal**: every error reply, with its `code`; 403 at WARN.
 
 Status queries (`ping`, `version`, `describe`, `get_info`, `list_windows`,

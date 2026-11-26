@@ -48,13 +48,13 @@ fn counter_app_button_click_via_ulttyctl() {
         panic!("ulttyctl ping failed: {pong:?}");
     }
 
-    ulttyctl(&["send-text", "cargo run -p counter-app"]);
-    ulttyctl(&["send-key", "enter"]);
+    ulttyctl(&["--focused", "send-text", "cargo run -p counter-app"]);
+    ulttyctl(&["--focused", "send-key", "enter"]);
     thread::sleep(Duration::from_secs(5));
 
-    ulttyctl(&["send-key", "tab"]);
+    ulttyctl(&["--focused", "send-key", "tab"]);
     thread::sleep(Duration::from_millis(200));
-    ulttyctl(&["send-key", "enter"]);
+    ulttyctl(&["--focused", "send-key", "enter"]);
     thread::sleep(Duration::from_millis(500));
 
     let text = ulttyctl(&["text"]).unwrap_or_default();

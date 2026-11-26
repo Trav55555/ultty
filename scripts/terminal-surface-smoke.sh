@@ -38,8 +38,8 @@ normalize_tabs() {
 }
 
 send_line() {
-  "$ULTTYCTL" send-text "$1" >/dev/null
-  "$ULTTYCTL" send-key enter >/dev/null
+  "$ULTTYCTL" --focused send-text "$1" >/dev/null
+  "$ULTTYCTL" --focused send-key enter >/dev/null
   sleep 0.2
 }
 

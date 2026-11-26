@@ -31,6 +31,10 @@ ulttyctl --pane "$pane" text | grep -Eq '^│ *1 *│' || echo "wrong count"
 
 - **Give `new-tab` an absolute path.** A new tab does not start in your
   current directory.
+- **Name the pane you type into.** `send-text`, `send-key`, `send-raw`,
+  `run` and `run-wait` refuse to run without `--pane <id>` or `--focused`,
+  and refuse a pane running a tmux, screen or zellij client unless you add
+  `--through-multiplexer` ([Targets](CONTROL_PROTOCOL.md#targets)).
 - **Wait for something, never `sleep`.** `wait-for <text>` returns as soon
   as the text is on screen or in scrollback; `wait-for --quiet <ms>` returns
   once the pane has been silent that long. Both fail (exit 1) at

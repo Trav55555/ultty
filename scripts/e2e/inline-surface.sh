@@ -115,8 +115,8 @@ shot() {
 # before `seq 1 200` prints under it; sh -c keeps job-control chatter and
 # prompts out of the text. The client's stderr goes to a log.
 # Once `close` exists the client closes the card and exits.
-"$ULTTYCTL" send-text "sh -c 'seq 1 5; $client 60 $out/close 2>$out/client.log & while [ ! -e $out/go ]; do sleep 0.05; done; seq 1 200; wait'" >/dev/null
-"$ULTTYCTL" send-key enter >/dev/null
+"$ULTTYCTL" --focused send-text "sh -c 'seq 1 5; $client 60 $out/close 2>$out/client.log & while [ ! -e $out/go ]; do sleep 0.05; done; seq 1 200; wait'" >/dev/null
+"$ULTTYCTL" --focused send-key enter >/dev/null
 
 wait_for_state "placed at line"
 line=$(surface_line | sed -n 's/.* at line \([0-9]*\))$/\1/p')

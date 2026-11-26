@@ -65,7 +65,7 @@ ctl screenshot "$OUT_DIR/hello-native.png" >/dev/null
 assert_png "$OUT_DIR/hello-native.png"
 scripts/analyze-native-richtext-screenshot.py "$OUT_DIR/hello-native.png"
 
-ctl send-key c ctrl >/dev/null
+ctl --focused send-key c ctrl >/dev/null
 sleep 0.2
 normalize_tabs
 

@@ -19,7 +19,7 @@ run() { # name secs keys...
   $CTL new-tab "$DIR/traced.sh" "$DIR/$name.trace" "$secs" "$R/$name" >/dev/null
   sleep 1.5
   for k in "$@"; do
-    case $k in text:*) $CTL send-text "${k#text:}" >/dev/null ;; *) $CTL send-key $k >/dev/null ;; esac
+    case $k in text:*) $CTL --focused send-text "${k#text:}" >/dev/null ;; *) $CTL --focused send-key $k >/dev/null ;; esac
     sleep 0.25
   done
   $CTL wait-for TRACE-DONE --timeout $(( (secs + 5) * 1000 )) >/dev/null || echo "$name: no TRACE-DONE"

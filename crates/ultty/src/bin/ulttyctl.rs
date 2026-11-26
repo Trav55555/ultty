@@ -40,8 +40,10 @@ fn main() {
 
     let args: Vec<String> = args.into_iter().filter(|a| a != "--json").collect();
     let args = remove_flag_with_value(args, "--read-timeout");
-    let (args, verbose) = take_verbose_flag(args);
+    let (args, verbose) = take_switch(args, &["-v", "--verbose"]);
     let verbose = Verbose(verbose);
+    let (args, focused) = take_switch(args, &["--focused"]);
+    let (args, through_multiplexer) = take_switch(args, &["--through-multiplexer"]);
     let (args, pid_flag) = match take_pid_flag(args) {
         Ok(parsed) => parsed,
         Err(e) => {
@@ -77,6 +79,13 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let resolve_focused = match address_input(&mut request, focused, through_multiplexer) {
+        Ok(resolve_focused) => resolve_focused,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(2);
+        }
+    };
     let caller_pane = if pid_flag.is_none() { own_pane() } else { None };
     default_split_target(&mut request, caller_pane);
     default_window_target(&mut request, caller_pane);
@@ -92,7 +101,20 @@ fn main() {
         request,
         ControlRequest::Subscribe { .. } | ControlRequest::SubscribeV2 { .. }
     );
-    let request = with_auth_token(request, read_auth_token(&endpoint.token, verbose));
+    let token = read_auth_token(&endpoint.token, verbose);
+    if resolve_focused {
+        match focused_pane(&endpoint.socket, token.clone(), timeout_secs) {
+            Ok(pane) => {
+                verbose.note(format_args!("--focused: pane {pane}, as panes reports it"));
+                set_target(&mut request, pane).expect("input requests take a pane target");
+            }
+            Err(e) => {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+    let request = with_auth_token(request, token);
     verbose.request(&request);
     // Always ask for JSON so the reply can be parsed and the exit status set
     // from it; text output is rendered here with the server's formatter.
@@ -409,20 +431,77 @@ fn with_auth_token(request: ControlRequest, token: Option<String>) -> ControlReq
     }
 }
 
-/// Take `-v`/`--verbose` from among the global flags before the command.
-fn take_verbose_flag(mut args: Vec<String>) -> (Vec<String>, bool) {
+/// Global flags that take no value, which go before the command.
+const GLOBAL_SWITCHES: [&str; 4] = ["-v", "--verbose", "--focused", "--through-multiplexer"];
+
+/// Take the switch spelled any of `names` from among the global flags
+/// before the command, so text a command takes is never mistaken for it.
+fn take_switch(mut args: Vec<String>, names: &[&str]) -> (Vec<String>, bool) {
     let mut index = 0;
     while let Some(arg) = args.get(index) {
         match arg.as_str() {
-            "-v" | "--verbose" => {
+            name if names.contains(&name) => {
                 args.remove(index);
                 return (args, true);
             }
             "--pane" | "--window" | "--pid" => index += 2,
+            switch if GLOBAL_SWITCHES.contains(&switch) => index += 1,
             _ => break,
         }
     }
     (args, false)
+}
+
+/// What [`address_input`] says when input names no pane.
+const INPUT_TARGET_REQUIRED: &str = "input commands need a target pane: name a pane with \
+--pane N (ulttyctl panes lists them) or pass --focused";
+
+/// Check how `request` is addressed before anything is sent (#241): input
+/// commands must name their pane with `--pane`, or ask for the focused
+/// one with `--focused`; nothing defaults input to the focused pane, nor
+/// to `ULTTY_PANE`, which is ulttyctl's own pane. `--through-multiplexer`
+/// lets input pass a tmux, screen or zellij client. Returns whether the
+/// focused pane must be looked up and named.
+fn address_input(
+    request: &mut ControlRequest,
+    focused: bool,
+    through_multiplexer: bool,
+) -> Result<bool, String> {
+    if through_multiplexer && !request.set_through_multiplexer(true) {
+        return Err("--through-multiplexer only applies to input commands \
+            (send-text, send-key, send-raw, run, run-wait)"
+            .to_string());
+    }
+    let Some(input) = request.pty_input() else {
+        return Ok(false);
+    };
+    match (input.target, focused) {
+        (Some(_), true) => Err("--focused and --pane both name a pane; pass one".to_string()),
+        (Some(_), false) => Ok(false),
+        (None, true) => Ok(true),
+        (None, false) => Err(INPUT_TARGET_REQUIRED.to_string()),
+    }
+}
+
+/// The id of the focused pane, as `panes` (`ListPanes`) marks it.
+fn focused_pane(socket: &Path, token: Option<String>, timeout_secs: u64) -> Result<u64, String> {
+    let envelope = ControlEnvelope {
+        output_format: OutputFormat::Json,
+        request: with_auth_token(ControlRequest::ListPanes, token),
+    };
+    let command =
+        serde_json::to_string(&envelope).expect("control request envelope should serialize");
+    match parse_response(&send_command(socket, &command, timeout_secs)?)? {
+        ControlResponse::Data(ControlData::Panes { panes }) => panes
+            .iter()
+            .find(|pane| pane.focused)
+            .map(|pane| pane.id)
+            .ok_or_else(|| "--focused: no pane is focused; name one with --pane N".to_string()),
+        ControlResponse::Error { code, message } => Err(format!(
+            "--focused: listing panes failed (code {code}): {message}"
+        )),
+        other => Err(format!("--focused: unexpected reply to panes: {other:?}")),
+    }
 }
 
 /// Take `--pid <pid>` from among the global flags before the command, like
@@ -444,6 +523,7 @@ fn take_pid_flag(mut args: Vec<String>) -> Result<(Vec<String>, Option<u32>), St
                 return Ok((args, Some(pid)));
             }
             "--pane" | "--window" => index += 2,
+            switch if GLOBAL_SWITCHES.contains(&switch) => index += 1,
             _ => break,
         }
     }
@@ -556,7 +636,11 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
             if text.is_empty() {
                 Err("send-text requires text".to_string())
             } else {
-                Ok(ControlRequest::SendText { text, target: None })
+                Ok(ControlRequest::SendText {
+                    text,
+                    target: None,
+                    through_multiplexer: false,
+                })
             }
         }
         "send-key" => {
@@ -570,12 +654,17 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
                 key,
                 modifiers,
                 target: None,
+                through_multiplexer: false,
             })
         }
         "send-raw" => {
             let hex = rest.join("");
             let data = hex_decode(&hex).ok_or_else(|| "send-raw requires valid hex".to_string())?;
-            Ok(ControlRequest::SendRaw { data, target: None })
+            Ok(ControlRequest::SendRaw {
+                data,
+                target: None,
+                through_multiplexer: false,
+            })
         }
         "new-tab" => Ok(ControlRequest::NewTab {
             title: None,
@@ -670,6 +759,7 @@ fn parse_cli_request(args: &[String]) -> Result<ControlRequest, String> {
                 command,
                 args: rest.iter().skip(1).cloned().collect(),
                 target: None,
+                through_multiplexer: false,
             })
         }
         "run-wait" => parse_run_and_wait(rest),
@@ -832,6 +922,7 @@ fn parse_run_and_wait(args: &[String]) -> Result<ControlRequest, String> {
         command: command.join(" "),
         timeout_ms,
         target: None,
+        through_multiplexer: false,
     })
 }
 
@@ -1541,7 +1632,18 @@ GLOBAL FLAGS:
                             wait-for always waits out its own timeout)
     --pane <id>             Act on pane <id> (from `panes`) instead of the
                             focused one (or its owning window for window
-                            commands and new-tab). Goes before the command
+                            commands and new-tab). Goes before the command.
+                            Input commands need it, or --focused
+    --focused               Send input to the focused pane: ulttyctl looks it
+                            up with `panes` and names it. Input commands
+                            refuse to run without --pane or --focused, so a
+                            script never types into whatever pane has focus
+                            by accident (#241). Goes before the command
+    --through-multiplexer   Send input even when the pane's foreground
+                            program is a tmux, screen or zellij client, which
+                            forwards it to its own active pane, one Ultty
+                            cannot see. Refused without it. Goes before the
+                            command
     --window <id>           Act on window <id> (from `windows`) instead of the
                             window holding --pane/$ULTTY_PANE or the last
                             focused window. Goes before the command; applies to
@@ -1558,7 +1660,7 @@ GLOBAL FLAGS:
     -V, --version           Show ulttyctl version without connecting to Ultty
     -h, --help              Show this help
 
-INPUT COMMANDS:
+INPUT COMMANDS (need --pane <id> or --focused):
     send-text <text>        Send text as if typed
     send-key <key> [mods]   Send a key press (e.g., send-key enter, send-key a ctrl)
     send-raw <hex>          Send raw bytes (hex-encoded, e.g., send-raw 1b5b41)
@@ -1689,17 +1791,17 @@ KEYS:
     Modifiers: ctrl, shift, alt, meta/super/cmd (combine: ctrl+shift)
 
 EXAMPLES:
-    ulttyctl send-text "ls -la"
-    ulttyctl send-key enter
-    ulttyctl send-key c ctrl
-    ulttyctl send-raw 1b5b41          # send ESC [ A (up arrow)
+    ulttyctl --pane 3 send-text "ls -la"
+    ulttyctl --pane 3 send-key enter
+    ulttyctl --focused send-key c ctrl
+    ulttyctl --pane 3 send-raw 1b5b41  # send ESC [ A (up arrow)
     ulttyctl new-tab htop
     ulttyctl switch-tab 2
     ulttyctl text --scrollback
     ulttyctl search "error"
     ulttyctl wait-for "$ " --timeout 5000
     ulttyctl resize 1920 1080
-    ulttyctl run nvim src/main.rs  # types shell text plus Enter
+    ulttyctl --pane 3 run nvim src/main.rs  # types shell text plus Enter
     ulttyctl --json info
 
 EXIT STATUS:
@@ -1710,6 +1812,10 @@ TARGETS AND INPUT:
     ULTTY_PID selects one window strictly. If it is invalid or unavailable,
     the command fails. Without it, discover the newest running window.
     MCP pins its initial window and token; restart MCP to select another.
+    Input (send-text, send-key, send-raw, run, run-wait) needs --pane <id>
+    or --focused; it never defaults to the focused pane or to $ULTTY_PANE.
+    It stops at a pane running a tmux, screen or zellij client unless
+    --through-multiplexer is given.
     Input success means queue acceptance, not execution or completion.
     run types shell text; new-tab and split preserve process argument boundaries.
     run-wait [--timeout <ms>] <shell text> requires an observed empty OSC 133
@@ -1727,9 +1833,9 @@ TARGETS AND INPUT:
 #[cfg(test)]
 mod tests {
     use super::{
-        default_split_target, default_window_target, exit_status, parse_cli_request,
+        address_input, default_split_target, default_window_target, exit_status, parse_cli_request,
         parse_response, read_response, read_timeout_for, response_is_failure, select_instance,
-        selected_pid, should_print_version, take_pid_flag, take_verbose_flag, version_output,
+        selected_pid, should_print_version, take_pid_flag, take_switch, version_output,
         with_auth_token, LuaOpen, PinnedInstance, Verbose,
     };
 
@@ -1857,7 +1963,8 @@ mod tests {
             ControlRequest::RunCommandAndWait {
                 command: "false".to_string(),
                 timeout_ms: 50,
-                target: Some(7)
+                target: Some(7),
+                through_multiplexer: false,
             }
         );
         assert_eq!(
@@ -2121,6 +2228,7 @@ mod tests {
                     "printf 'hello world\\n'".to_string(),
                 ],
                 target: None,
+                through_multiplexer: false,
             }
         );
     }
@@ -2264,15 +2372,73 @@ mod tests {
 
     #[test]
     fn verbose_flag_is_taken_only_before_the_command() {
-        assert_eq!(take_verbose_flag(args("-v ping")), (args("ping"), true));
+        let verbose = ["-v", "--verbose"];
+        assert_eq!(take_switch(args("-v ping"), &verbose), (args("ping"), true));
         assert_eq!(
-            take_verbose_flag(args("--pid 42 --verbose --pane 3 text")),
+            take_switch(args("--pid 42 --verbose --pane 3 text"), &verbose),
             (args("--pid 42 --pane 3 text"), true)
         );
         assert_eq!(
-            take_verbose_flag(args("send-text -v")),
+            take_switch(args("send-text -v"), &verbose),
             (args("send-text -v"), false)
         );
+    }
+
+    #[test]
+    fn input_switches_are_taken_from_among_the_global_flags() {
+        assert_eq!(
+            take_switch(args("-v --focused --pid 4 send-text hi"), &["--focused"]),
+            (args("-v --pid 4 send-text hi"), true)
+        );
+        assert_eq!(
+            take_switch(
+                args("--focused --through-multiplexer --pane 2 send-text hi"),
+                &["--through-multiplexer"]
+            ),
+            (args("--focused --pane 2 send-text hi"), true)
+        );
+        assert_eq!(
+            take_switch(args("send-text --focused"), &["--focused"]),
+            (args("send-text --focused"), false)
+        );
+        assert_eq!(
+            take_pid_flag(args("--focused --pid 42 send-text hi")),
+            Ok((args("--focused send-text hi"), Some(42)))
+        );
+    }
+
+    /// #241: input names its pane, or asks for the focused one; it never
+    /// falls to the focused pane, or to `ULTTY_PANE`, by default.
+    #[test]
+    fn input_commands_need_pane_or_focused() {
+        for line in [
+            "send-text hi",
+            "send-key enter",
+            "send-raw 1b",
+            "run ls",
+            "run-wait ls",
+        ] {
+            let mut request = parse_cli_request(&args(line)).unwrap();
+            let error = address_input(&mut request, false, false).unwrap_err();
+            assert!(
+                error.contains("--pane N") && error.contains("--focused"),
+                "{line}: {error}"
+            );
+            assert_eq!(address_input(&mut request, true, false), Ok(true), "{line}");
+            let mut named = parse_cli_request(&args(&format!("--pane 4 {line}"))).unwrap();
+            assert_eq!(address_input(&mut named, false, false), Ok(false), "{line}");
+            assert!(address_input(&mut named, true, false).is_err(), "{line}");
+            assert_eq!(address_input(&mut named, false, true), Ok(false), "{line}");
+            assert_eq!(
+                named.pty_input().map(|input| input.through_multiplexer),
+                Some(true),
+                "{line}"
+            );
+        }
+        let mut read = parse_cli_request(&args("text")).unwrap();
+        assert_eq!(address_input(&mut read, false, false), Ok(false));
+        assert_eq!(address_input(&mut read, true, false), Ok(false));
+        assert!(address_input(&mut read, false, true).is_err());
     }
 
     #[test]
@@ -2302,6 +2468,7 @@ mod tests {
             ControlRequest::SendText {
                 text: "hi there".to_string(),
                 target: Some(3),
+                through_multiplexer: false,
             }
         );
         assert_eq!(
@@ -2441,6 +2608,7 @@ mod tests {
             ControlRequest::SendText {
                 text: "--pane 3".to_string(),
                 target: None,
+                through_multiplexer: false,
             }
         );
     }
@@ -2826,6 +2994,7 @@ mod tests {
             ControlRequest::SendText {
                 text: "--window 2".to_string(),
                 target: None,
+                through_multiplexer: false,
             }
         );
         assert!(parse_cli_request(&args("--window 2 tabs")).is_err());
