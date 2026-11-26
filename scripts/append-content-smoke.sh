@@ -54,7 +54,7 @@ normalize_tabs() {
 }
 
 cleanup() {
-  ctl send-key c ctrl >/dev/null 2>&1 || true
+  ctl --focused send-key c ctrl >/dev/null 2>&1 || true
   sleep 0.2
   normalize_tabs
 }

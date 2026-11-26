@@ -154,8 +154,8 @@ wait_line() {
 "$ULTTYCTL" wait-for '$' --timeout 20000 >/dev/null || fail "no shell prompt"
 
 # 1. Native.
-"$ULTTYCTL" send-text "$console replay $fixture --speed 2 --auto-approve 1 2>$out/client.log; echo native-done" >/dev/null
-"$ULTTYCTL" send-key enter >/dev/null
+"$ULTTYCTL" --focused send-text "$console replay $fixture --speed 2 --auto-approve 1 2>$out/client.log; echo native-done" >/dev/null
+"$ULTTYCTL" --focused send-key enter >/dev/null
 wait_line 'cargo test -p pager parse:: \(running' || fail "the first tool card never showed"
 "$ULTTYCTL" regions >"$out/regions-live.txt"
 grep -q '^surface #.*placed at line' "$out/regions-live.txt" ||
@@ -170,8 +170,8 @@ in_order "$out/text-native.txt" "${transcript[@]}" native-done ||
 shot native
 
 # 2. ANSI, in the same window.
-"$ULTTYCTL" send-text "clear; env -u ULTTY_SOCKET ULTTY_IN_BAND=0 $console replay $fixture --speed 8 --auto-approve 1 2>$out/ansi-client.log; echo ansi-done" >/dev/null
-"$ULTTYCTL" send-key enter >/dev/null
+"$ULTTYCTL" --focused send-text "clear; env -u ULTTY_SOCKET ULTTY_IN_BAND=0 $console replay $fixture --speed 8 --auto-approve 1 2>$out/ansi-client.log; echo ansi-done" >/dev/null
+"$ULTTYCTL" --focused send-key enter >/dev/null
 wait_line '^ansi-done *$' 400 || fail "the ANSI replay never finished"
 grep -q "Fallback mode" "$out/ansi-client.log" || fail "the console did not fall back to ANSI"
 # Only what follows the command line, so the native run cannot pass for it.

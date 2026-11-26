@@ -156,7 +156,7 @@ if command -v xdotool >/dev/null; then
         >"$out/xdotool.log" 2>&1 && focus_checked=true
 fi
 
-ctl send-text $'echo hello\r' >/dev/null || fail "ulttyctl send-text failed"
+ctl --focused send-text $'echo hello\r' >/dev/null || fail "ulttyctl send-text failed"
 after=$(read_terminal --wait-for $'hello\n$ ' --timeout 15) ||
     fail "the terminal's text never showed the output: $after"
 echo "after: $after" | tee "$out/after.json"
@@ -213,20 +213,20 @@ native_focus() {
 # Selection (ADR 0021 §1 `selected`): dashboard's list marks the item it
 # has selected, and its other items are selectable but not selected; each
 # reports its place among the list's five as ARIA counts it.
-ctl send-text "$(printf %q "$DASHBOARD")"$'\r' >/dev/null || fail "ulttyctl send-text failed"
+ctl --focused send-text "$(printf %q "$DASHBOARD")"$'\r' >/dev/null || fail "ulttyctl send-text failed"
 widgets=$(read_widgets --selected "System Overview" --unselected "Network" \
     --place "System Overview=1/5" --place "Network=2/5" --timeout 30) ||
     fail "dashboard's first item is not the selected one, or places are off: $widgets"
 echo "$widgets" >"$out/selected-first.json"
-ctl send-text j >/dev/null || fail "ulttyctl send-text failed"
+ctl --focused send-text j >/dev/null || fail "ulttyctl send-text failed"
 widgets=$(read_widgets --selected "Network" --unselected "System Overview" --timeout 15) ||
     fail "after j the selection did not move to Network: $widgets"
 echo "$widgets" >"$out/selected-second.json"
 echo "native: selection System Overview -> Network"
-ctl send-key c ctrl >/dev/null || fail "ulttyctl send-key failed"
+ctl --focused send-key c ctrl >/dev/null || fail "ulttyctl send-key failed"
 ctl wait-for --quiet 500 --timeout 30000 >/dev/null || fail "the shell never settled after dashboard"
 
-ctl send-text "exec $(printf %q "$COUNTER_APP")"$'\r' >/dev/null || fail "ulttyctl send-text failed"
+ctl --focused send-text "exec $(printf %q "$COUNTER_APP")"$'\r' >/dev/null || fail "ulttyctl send-text failed"
 buttons=(--role button --name "-1" --role button --name "+1"
     --role button --name "Reset")
 widgets=$(read_widgets "${buttons[@]}" --timeout 30) ||
@@ -246,7 +246,7 @@ if $focus_checked; then
         fail "the focused object is not the app's focused button $first: $widgets"
     echo "$widgets" | grep -q '"focused": {"role": "button"' ||
         fail "the focused object is not a button: $widgets"
-    ctl send-key tab >/dev/null || fail "ulttyctl send-key failed"
+    ctl --focused send-key tab >/dev/null || fail "ulttyctl send-key failed"
     second=$first
     for _ in $(seq 50); do
         second=$(native_focus)

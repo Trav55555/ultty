@@ -156,8 +156,8 @@ wait_line() {
 # 1. The transcript with live cards. The example's stderr (its card events)
 # goes to a log; once `go` exists the shell prints under the cards, and once
 # `close` exists the example closes them and exits.
-"$ULTTYCTL" send-text "sh -c '$example --hold $out/close 2>$out/client.log & while [ ! -e $out/go ]; do sleep 0.05; done; seq 1 30; wait; echo shell-done'" >/dev/null
-"$ULTTYCTL" send-key enter >/dev/null
+"$ULTTYCTL" --focused send-text "sh -c '$example --hold $out/close 2>$out/client.log & while [ ! -e $out/go ]; do sleep 0.05; done; seq 1 30; wait; echo shell-done'" >/dev/null
+"$ULTTYCTL" --focused send-key enter >/dev/null
 
 wait_line '^End of transcript\. *$' ||
     fail "the transcript never finished"
@@ -199,8 +199,8 @@ shot closed
 if [ -z "$tmux_bin" ]; then
     echo "SKIPPED: the tmux part of agent-transcript.sh needs tmux" >&2
 else
-    "$ULTTYCTL" send-text "clear; TERM=xterm-256color $tmux_bin -S $runtime/tmux.sock -f /dev/null new-session '$example 2>$out/tmux-client.log; echo tmux-done; sleep 60'" >/dev/null
-    "$ULTTYCTL" send-key enter >/dev/null
+    "$ULTTYCTL" --focused send-text "clear; TERM=xterm-256color $tmux_bin -S $runtime/tmux.sock -f /dev/null new-session '$example 2>$out/tmux-client.log; echo tmux-done; sleep 60'" >/dev/null
+    "$ULTTYCTL" --focused send-key enter >/dev/null
     wait_line '^tmux-done *$' || fail "the example never finished in tmux"
     grep -q "Fallback mode" "$out/tmux-client.log" || fail "the example did not fall back under tmux"
     "$ULTTYCTL" text >"$out/text-tmux.txt"
