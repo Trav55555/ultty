@@ -616,6 +616,22 @@ impl EventLoop {
         name
     }
 
+    /// Name of the program input to this pane reaches: the foreground
+    /// program, else the shell itself when it is the only thing running.
+    pub fn input_recipient_name(&self) -> Option<String> {
+        self.foreground_process_name().or_else(|| self.shell_name())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn shell_name(&self) -> Option<String> {
+        read_proc_stat(i32::try_from(self.child_pid()).ok()?).map(|stat| stat.name)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn shell_name(&self) -> Option<String> {
+        None
+    }
+
     /// Bytes the I/O thread parsed between the two most recent
     /// [`EventLoop::process`] calls.
     pub fn last_drain_bytes(&self) -> usize {

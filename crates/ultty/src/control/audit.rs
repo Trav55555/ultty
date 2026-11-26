@@ -362,6 +362,119 @@ pub fn summaries(request: &ControlRequest) -> Vec<RequestSummary> {
     out
 }
 
+/// How a request chose the pane it acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetChoice {
+    /// The request named the pane (or window).
+    Explicit,
+    /// The request named none, so it went to the focused pane (or window).
+    Focused,
+}
+
+impl fmt::Display for TargetChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Explicit => "explicit",
+            Self::Focused => "focused",
+        })
+    }
+}
+
+/// Where a request's pane target lives in the request.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PaneSlot<'a> {
+    /// An optional `target`: `None` means the focused pane.
+    Optional(&'a mut Option<u64>),
+    /// A pane the request must name.
+    Required(u64),
+}
+
+/// The pane target of a request that acts on or reads one pane, looking
+/// through `with_token` and `with_owner`. `None` for requests without one,
+/// and for `subscribe`, whose missing target means every pane.
+pub fn pane_slot(request: &mut ControlRequest) -> Option<PaneSlot<'_>> {
+    match request {
+        ControlRequest::WithToken { request, .. } | ControlRequest::WithOwner { request, .. } => {
+            pane_slot(request)
+        }
+        ControlRequest::SendText { target, .. }
+        | ControlRequest::SendKey { target, .. }
+        | ControlRequest::SendRaw { target, .. }
+        | ControlRequest::RunCommand { target, .. }
+        | ControlRequest::RunCommandAndWait { target, .. }
+        | ControlRequest::SplitPane { target, .. }
+        | ControlRequest::GetText { target, .. }
+        | ControlRequest::GetSelection { target }
+        | ControlRequest::ProgramStatus { target }
+        | ControlRequest::Images { target }
+        | ControlRequest::Regions { target }
+        | ControlRequest::PushOverride { target, .. }
+        | ControlRequest::ClearOverride { target }
+        | ControlRequest::LastCommand { target, .. }
+        | ControlRequest::Search { target, .. }
+        | ControlRequest::WaitFor { target, .. }
+        | ControlRequest::SetPaneStatus { target, .. } => Some(PaneSlot::Optional(target)),
+        ControlRequest::InvokeAction { target, .. }
+        | ControlRequest::FocusPane { target }
+        | ControlRequest::ZoomPane { target, .. } => Some(PaneSlot::Required(*target)),
+        ControlRequest::SwapPanes { first, .. } => Some(PaneSlot::Required(*first)),
+        _ => None,
+    }
+}
+
+/// Where a request acts, once resolved: for [`target`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTarget<'a> {
+    /// The request's operation name.
+    pub kind: &'static str,
+    /// A status query, recorded at DEBUG.
+    pub routine: bool,
+    /// Whether the request named its target.
+    pub choice: TargetChoice,
+    /// The window, for window-scoped requests.
+    pub window: Option<u64>,
+    /// The pane the request acts on.
+    pub pane: Option<u64>,
+    /// The name of the program input to the pane reaches: its foreground
+    /// program, else its shell. Never the program's arguments.
+    pub foreground: Option<&'a str>,
+}
+
+/// A program name made safe for one log line: anything but visible ASCII
+/// becomes `?`.
+fn printable(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_graphic() { c } else { '?' })
+        .collect()
+}
+
+/// Record where a request acts, after resolving its target.
+pub fn target(
+    transport: Transport,
+    conn: usize,
+    peer: &PeerIdentity,
+    resolved: &ResolvedTarget<'_>,
+) {
+    let mut line = format!(
+        "control target kind={} target={}",
+        resolved.kind, resolved.choice
+    );
+    if let Some(window) = resolved.window {
+        line.push_str(&format!(" window={window}"));
+    }
+    line.push_str(&format!(
+        " pane={} fg={} conn={conn} transport={transport} peer_pid={}",
+        OrDash(resolved.pane),
+        OrDash(resolved.foreground.map(printable)),
+        OrDash(peer.pid),
+    ));
+    if resolved.routine {
+        tracing::debug!(target: "ultty::audit", "{line}");
+    } else {
+        tracing::info!(target: "ultty::audit", "{line}");
+    }
+}
+
 /// The request inside any `with_token` and `with_owner` wrappers, and
 /// whether a token wrapper was among them.
 fn unwrap_envelopes(mut request: &ControlRequest) -> (&ControlRequest, bool) {

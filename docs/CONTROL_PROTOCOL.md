@@ -192,7 +192,7 @@ limited to one tab. These operations remain authenticated and owner-scoped.
 Every control socket, a window's and `ultty-session`'s, records who used it
 under the tracing target `ultty::audit`, in the [log file](configuration.md#log-file)
 (`~/.local/state/ultty/ultty.log`) and on stderr. One connection gives up to
-three kinds of line, each with the connection id (`conn`), the socket
+four kinds of line, each with the connection id (`conn`), the socket
 (`transport=local` or `transport=session-host`) and the peer's pid:
 
 ```text
@@ -211,6 +211,15 @@ pid=4242 2026-11-25T10:00:00.000020Z  INFO ultty::audit: control authentication 
   `split_pane`, `push_override`, `search`, `wait_for`, `workspace_save`) the
   text's length in `bytes`. Each command of a `batch` gets its own line.
   Unreadable (malformed or oversized) requests are WARN with their size.
+- **Target**: for an authorised request that acts on or reads a pane,
+  where it went once resolved, e.g. `control target kind=send_text
+  target=focused pane=7 fg=tmux`. `target=focused` means the request named
+  no pane and went to the focused one; `fg` is the name of the program the
+  input reaches (the pane's foreground program, else its shell; never its
+  arguments). The pane is resolved once and that pane is what the request
+  then acts on, so the line and the action cannot disagree. Each command in a
+  batch is resolved when it runs. `screenshot` records the window it
+  captured as `window=` and that window's focused pane.
 - **Authentication**: success, or failure at WARN with
   `reason=wrong_token` or `reason=token_unavailable`.
 - **Refusal**: every error reply, with its `code`; 403 at WARN.

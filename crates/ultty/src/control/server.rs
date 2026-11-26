@@ -909,6 +909,13 @@ impl ControlServer {
         expected.map(|_| outcome == AuthOutcome::Accepted)
     }
 
+    /// Record in the audit trail where client `client_key`'s request acts.
+    pub fn audit_target(&self, client_key: usize, resolved: &audit::ResolvedTarget<'_>) {
+        if let Some(client) = self.clients.get(&client_key) {
+            audit::target(self.transport, client_key, &client.peer, resolved);
+        }
+    }
+
     pub fn set_client_authenticated(&mut self, client_key: usize, authenticated: bool) {
         if let Some(client) = self.clients.get_mut(&client_key) {
             client.authenticated = authenticated;
@@ -2820,16 +2827,25 @@ mod tests {
     }
 
     /// Send `request` as one client and answer it the way the app does for
-    /// a token-carrying request: authenticate, then accept or refuse.
-    fn exchange_with_auth(server: &mut ControlServer, request: &[u8]) -> String {
+    /// a token-carrying request: authenticate, then pin its pane target in
+    /// `manager` and accept, or refuse. Returns the reply and the accepted
+    /// request as pinned.
+    fn exchange_with_auth(
+        server: &mut ControlServer,
+        manager: &crate::terminal_manager::TerminalManager,
+        request: &[u8],
+    ) -> (String, Option<ControlRequest>) {
         let mut client = UnixStream::connect(server.socket_path()).unwrap();
         client.write_all(request).unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
-        for (key, request) in poll_until_pending(server) {
-            let response = match request {
+        let mut accepted = None;
+        for (key, mut request) in poll_until_pending(server) {
+            let response = match &request {
                 ControlRequest::WithToken { token, .. }
-                    if server.authenticate(key, &token).unwrap() =>
+                    if server.authenticate(key, token).unwrap() =>
                 {
+                    super::super::common::pin_control_target(server, key, manager, &mut request);
+                    accepted = Some(request);
                     ControlResponse::Data(ControlData::Pong)
                 }
                 _ => ControlResponse::Error {
@@ -2841,7 +2857,19 @@ mod tests {
         }
         let mut reply = String::new();
         client.read_to_string(&mut reply).unwrap();
-        reply
+        (reply, accepted)
+    }
+
+    /// The pane target of a pinned `with_token` request.
+    fn pinned_target(request: Option<ControlRequest>) -> Option<u64> {
+        match request {
+            Some(ControlRequest::WithToken { request, .. }) => match *request {
+                ControlRequest::SendText { target, .. }
+                | ControlRequest::RunCommand { target, .. } => target,
+                other => panic!("unexpected request {other:?}"),
+            },
+            other => panic!("unexpected request {other:?}"),
+        }
     }
 
     /// Run `body` with `subscriber` as this thread's default.
@@ -2872,24 +2900,49 @@ mod tests {
             .with_max_level(tracing::Level::TRACE)
             .with_ansi(false)
             .finish();
+        let mut manager = crate::terminal_manager::TerminalManager::new(80, 24).unwrap();
+        let focused = manager.focused_terminal_id().unwrap().raw() as u64;
+        let other = manager.split_horizontal().unwrap().unwrap().raw() as u64;
+        assert_eq!(
+            manager.focused_terminal_id().unwrap().raw() as u64,
+            focused,
+            "the split keeps focus where it was"
+        );
         let token = with_test_subscriber(subscriber, || {
             let mut server = test_server("audit");
             let token = super::super::auth::write_auth_token(server.token_path()).unwrap();
             drop(UnixStream::connect(server.socket_path()).unwrap());
             server.poll(Some(Duration::from_millis(50))).unwrap();
 
-            let refused =
-                exchange_with_auth(&mut server, b"token deadbeef send-text secret-xyz-typed");
+            let (refused, _) = exchange_with_auth(
+                &mut server,
+                &manager,
+                b"token deadbeef send-text secret-xyz-typed",
+            );
             assert!(refused.starts_with("ERROR 403"), "{refused}");
             let typed = json_request(ControlRequest::WithToken {
                 token: token.clone(),
                 request: Box::new(ControlRequest::SendText {
                     text: "secret-xyz-typed".into(),
-                    target: Some(4),
+                    target: Some(other),
                 }),
             });
-            let accepted = exchange_with_auth(&mut server, &typed);
+            let (accepted, pinned) = exchange_with_auth(&mut server, &manager, &typed);
             assert!(accepted.contains("pong"), "{accepted}");
+            assert_eq!(pinned_target(pinned), Some(other));
+            let untargeted = json_request(ControlRequest::WithToken {
+                token: token.clone(),
+                request: Box::new(ControlRequest::SendText {
+                    text: "secret-xyz-untargeted".into(),
+                    target: None,
+                }),
+            });
+            let (_, pinned) = exchange_with_auth(&mut server, &manager, &untargeted);
+            assert_eq!(
+                pinned_target(pinned),
+                Some(focused),
+                "the handler gets the pane the audit trail recorded"
+            );
             let run = json_request(ControlRequest::WithToken {
                 token: token.clone(),
                 request: Box::new(ControlRequest::RunCommand {
@@ -2898,12 +2951,12 @@ mod tests {
                     target: None,
                 }),
             });
-            exchange_with_auth(&mut server, &run);
+            exchange_with_auth(&mut server, &manager, &run);
             let ping = json_request(ControlRequest::WithToken {
                 token: token.clone(),
                 request: Box::new(ControlRequest::Ping),
             });
-            exchange_with_auth(&mut server, &ping);
+            exchange_with_auth(&mut server, &manager, &ping);
             token
         });
         let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
@@ -2931,7 +2984,7 @@ mod tests {
             .iter()
             .filter(|line| line.contains("control connection conn="))
             .collect();
-        assert_eq!(connections.len(), 4, "{log}");
+        assert_eq!(connections.len(), 5, "{log}");
         assert_eq!(
             connections
                 .iter()
@@ -2955,13 +3008,38 @@ mod tests {
         assert!(line_with("authentication failed reason=wrong_token").contains(" WARN "));
         assert!(line_with("refused code=403").contains(" WARN "));
         assert!(line_with("authentication succeeded").contains(" INFO "));
-        let typed = line_with("kind=send_text pane=4 bytes=16 with_token=true");
+        let typed = line_with(&format!(
+            "kind=send_text pane={other} bytes=16 with_token=true"
+        ));
         assert!(
             typed.contains(" INFO ") && typed.contains("transport=local"),
             "{typed}"
         );
         assert!(line_with("kind=send_text bytes=16 with_token=true").contains(" INFO "));
         assert!(line_with("kind=run_command bytes=33 with_token=true").contains(" INFO "));
+        let explicit = line_with(&format!(
+            "control target kind=send_text target=explicit pane={other} fg="
+        ));
+        assert!(explicit.contains(" INFO "), "{explicit}");
+        let untargeted = line_with(&format!(
+            "control target kind=send_text target=focused pane={focused} fg="
+        ));
+        assert!(untargeted.contains(" INFO "), "{untargeted}");
+        assert!(
+            !untargeted.contains("fg=-"),
+            "the focused shell's name is recorded:\n{untargeted}"
+        );
+        line_with(&format!(
+            "control target kind=run_command target=focused pane={focused} fg="
+        ));
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("control target"))
+                .count(),
+            3,
+            "no target line for the refused request or the ping:\n{log}"
+        );
         assert!(
             !log.contains("secret-xyz"),
             "a secret reached the log:\n{log}"
