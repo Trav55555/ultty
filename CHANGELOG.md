@@ -44,6 +44,21 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Changed
 
+- **Breaking for scripts:** control input must name its pane (#241).
+  `send_text`, `send_key`, `send_raw`, `run_command` and
+  `run_command_and_wait` without a `target` are refused with code 16
+  (`TARGET_REQUIRED`) instead of going to the focused pane, alone or inside
+  a batch; reads still default to the focused pane. `ulttyctl` input
+  commands need `--pane <id>`, or the new `--focused`, which looks up the
+  focused pane and names it; without either they fail before contacting
+  Ultty. The MCP input tools (`ultty_type_text`, `ultty_send_key`,
+  `ultty_run_command`, `ultty_run_and_wait`) now require `pane`.
+- Control input stops at a terminal multiplexer (#241): input to a pane
+  whose foreground program is a tmux, screen or zellij client is refused
+  with code 17 (`MULTIPLEXER_TARGET`), since that client would forward it
+  to its own active pane. `ulttyctl --through-multiplexer`, MCP
+  `through_multiplexer`, or the request field `through_multiplexer: true`
+  sends it anyway. Both refusals are recorded in the audit log.
 - Selected text stays readable on every bundled theme. `colors.selection_foreground`
   (and the theme key of the same name) sets the text colour in a selection; the
   importer now carries each theme's own, and a selection too close to the

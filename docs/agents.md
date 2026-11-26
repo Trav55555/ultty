@@ -92,8 +92,13 @@ When `--pid` selects an owner, `split` uses that owner's focused pane unless
 | `ultty_screenshot` | The window as a PNG |
 | `ultty_info` | Window size, cursor, current tab |
 
-Tools that act on a pane take `pane` and use the focused pane without it.
-Set `pane` explicitly for unattended work.
+Tools that act on a pane take `pane` and use the focused pane without it,
+except the input tools (`ultty_type_text`, `ultty_send_key`,
+`ultty_run_command`, `ultty_run_and_wait`): they require `pane`, so an agent
+never types into whatever pane has focus. Input to a pane running a tmux,
+screen or zellij client is refused, because the client would pass it on to
+its own active pane; set `through_multiplexer: true` when that is what you
+mean. See [Targets](CONTROL_PROTOCOL.md#targets).
 
 Input success means the bytes were accepted into the target's queue. A full
 or closed queue returns an error; success does not establish execution or
