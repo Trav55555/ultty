@@ -22,6 +22,9 @@ import time
 
 from PIL import Image
 
+# Test and benchmark runs stay out of the user's Ultty log file.
+os.environ.setdefault("ULTTY_LOG_FILE", "0")
+
 
 HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("session_host_gate", HERE / "session-host.py")

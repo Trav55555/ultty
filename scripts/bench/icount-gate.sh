@@ -26,6 +26,8 @@
 # its flags, so the baseline records rustc and valgrind versions; a mismatch
 # fails with instructions to regenerate rather than comparing apples to pears.
 set -euo pipefail
+# Test and benchmark runs stay out of the user's Ultty log file.
+export ULTTY_LOG_FILE=0
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BASELINE="$ROOT/bench/baselines/icount.json"

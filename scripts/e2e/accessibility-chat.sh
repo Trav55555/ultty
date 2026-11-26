@@ -23,6 +23,8 @@
 # CI job: it says nothing about what Orca speaks
 # (docs/accessibility-test.md, step 5).
 set -euo pipefail
+# Test and benchmark runs stay out of the user's Ultty log file.
+export ULTTY_LOG_FILE=0
 
 if [ "${1:-}" != "--inner" ]; then
     absolute() { case "$1" in /*) echo "$1" ;; *) echo "$PWD/$1" ;; esac; }

@@ -15,6 +15,9 @@ import subprocess
 import tempfile
 import time
 
+# Test and benchmark runs stay out of the user's Ultty log file.
+os.environ.setdefault("ULTTY_LOG_FILE", "0")
+
 
 def read_exact(sock, length):
     data = b""

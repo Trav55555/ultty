@@ -18,6 +18,8 @@
 # DIR/summary.json from analyze.py. Builds go under target/bench-build/ on
 # disk, never /tmp (tmpfs on this box).
 set -euo pipefail
+# Test and benchmark runs stay out of the user's Ultty log file.
+export ULTTY_LOG_FILE=0
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PY=(/usr/bin/env python3 -I)

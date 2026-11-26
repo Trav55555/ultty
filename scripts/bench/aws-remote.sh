@@ -22,6 +22,8 @@
 #   NVIDIA driver nvidia-driver-${NVIDIA_DRIVER:-580} (GPU role only; 550 on
 #                 24.04 pulled in 580 anyway)
 set -euo pipefail
+# Test and benchmark runs stay out of the user's Ultty log file.
+export ULTTY_LOG_FILE=0
 
 WORK="${UBENCH_WORK:-$HOME/ubench}"
 SRC="$WORK/src"

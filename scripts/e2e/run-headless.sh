@@ -8,6 +8,8 @@
 # without a GPU). Uses target/release/ultty and ulttyctl, built first.
 # Exits with the command's status.
 set -euo pipefail
+# Test and benchmark runs stay out of the user's Ultty log file.
+export ULTTY_LOG_FILE=0
 cd "$(dirname "$0")/../.."
 [ $# -gt 0 ] || { echo "usage: $0 <command> [args...]" >&2; exit 2; }
 command -v Xvfb >/dev/null || { echo "Xvfb is required" >&2; exit 2; }

@@ -21,6 +21,8 @@
 # `ulttyctl lua open` runs the ulttui-lua next to ulttyctl. Logs and region
 # dumps are left in the artifact dir. Exits non-zero when a check fails.
 set -euo pipefail
+# Test and benchmark runs stay out of the user's Ultty log file.
+export ULTTY_LOG_FILE=0
 cd "$(dirname "$0")/../.."
 command -v Xvfb >/dev/null || { echo "Xvfb is required" >&2; exit 2; }
 

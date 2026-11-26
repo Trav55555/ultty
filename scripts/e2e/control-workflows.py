@@ -19,6 +19,9 @@ import tempfile
 import time
 import traceback
 
+# Test and benchmark runs stay out of the user's Ultty log file.
+os.environ.setdefault("ULTTY_LOG_FILE", "0")
+
 
 class EventStream:
     def __init__(self, connection):

@@ -9,6 +9,17 @@ versions may break the native protocol, the `ulttui` API, and config keys.
 
 ### Added
 
+- A persistent log file, `~/.local/state/ultty/ultty.log` (`$XDG_STATE_HOME`
+  honoured; mode 0600), rotated at 10 MiB with three old files kept, shared
+  safely by several Ultty processes (each line starts with `pid=`), and
+  written off the UI thread. `[log] file`, `path` and `level` configure it;
+  `RUST_LOG` and `ULTTY_LOG_FILE` (`0` off, or a path) override.
+- A control-plane audit trail (`ultty::audit` in the log): each control
+  connection's peer pid, uid, gid and executable, authentication results,
+  and every request with its target and, for text, only its length. Tokens
+  and request text are never logged. See `docs/CONTROL_PROTOCOL.md`.
+- `ulttyctl -v`/`--verbose`: explains on stderr which instance it chose and
+  why, the socket and token file, each request and the reply time.
 - Kitty graphics protocol, direct transmission (ADR 0026, slice 1): RGB,
   RGBA and PNG images, optionally zlib-compressed and chunked; transmit,
   place, delete (every `d=` value) and query, with kitty's replies and quiet

@@ -6,6 +6,8 @@
 # Ultty), with ulttyctl on PATH. Exits non-zero when a check fails.
 # docs/testing-tuis.md walks through it.
 set -euo pipefail
+# Test and benchmark runs stay out of the user's Ultty log file.
+export ULTTY_LOG_FILE=0
 cd "$(dirname "$0")/../.."
 
 cargo build -q -p counter-app
