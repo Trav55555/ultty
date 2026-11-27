@@ -91,6 +91,8 @@ pub enum MouseEncoding {
     Sgr,
     /// URXVT encoding
     Urxvt,
+    /// SGR-Pixels encoding (CSI ?1016h: CSI < Cb ; Px ; Py M/m with 1-based pixel coordinates)
+    SgrPixel,
 }
 
 /// Terminal modes that affect behavior.
@@ -1457,6 +1459,34 @@ impl Terminal {
         motion: bool,
         modifiers: MouseModifiers,
     ) -> Option<Vec<u8>> {
+        let (pixel_x, pixel_y) = match self.cell_pixel_size {
+            Some((cw, ch)) => (
+                u32::from(x).saturating_mul(u32::from(cw.max(1))),
+                u32::from(y).saturating_mul(u32::from(ch.max(1))),
+            ),
+            None => (u32::from(x), u32::from(y)),
+        };
+        self.encode_mouse_event_at_pixel(button, x, y, pixel_x, pixel_y, pressed, motion, modifiers)
+    }
+
+    /// Generate mouse event bytes using both 0-based cell `(x, y)` and 0-based
+    /// pane-relative pixel `(pixel_x, pixel_y)` coordinates.
+    ///
+    /// When SGR-Pixels encoding (mode 1016) is active, the report uses 1-based
+    /// pixel coordinates (`pixel_x + 1`, `pixel_y + 1`); all other encodings
+    /// use the cell coordinates `(x, y)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_mouse_event_at_pixel(
+        &self,
+        button: MouseButton,
+        x: u16,
+        y: u16,
+        pixel_x: u32,
+        pixel_y: u32,
+        pressed: bool,
+        motion: bool,
+        modifiers: MouseModifiers,
+    ) -> Option<Vec<u8>> {
         if self.modes.mouse_mode == MouseMode::None {
             return None;
         }
@@ -1479,8 +1509,16 @@ impl Terminal {
         }
 
         match self.modes.mouse_encoding {
-            MouseEncoding::Sgr => {
-                Some(self.encode_mouse_sgr(button, x, y, pressed, motion, modifiers))
+            MouseEncoding::Sgr => Some(self.encode_mouse_sgr(
+                button,
+                u32::from(x),
+                u32::from(y),
+                pressed,
+                motion,
+                modifiers,
+            )),
+            MouseEncoding::SgrPixel => {
+                Some(self.encode_mouse_sgr(button, pixel_x, pixel_y, pressed, motion, modifiers))
             }
             MouseEncoding::X10 => {
                 Some(self.encode_mouse_x10(button, x, y, pressed, motion, modifiers))
@@ -1498,8 +1536,8 @@ impl Terminal {
     fn encode_mouse_sgr(
         &self,
         button: MouseButton,
-        x: u16,
-        y: u16,
+        x: u32,
+        y: u32,
         pressed: bool,
         motion: bool,
         modifiers: MouseModifiers,
@@ -1527,7 +1565,14 @@ impl Terminal {
             'm'
         };
 
-        format!("\x1b[<{};{};{}{}", cb, x + 1, y + 1, suffix).into_bytes()
+        format!(
+            "\x1b[<{};{};{}{}",
+            cb,
+            x.saturating_add(1),
+            y.saturating_add(1),
+            suffix
+        )
+        .into_bytes()
     }
 
     /// The button code shared by the X10 and UTF-8 encodings: a release

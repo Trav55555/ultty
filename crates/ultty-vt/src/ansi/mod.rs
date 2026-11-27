@@ -480,6 +480,8 @@ pub enum Mode {
     MouseSgr,
     /// URXVT mouse encoding (CSI ?1015h/l)
     MouseUrxvt,
+    /// SGR-Pixels mouse encoding (CSI ?1016h/l)
+    MouseSgrPixel,
     /// Origin mode (CSI ?6h/l)
     OriginMode,
     /// Auto-wrap mode (CSI ?7h/l)
