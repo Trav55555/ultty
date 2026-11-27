@@ -78,6 +78,7 @@ fn scorecard_alternate_screen() {
 #[test]
 fn scorecard_sgr_mouse() {
     assert_eq!(private_mode(b"\x1b[?1006h", 1006), "\x1b[?1006;1$y");
+    assert_eq!(private_mode(b"\x1b[?1016h", 1016), "\x1b[?1016;1$y");
 }
 
 #[test]

@@ -586,6 +586,7 @@ impl<'a> TerminalHandler<'a> {
             1006 => modes.mouse_encoding == MouseEncoding::Sgr,
             1007 => modes.alternate_scroll,
             1015 => modes.mouse_encoding == MouseEncoding::Urxvt,
+            1016 => modes.mouse_encoding == MouseEncoding::SgrPixel,
             // An action rather than a state: report it reset.
             1048 => false,
             2004 => modes.bracketed_paste,
@@ -782,21 +783,28 @@ impl<'a> TerminalHandler<'a> {
             Mode::MouseUtf8 => {
                 if enabled {
                     self.terminal.modes_mut().mouse_encoding = MouseEncoding::Utf8;
-                } else {
+                } else if self.terminal.modes().mouse_encoding == MouseEncoding::Utf8 {
                     self.terminal.modes_mut().mouse_encoding = MouseEncoding::X10;
                 }
             }
             Mode::MouseSgr => {
                 if enabled {
                     self.terminal.modes_mut().mouse_encoding = MouseEncoding::Sgr;
-                } else {
+                } else if self.terminal.modes().mouse_encoding == MouseEncoding::Sgr {
                     self.terminal.modes_mut().mouse_encoding = MouseEncoding::X10;
                 }
             }
             Mode::MouseUrxvt => {
                 if enabled {
                     self.terminal.modes_mut().mouse_encoding = MouseEncoding::Urxvt;
-                } else {
+                } else if self.terminal.modes().mouse_encoding == MouseEncoding::Urxvt {
+                    self.terminal.modes_mut().mouse_encoding = MouseEncoding::X10;
+                }
+            }
+            Mode::MouseSgrPixel => {
+                if enabled {
+                    self.terminal.modes_mut().mouse_encoding = MouseEncoding::SgrPixel;
+                } else if self.terminal.modes().mouse_encoding == MouseEncoding::SgrPixel {
                     self.terminal.modes_mut().mouse_encoding = MouseEncoding::X10;
                 }
             }
@@ -1416,6 +1424,85 @@ mod tests {
         assert_eq!(term.modes().mouse_encoding, MouseEncoding::Urxvt);
         process(&mut term, b"\x1b[?1015l");
         assert_eq!(term.modes().mouse_encoding, MouseEncoding::X10);
+
+        process(&mut term, b"\x1b[?1016h");
+        assert_eq!(term.modes().mouse_encoding, MouseEncoding::SgrPixel);
+        process(&mut term, b"\x1b[?1006l");
+        assert_eq!(term.modes().mouse_encoding, MouseEncoding::SgrPixel);
+        process(&mut term, b"\x1b[?1016l");
+        assert_eq!(term.modes().mouse_encoding, MouseEncoding::X10);
+
+        process(&mut term, b"\x1b[?1006h\x1b[?1016l");
+        assert_eq!(term.modes().mouse_encoding, MouseEncoding::Sgr);
+    }
+
+    #[test]
+    fn mouse_event_encoding_sgr_pixel() {
+        use crate::grid::{MouseButton, MouseModifiers};
+
+        let mut term = Terminal::new(Dimensions::new(80, 24));
+        let no_mods = MouseModifiers::default();
+
+        process(&mut term, b"\x1b[?1000h\x1b[?1016h");
+
+        let press = term
+            .encode_mouse_event_at_pixel(MouseButton::Left, 0, 0, 0, 0, true, false, no_mods)
+            .unwrap();
+        assert_eq!(press, b"\x1b[<0;1;1M");
+
+        let press_large = term
+            .encode_mouse_event_at_pixel(MouseButton::Right, 39, 12, 319, 199, true, false, no_mods)
+            .unwrap();
+        assert_eq!(press_large, b"\x1b[<2;320;200M");
+
+        let release = term
+            .encode_mouse_event_at_pixel(
+                MouseButton::Right,
+                39,
+                12,
+                319,
+                199,
+                false,
+                false,
+                no_mods,
+            )
+            .unwrap();
+        assert_eq!(release, b"\x1b[<2;320;200m");
+
+        let scroll = term
+            .encode_mouse_event_at_pixel(
+                MouseButton::ScrollDown,
+                10,
+                5,
+                84,
+                91,
+                true,
+                false,
+                MouseModifiers::new(false, false, true, false),
+            )
+            .unwrap();
+        assert_eq!(scroll, b"\x1b[<81;85;92M");
+
+        process(&mut term, b"\x1b[?1003h");
+        let motion = term
+            .encode_mouse_event_at_pixel(
+                MouseButton::Release,
+                20,
+                10,
+                165,
+                210,
+                true,
+                true,
+                no_mods,
+            )
+            .unwrap();
+        assert_eq!(motion, b"\x1b[<35;166;211M");
+
+        term.set_cell_pixel_size(10, 20);
+        let fallback = term
+            .encode_mouse_event(MouseButton::Left, 3, 4, true, false, no_mods)
+            .unwrap();
+        assert_eq!(fallback, b"\x1b[<0;31;81M");
     }
 
     /// What Claude Code's full mouse mode (1000, 1002, 1003, 1006) needs: a

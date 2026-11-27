@@ -6,7 +6,8 @@
 
 use ultty_vt::ansi::AnsiParser;
 use ultty_vt::grid::{
-    CellFlags, Color, Dimensions, Terminal, TerminalHandler, ThemeColors, UnderlineStyle,
+    CellFlags, Color, Dimensions, MouseButton, MouseModifiers, Terminal, TerminalHandler,
+    ThemeColors, UnderlineStyle,
 };
 
 /// Feed `bytes` to a fresh `cols` x `rows` terminal and return each visible
@@ -427,8 +428,8 @@ fn private_mode_status(term: &mut Terminal, mode: u16) -> String {
 fn decrqm_reports_every_private_mode_it_implements() {
     // Modes whose set and reset forms are plain toggles.
     for mode in [
-        1u16, 5, 6, 7, 9, 12, 25, 40, 80, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 2004,
-        2026, 2027,
+        1u16, 5, 6, 7, 9, 12, 25, 40, 80, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016,
+        2004, 2026, 2027,
     ] {
         let mut term = run(10, 3, format!("\x1b[?{mode}h").as_bytes());
         assert_eq!(private_mode_status(&mut term, mode), "1", "mode {mode} set");
@@ -1450,4 +1451,29 @@ fn reflow_puts_an_image_on_the_row_of_its_cell_after_wide_characters() {
     let (screen, _) = snapshot(&term);
     assert_eq!(&screen[..4], ["\u{3042}", "\u{3042}", "\u{3042} Z", "Z"]);
     assert_eq!(pieces(&term)[0].0, 3);
+}
+
+#[test]
+fn sgr_pixel_mouse_1016_reports_one_based_pixels_and_decrqm() {
+    let mut term = run(80, 24, b"\x1b[?1000h\x1b[?1016h");
+    assert_eq!(private_mode_status(&mut term, 1016), "1");
+    assert_eq!(private_mode_status(&mut term, 1006), "2");
+
+    let mods = MouseModifiers::default();
+    assert_eq!(
+        term.encode_mouse_event_at_pixel(MouseButton::Left, 0, 0, 0, 0, true, false, mods)
+            .as_deref(),
+        Some(&b"\x1b[<0;1;1M"[..])
+    );
+    assert_eq!(
+        term.encode_mouse_event_at_pixel(MouseButton::Left, 39, 12, 319, 199, false, false, mods)
+            .as_deref(),
+        Some(&b"\x1b[<0;320;200m"[..])
+    );
+
+    feed(&mut term, b"\x1b[?1016l");
+    assert_eq!(private_mode_status(&mut term, 1016), "2");
+
+    feed(&mut term, b"\x1b[?1016h\x1bc");
+    assert_eq!(private_mode_status(&mut term, 1016), "2");
 }

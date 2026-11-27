@@ -420,6 +420,7 @@ impl AnsiParser {
             1005 => Some(Action::SetMode(Mode::MouseUtf8)),
             1006 => Some(Action::SetMode(Mode::MouseSgr)),
             1015 => Some(Action::SetMode(Mode::MouseUrxvt)),
+            1016 => Some(Action::SetMode(Mode::MouseSgrPixel)),
             1007 => Some(Action::SetMode(Mode::AlternateScrollMode)),
             1047 => Some(Action::SetMode(Mode::AlternateScreenClear)),
             1048 => Some(Action::SetMode(Mode::SaveCursor)),
@@ -453,6 +454,7 @@ impl AnsiParser {
             1005 => Some(Action::ResetMode(Mode::MouseUtf8)),
             1006 => Some(Action::ResetMode(Mode::MouseSgr)),
             1015 => Some(Action::ResetMode(Mode::MouseUrxvt)),
+            1016 => Some(Action::ResetMode(Mode::MouseSgrPixel)),
             1007 => Some(Action::ResetMode(Mode::AlternateScrollMode)),
             1047 => Some(Action::ResetMode(Mode::AlternateScreenClear)),
             1048 => Some(Action::ResetMode(Mode::SaveCursor)),
@@ -792,6 +794,18 @@ mod tests {
         assert_eq!(
             parse(b"\x1b[?1015h"),
             vec![Action::SetMode(Mode::MouseUrxvt)]
+        );
+    }
+
+    #[test]
+    fn decset_decrst_mouse_sgr_pixel() {
+        assert_eq!(
+            parse(b"\x1b[?1016h"),
+            vec![Action::SetMode(Mode::MouseSgrPixel)]
+        );
+        assert_eq!(
+            parse(b"\x1b[?1016l"),
+            vec![Action::ResetMode(Mode::MouseSgrPixel)]
         );
     }
 
