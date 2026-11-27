@@ -80,12 +80,13 @@ Ranked by how much a typical user would notice:
    ([ADR 0027](adr/0027-multiple-windows-per-process.md) slices 1–6; opt-in
    `behavior.window_per_process = true` keeps process isolation); and
    `ultty --quick` / `[quick_terminal]` provides a toggleable quick terminal on
-   X11 (built-in `XGrabKey`) and Wayland (`org.freedesktop.portal.GlobalShortcuts`
-   with graceful compositor-binding fallback)
-   ([ADR 0028](adr/0028-quick-terminal.md) slices 1, 3, and 4,
+   X11 (built-in `XGrabKey`) and Wayland (native `zwlr_layer_shell_v1`
+   edge/center anchoring on wlroots/Hyprland/sway/river/niri/KWin with
+   automatic `xdg_toplevel` fallback on GNOME, plus
+   `org.freedesktop.portal.GlobalShortcuts` with graceful compositor-binding
+   fallback) ([ADR 0028](adr/0028-quick-terminal.md) slices 1–4,
    [docs/quick-terminal.md](quick-terminal.md)). Still missing for quick
-   terminal: Wayland `wlr-layer-shell` anchoring (slice 2) and macOS quick
-   terminal/hotkey (slice 5).
+   terminal: macOS quick terminal/hotkey (slice 5).
 10. **Linux x86_64 only in practice.** Release builds and CI cover Linux
     x86_64 only. macOS code exists but is not built or tested by CI. There
     is no Windows or BSD support. Alacritty runs on Linux, BSD, macOS and

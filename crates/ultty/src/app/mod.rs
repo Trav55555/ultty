@@ -14,11 +14,13 @@ mod input;
 mod native_panes;
 mod native_selection;
 mod pacing;
+mod platform_window;
 mod render;
 mod update;
 mod wakeup;
 use anyhow::Result;
 use arboard::Clipboard;
+use platform_window::PlatformWindow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -171,6 +173,15 @@ enum AppEvent {
         /// Optional Wayland activation token from `GlobalShortcuts::Activated`.
         activation_token: Option<String>,
     },
+    /// Wayland `zwlr_layer_shell_v1` event for a quick terminal layer surface (ADR 0028 Slice 2).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    LayerEvent {
+        window_key: WindowKey,
+        event: ultty::platform::wayland_layer_shell::LayerEvent,
+    },
+    /// Redraw request for a Wayland `zwlr_layer_shell_v1` surface (ADR 0028 Slice 2).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    LayerRedraw(WindowKey),
 }
 
 /// Active global hotkey backend for the quick terminal (ADR 0028 Slices 3 & 4).
@@ -245,7 +256,7 @@ struct WindowState {
     accessibility: Option<ultty::a11y::Adapter>,
     renderer: gpu::RendererState,
     cpu_frames: Option<cpu_frames::CpuFrames>,
-    window: Arc<Window>,
+    window: PlatformWindow,
     output_shown: bool,
     tab_bar: TabBarState,
     tab_width_freeze: Option<TabWidthFreeze>,
@@ -374,47 +385,86 @@ impl WindowState {
     ) -> Result<Self> {
         let create_start = Instant::now();
         let is_quick = options.is_quick();
-        let mut attributes = Window::default_attributes()
-            .with_title(WINDOW_TITLE)
-            .with_min_inner_size(LogicalSize::new(200.0, 100.0))
-            .with_transparent(true)
-            .with_decorations(false)
-            .with_visible(!config.behavior.accessibility);
-        if let Some(size) = options.physical_size {
-            attributes = attributes.with_inner_size(size);
-        } else {
-            let inner_size = options.logical_size.unwrap_or(LogicalSize::new(
-                f64::from(DEFAULT_WIDTH),
-                f64::from(DEFAULT_HEIGHT),
-            ));
-            attributes = attributes.with_inner_size(inner_size);
-        }
-        if is_quick {
-            attributes = attributes.with_window_level(WindowLevel::AlwaysOnTop);
-        }
-        if let Some(pos) = options.position {
-            attributes = attributes.with_position(pos);
-        }
         #[cfg(all(unix, not(target_os = "macos")))]
-        let attributes = {
-            let app_id = if is_quick { "ultty-quick" } else { "ultty" };
-            let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(
-                attributes, app_id, app_id,
-            );
-            if let Some(token) = options.activation_token.as_deref() {
-                winit::platform::startup_notify::WindowAttributesExtStartupNotify::with_activation_token(
-                    attrs,
-                    winit::window::ActivationToken::from_raw(token.to_owned()),
-                )
-            } else {
-                attrs
+        let layer_window = if is_quick
+            && winit::platform::wayland::ActiveEventLoopExtWayland::is_wayland(event_loop)
+        {
+            let layer_proxy = event_proxy.clone();
+            match ultty::platform::wayland_layer_shell::WaylandLayerSurface::try_create(
+                &config.quick_terminal,
+                move |event| {
+                    let _ = layer_proxy.send_event(AppEvent::LayerEvent {
+                        window_key: key,
+                        event,
+                    });
+                },
+            ) {
+                Ok(Some(surface)) => Some(PlatformWindow::from_wayland_layer(
+                    key,
+                    surface,
+                    event_proxy.clone(),
+                )),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Failed to create Wayland wlr-layer-shell quick terminal; falling back to xdg_toplevel"
+                    );
+                    None
+                }
             }
+        } else {
+            None
         };
-        let window = Arc::new(event_loop.create_window(attributes)?);
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        let layer_window: Option<PlatformWindow> = None;
+
+        let window = if let Some(layer_window) = layer_window {
+            layer_window
+        } else {
+            let mut attributes = Window::default_attributes()
+                .with_title(WINDOW_TITLE)
+                .with_min_inner_size(LogicalSize::new(200.0, 100.0))
+                .with_transparent(true)
+                .with_decorations(false)
+                .with_visible(!config.behavior.accessibility);
+            if let Some(size) = options.physical_size {
+                attributes = attributes.with_inner_size(size);
+            } else {
+                let inner_size = options.logical_size.unwrap_or(LogicalSize::new(
+                    f64::from(DEFAULT_WIDTH),
+                    f64::from(DEFAULT_HEIGHT),
+                ));
+                attributes = attributes.with_inner_size(inner_size);
+            }
+            if is_quick {
+                attributes = attributes.with_window_level(WindowLevel::AlwaysOnTop);
+            }
+            if let Some(pos) = options.position {
+                attributes = attributes.with_position(pos);
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            let attributes = {
+                let app_id = if is_quick { "ultty-quick" } else { "ultty" };
+                let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(
+                    attributes, app_id, app_id,
+                );
+                if let Some(token) = options.activation_token.as_deref() {
+                    winit::platform::startup_notify::WindowAttributesExtStartupNotify::with_activation_token(
+                        attrs,
+                        winit::window::ActivationToken::from_raw(token.to_owned()),
+                    )
+                } else {
+                    attrs
+                }
+            };
+            PlatformWindow::from_winit(Arc::new(event_loop.create_window(attributes)?))
+        };
         tracing::debug!(
             target: "ultty::startup",
             window = key.raw(),
             quick = is_quick,
+            layer_shell = window.is_wayland_layer(),
             "window created"
         );
         let size = window.inner_size();
@@ -422,9 +472,10 @@ impl WindowState {
 
         let paced_by_frame_callbacks = {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            window
-                .window_handle()
-                .is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)))
+            window.is_wayland_layer()
+                || window
+                    .window_handle()
+                    .is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)))
         };
 
         let mut scaled_font = config.font.clone();
@@ -438,7 +489,7 @@ impl WindowState {
         let mut renderer = if let Some(shared) = shared_gpu {
             match gpu::setup_with_shared(
                 shared,
-                Arc::clone(&window),
+                window.clone(),
                 size,
                 &config.colors,
                 &scaled_font,
@@ -502,17 +553,25 @@ impl WindowState {
         };
         renderer.set_tab_bar_height(tab_bar.content_top());
 
-        let accessibility = config.behavior.accessibility.then(|| {
-            let adapter =
-                ultty::a11y::Adapter::new(event_loop, &window, WINDOW_TITLE, event_proxy.clone());
-            window.set_visible(true);
-            tracing::debug!(
-                target: "ultty::startup",
-                window = key.raw(),
-                "accessibility adapter ready, window shown"
-            );
-            adapter
-        });
+        let accessibility = if config.behavior.accessibility {
+            window.as_winit().map(|winit_window| {
+                let adapter = ultty::a11y::Adapter::new(
+                    event_loop,
+                    winit_window,
+                    WINDOW_TITLE,
+                    event_proxy.clone(),
+                );
+                winit_window.set_visible(true);
+                tracing::debug!(
+                    target: "ultty::startup",
+                    window = key.raw(),
+                    "accessibility adapter ready, window shown"
+                );
+                adapter
+            })
+        } else {
+            None
+        };
         if is_quick && !paced_by_frame_callbacks {
             if let Some(pos) = options.position {
                 window.set_outer_position(pos);
@@ -522,7 +581,9 @@ impl WindowState {
             }
             window.set_window_level(WindowLevel::AlwaysOnTop);
         }
-        window.set_ime_allowed(true);
+        if let Some(winit_window) = window.as_winit() {
+            winit_window.set_ime_allowed(true);
+        }
 
         Ok(Self {
             key,
@@ -584,7 +645,7 @@ impl WindowState {
     fn start_async_gpu(
         key: WindowKey,
         event_loop: &ActiveEventLoop,
-        window: &Arc<Window>,
+        window: &PlatformWindow,
         size: PhysicalSize<u32>,
         config: &Config,
         fonts: ultty::renderer::Fonts,
@@ -594,17 +655,21 @@ impl WindowState {
     ) -> Result<gpu::RendererState> {
         *cpu_frames = cpu_frames::enabled(config.behavior.cpu_first_frames)
             .then(|| {
-                cpu_frames::CpuFrames::new(event_loop.owned_display_handle(), Arc::clone(window))
+                window.as_winit().and_then(|winit_window| {
+                    cpu_frames::CpuFrames::new(
+                        event_loop.owned_display_handle(),
+                        Arc::clone(winit_window),
+                    )
                     .inspect_err(|error| tracing::warn!("No CPU first frames: {error:#}"))
                     .ok()
+                })
             })
             .flatten();
         let (fonts_sender, fonts_receiver) = std::sync::mpsc::channel();
         let retire_cpu_frames = cpu_frames.is_some() && paced_by_frame_callbacks;
         gpu::spawn_setup(
             key,
-            event_loop.owned_display_handle(),
-            Arc::clone(window),
+            window.clone(),
             size,
             config.colors.clone(),
             fonts_receiver,
@@ -816,7 +881,7 @@ impl App {
         }
 
         let shortcuts_list = ProcessState::build_shortcuts_list(&config.keybindings);
-        let first_winit_id = first_window.window.id();
+        let first_winit_id = first_window.window.winit_id();
 
         let shared = ProcessState {
             proxy: event_proxy,
@@ -862,7 +927,9 @@ impl App {
         let mut windows = BTreeMap::new();
         windows.insert(primary_key, first_window);
         let mut window_ids = HashMap::new();
-        window_ids.insert(first_winit_id, primary_key);
+        if let Some(first_winit_id) = first_winit_id {
+            window_ids.insert(first_winit_id, primary_key);
+        }
 
         let mut app = Self {
             shared,
@@ -1034,9 +1101,11 @@ impl App {
                 WindowCreateOptions::normal(initial_size),
             ) {
                 Ok(win) => {
-                    let winit_id = win.window.id();
+                    let winit_id = win.window.winit_id();
                     self.windows.insert(key, win);
-                    self.window_ids.insert(winit_id, key);
+                    if let Some(winit_id) = winit_id {
+                        self.window_ids.insert(winit_id, key);
+                    }
                     self.with_window(key, |ctx| {
                         ctx.update_tab_bar();
                         ctx.relayout_terminals();
@@ -1158,9 +1227,11 @@ impl App {
                 self.shared.shared_gpu.as_ref(),
                 WindowCreateOptions::quick(pos, size, activation_token.map(str::to_owned)),
             )?;
-            let winit_id = win.window.id();
+            let winit_id = win.window.winit_id();
             self.windows.insert(quick_key, win);
-            self.window_ids.insert(winit_id, quick_key);
+            if let Some(winit_id) = winit_id {
+                self.window_ids.insert(winit_id, quick_key);
+            }
             self.quick_visible = true;
             self.quick_had_focus = false;
             self.focused_window = Some(quick_key);
@@ -1213,9 +1284,11 @@ impl App {
                 return Err(error);
             }
         };
-        let winit_id = win.window.id();
+        let winit_id = win.window.winit_id();
         self.windows.insert(key, win);
-        self.window_ids.insert(winit_id, key);
+        if let Some(winit_id) = winit_id {
+            self.window_ids.insert(winit_id, key);
+        }
         self.quick_window = Some(key);
         self.quick_visible = true;
         self.quick_had_focus = false;
@@ -1253,7 +1326,9 @@ impl App {
         self.quick_had_focus = false;
         if self.is_wayland {
             if let Some(win) = self.windows.remove(&quick_key) {
-                self.window_ids.remove(&win.window.id());
+                if let Some(winit_id) = win.window.winit_id() {
+                    self.window_ids.remove(&winit_id);
+                }
             }
             self.shared
                 .pending_resizes
@@ -1350,9 +1425,11 @@ impl App {
                 return Err(error);
             }
         };
-        let winit_id = win.window.id();
+        let winit_id = win.window.winit_id();
         self.windows.insert(key, win);
-        self.window_ids.insert(winit_id, key);
+        if let Some(winit_id) = winit_id {
+            self.window_ids.insert(winit_id, key);
+        }
         self.focused_window = Some(key);
         self.shared.runtime.manager.set_focused_window(key);
         self.shared.runtime.set_viewer_present(true);
@@ -1391,7 +1468,9 @@ impl App {
         }
         let removed = self.windows.remove(&key);
         if let Some(win) = removed {
-            self.window_ids.remove(&win.window.id());
+            if let Some(winit_id) = win.window.winit_id() {
+                self.window_ids.remove(&winit_id);
+            }
             if let Some(server) = self.shared.control_server.as_mut() {
                 server.publish(&ultty_protocol::control::ControlEvent::WindowClosed {
                     window: key.raw() as u64,
@@ -1522,9 +1601,11 @@ impl App {
                 if let Some(pos) = position {
                     win.window.set_outer_position(pos);
                 }
-                let winit_id = win.window.id();
+                let winit_id = win.window.winit_id();
                 self.windows.insert(new_key, win);
-                self.window_ids.insert(winit_id, new_key);
+                if let Some(winit_id) = winit_id {
+                    self.window_ids.insert(winit_id, new_key);
+                }
                 self.focused_window = Some(new_key);
                 self.shared.runtime.manager.set_focused_window(new_key);
                 self.shared.runtime.set_viewer_present(true);
@@ -1621,6 +1702,52 @@ impl App {
         if close {
             return self.close_window(key);
         }
+        false
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn handle_layer_event_for(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        key: WindowKey,
+        event: ultty::platform::wayland_layer_shell::LayerEvent,
+    ) -> bool {
+        use ultty::platform::wayland_layer_shell::LayerEvent;
+
+        match event {
+            LayerEvent::Focused(true) => {
+                if self.quick_window == Some(key) && self.quick_visible {
+                    self.quick_had_focus = true;
+                }
+                if self.is_window_visible(key) {
+                    self.focused_window = Some(key);
+                    self.shared.runtime.manager.set_focused_window(key);
+                    self.shared.sync_protocol_tabs();
+                }
+            }
+            LayerEvent::Focused(false)
+                if self.quick_window == Some(key)
+                    && self.quick_visible
+                    && self.quick_had_focus
+                    && self.shared.config.quick_terminal.autohide =>
+            {
+                self.hide_quick_window();
+                return false;
+            }
+            LayerEvent::Closed if self.quick_window == Some(key) => {
+                self.hide_quick_window();
+                return false;
+            }
+            _ => {}
+        }
+        let close = self
+            .with_window(key, |ctx| ctx.handle_layer_event(event))
+            .unwrap_or(false);
+        self.drain_pending_process_actions(event_loop);
+        if close {
+            return self.close_window(key);
+        }
+        self.update_and_schedule(event_loop);
         false
     }
 
@@ -2979,6 +3106,21 @@ impl ApplicationHandler<AppEvent> for AppHandler {
                     {
                         tracing::warn!("Failed to toggle quick terminal via hotkey: {error:#}");
                     }
+                    app.update_and_schedule(event_loop);
+                }
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            AppEvent::LayerEvent { window_key, event } => {
+                if let Some(app) = self.app.as_mut() {
+                    if app.handle_layer_event_for(event_loop, window_key, event) {
+                        event_loop.exit();
+                    }
+                }
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            AppEvent::LayerRedraw(window_key) => {
+                if let Some(app) = self.app.as_mut() {
+                    app.with_window(window_key, |ctx| ctx.redraw());
                     app.update_and_schedule(event_loop);
                 }
             }

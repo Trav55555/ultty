@@ -15,8 +15,33 @@ use ultty::url::UrlDetector;
 use ultty::vim::CopyModeResult;
 use ultty_protocol::{Key as ProtocolKey, Modifiers as ProtocolModifiers};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
+use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+
+/// Platform-agnostic key event shared by winit windows and Wayland layer surfaces.
+pub(super) struct InputKeyEvent {
+    pub(super) logical_key: Key,
+    pub(super) unmodified_key: Key,
+    pub(super) physical_key: PhysicalKey,
+    pub(super) location: KeyLocation,
+    pub(super) state: ElementState,
+    pub(super) repeat: bool,
+    pub(super) text: Option<String>,
+}
+
+impl From<&KeyEvent> for InputKeyEvent {
+    fn from(event: &KeyEvent) -> Self {
+        Self {
+            logical_key: event.logical_key.clone(),
+            unmodified_key: event.key_without_modifiers(),
+            physical_key: event.physical_key,
+            location: event.location,
+            state: event.state,
+            repeat: event.repeat,
+            text: event.text.as_deref().map(str::to_owned),
+        }
+    }
+}
 
 impl WindowCtx<'_> {
     /// Handle a window event for this window. Returns `true` if this window
@@ -26,8 +51,10 @@ impl WindowCtx<'_> {
             tracing::info!("Window {} destroyed", self.win.key.raw());
             return true;
         }
-        if let Some(adapter) = self.win.accessibility.as_mut() {
-            adapter.process_event(&self.win.window, &event);
+        if let (Some(adapter), Some(winit_window)) =
+            (self.win.accessibility.as_mut(), self.win.window.as_winit())
+        {
+            adapter.process_event(winit_window, &event);
         }
         if self.win.pending_close {
             tracing::info!("Close requested for window {}", self.win.key.raw());
@@ -50,7 +77,7 @@ impl WindowCtx<'_> {
                 self.win.modifiers = mods.state();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                self.handle_key(event);
+                self.handle_key(InputKeyEvent::from(&event));
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.win.mouse_pos = position;
@@ -1090,7 +1117,121 @@ impl WindowCtx<'_> {
         }
     }
 
-    fn handle_key(&mut self, event: KeyEvent) {
+    /// Handle one Wayland `wlr-layer-shell` event for this window.
+    /// Returns `true` if the compositor closed the layer surface.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub(super) fn handle_layer_event(
+        &mut self,
+        event: ultty::platform::wayland_layer_shell::LayerEvent,
+    ) -> bool {
+        use ultty::platform::wayland_layer_shell::LayerEvent;
+        use winit::dpi::{PhysicalPosition, PhysicalSize};
+
+        match event {
+            LayerEvent::Configured {
+                width,
+                height,
+                scale_factor,
+            } => {
+                let scale = scale_factor as f32;
+                if (self.win.scale_factor - scale).abs() > f32::EPSILON {
+                    self.handle_scale_factor_changed(scale);
+                }
+                let size = PhysicalSize::new(width, height);
+                self.handle_resize(size);
+                self.answer_pending_resizes(size);
+                self.win.needs_redraw = true;
+            }
+            LayerEvent::ScaleChanged(scale_factor) => {
+                self.handle_scale_factor_changed(scale_factor as f32);
+            }
+            LayerEvent::FrameCallback => {
+                self.redraw();
+            }
+            LayerEvent::Focused(focused) => {
+                if !focused {
+                    self.win.native_mouse_capture.clear();
+                    self.cancel_native_transcript_selection();
+                }
+                if self.terminal().is_some_and(|t| t.modes().focus_reporting) {
+                    let seq = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                    let _ = self.send_report(seq);
+                }
+            }
+            LayerEvent::ModifiersChanged(mods) => {
+                let mut state = ModifiersState::empty();
+                state.set(ModifiersState::SHIFT, mods.shift);
+                state.set(ModifiersState::CONTROL, mods.ctrl);
+                state.set(ModifiersState::ALT, mods.alt);
+                state.set(ModifiersState::SUPER, mods.logo);
+                self.win.modifiers = state;
+            }
+            LayerEvent::Key {
+                keysym,
+                unmodified_keysym,
+                evdev_keycode,
+                pressed,
+                repeat,
+                text,
+            } => {
+                let (logical_key, location) = super::platform_window::keysym_to_winit_key(keysym);
+                let (unmodified_key, _) =
+                    super::platform_window::keysym_to_winit_key(unmodified_keysym);
+                let physical_key = super::platform_window::evdev_to_physical_key(evdev_keycode);
+                self.handle_key(InputKeyEvent {
+                    logical_key,
+                    unmodified_key,
+                    physical_key,
+                    location,
+                    state: if pressed {
+                        ElementState::Pressed
+                    } else {
+                        ElementState::Released
+                    },
+                    repeat,
+                    text,
+                });
+            }
+            LayerEvent::PointerMoved { x, y } => {
+                self.win.mouse_pos = PhysicalPosition::new(x, y);
+                self.win.cursor_inside = true;
+                if self.win.reported_button.is_some() {
+                    self.report_mouse_drag();
+                } else if self.win.mouse_pressed || self.win.tab_bar.is_dragging() {
+                    self.handle_mouse_drag();
+                } else if self.terminal().is_some_and(|t| t.track_mouse_motion()) {
+                    self.handle_mouse_motion();
+                }
+                self.update_tab_hover();
+            }
+            LayerEvent::PointerLeft => {
+                self.win.cursor_inside = false;
+            }
+            LayerEvent::PointerButton { button, pressed } => {
+                let mouse_button = match button {
+                    272 => MouseButton::Left,
+                    273 => MouseButton::Right,
+                    274 => MouseButton::Middle,
+                    other => MouseButton::Other(other as u16),
+                };
+                let state = if pressed {
+                    ElementState::Pressed
+                } else {
+                    ElementState::Released
+                };
+                self.handle_mouse_button(mouse_button, state);
+            }
+            LayerEvent::PointerScroll { dx, dy } => {
+                self.handle_scroll(MouseScrollDelta::PixelDelta(PhysicalPosition::new(dx, dy)));
+            }
+            LayerEvent::Closed => {
+                return true;
+            }
+        }
+        self.win.pending_close
+    }
+
+    fn handle_key(&mut self, event: InputKeyEvent) {
         if !self.win.ime_preedit.is_empty() {
             return;
         }
@@ -1321,7 +1462,7 @@ impl WindowCtx<'_> {
         true
     }
 
-    fn send_key_to_terminal(&mut self, event: &KeyEvent) {
+    fn send_key_to_terminal(&mut self, event: &InputKeyEvent) {
         let bytes = self.encode_key(event);
         if bytes.is_empty() {
             return;
@@ -1331,10 +1472,9 @@ impl WindowCtx<'_> {
         }
     }
 
-    fn encode_key(&self, event: &KeyEvent) -> Vec<u8> {
-        let unmodified = event.key_without_modifiers();
-        let Some(key) = keys::key_from_winit(&event.logical_key, &unmodified, event.location)
-        else {
+    fn encode_key(&self, event: &InputKeyEvent) -> Vec<u8> {
+        let unmodified = &event.unmodified_key;
+        let Some(key) = keys::key_from_winit(&event.logical_key, unmodified, event.location) else {
             return Vec::new();
         };
         let pressed = event.state == ElementState::Pressed;
@@ -1402,7 +1542,7 @@ impl WindowCtx<'_> {
         )
     }
 
-    fn convert_key_event(&self, event: &KeyEvent) -> Option<(ProtocolKey, ProtocolModifiers)> {
+    fn convert_key_event(&self, event: &InputKeyEvent) -> Option<(ProtocolKey, ProtocolModifiers)> {
         let protocol_key = match &event.logical_key {
             Key::Named(named) => match named {
                 NamedKey::Escape => Some(ProtocolKey::Escape),
@@ -1489,7 +1629,7 @@ impl WindowCtx<'_> {
         true
     }
 
-    fn forward_key_to_native_sessions(&mut self, event: &KeyEvent) -> bool {
+    fn forward_key_to_native_sessions(&mut self, event: &InputKeyEvent) -> bool {
         let Some((key, modifiers)) = self.convert_key_event(event) else {
             return false;
         };
@@ -1505,7 +1645,7 @@ impl WindowCtx<'_> {
         true
     }
 
-    fn forward_key_up_to_native_sessions(&mut self, event: &KeyEvent) -> bool {
+    fn forward_key_up_to_native_sessions(&mut self, event: &InputKeyEvent) -> bool {
         let Some((key, modifiers)) = self.convert_key_event(event) else {
             return false;
         };
@@ -1575,7 +1715,7 @@ impl WindowCtx<'_> {
         tracing::debug!("Entered search mode");
     }
 
-    fn handle_copy_mode_key(&mut self, event: &KeyEvent) {
+    fn handle_copy_mode_key(&mut self, event: &InputKeyEvent) {
         self.reconcile_copy_mode_pane();
         if !self.win.copy_mode.is_active() {
             return;

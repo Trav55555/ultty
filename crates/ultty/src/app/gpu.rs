@@ -26,9 +26,9 @@ use ultty::renderer::{
 };
 use ultty::terminal_manager::WindowKey;
 use winit::dpi::PhysicalSize;
-use winit::event_loop::{EventLoopProxy, OwnedDisplayHandle};
-use winit::window::Window;
+use winit::event_loop::EventLoopProxy;
 
+use super::platform_window::PlatformWindow;
 use super::{cpu_frames, AppEvent, WindowCtx};
 
 /// Process-wide GPU objects shared across windows (ADR 0027).
@@ -308,14 +308,16 @@ pub(super) enum SharedGpuSetup {
 /// device and [`FontGridSet`] (ADR 0027 slices 1–2).
 pub(super) fn setup_with_shared(
     shared: &SharedGpu,
-    window: Arc<Window>,
+    window: PlatformWindow,
     size: PhysicalSize<u32>,
     colors: &ColorConfig,
     scaled_font: &FontConfig,
     paced_by_frame_callbacks: bool,
 ) -> SharedGpuSetup {
+    let is_layer = window.is_wayland_layer();
     let surface = match shared.instance.create_surface(window) {
         Ok(surface) => surface,
+        Err(_error) if is_layer => return SharedGpuSetup::Incompatible,
         Err(error) => return SharedGpuSetup::Failed(error.into()),
     };
     let caps = surface.get_capabilities(&shared.adapter);
@@ -359,8 +361,7 @@ pub(super) fn setup_with_shared(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_setup(
     window_key: WindowKey,
-    display: OwnedDisplayHandle,
-    window: Arc<Window>,
+    window: PlatformWindow,
     size: PhysicalSize<u32>,
     colors: ColorConfig,
     fonts: mpsc::Receiver<Fonts>,
@@ -381,7 +382,6 @@ pub(super) fn spawn_setup(
                 }
             });
             let result = setup(
-                display,
                 window,
                 size,
                 &colors,
@@ -395,8 +395,7 @@ pub(super) fn spawn_setup(
 }
 
 fn setup(
-    display: OwnedDisplayHandle,
-    window: Arc<Window>,
+    window: PlatformWindow,
     size: PhysicalSize<u32>,
     colors: &ColorConfig,
     fonts: mpsc::Receiver<Fonts>,
@@ -404,11 +403,11 @@ fn setup(
     retire_cpu_frames: Option<impl FnOnce(mpsc::Sender<()>)>,
 ) -> Result<Box<Gpu>> {
     let primary = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY);
-    let (instance, surface, adapter) = match request_gpu(&display, &window, primary) {
+    let (instance, surface, adapter) = match request_gpu(&window, primary) {
         Ok(gpu) => gpu,
         Err(primary) => {
             tracing::info!("No primary GPU backend ({primary:#}); trying GL");
-            request_gpu(&display, &window, wgpu::Backends::SECONDARY).map_err(|gl| {
+            request_gpu(&window, wgpu::Backends::SECONDARY).map_err(|gl| {
                 if ultty::platform::vulkan_icd::narrowed_env() {
                     anyhow::anyhow!(
                         "{primary:#}; with GL: {gl:#} \
@@ -470,16 +469,15 @@ fn setup(
 /// An instance, a surface for `window`, and an adapter that can draw to it,
 /// limited to `backends`.
 fn request_gpu(
-    display: &OwnedDisplayHandle,
-    window: &Arc<Window>,
+    window: &PlatformWindow,
     backends: wgpu::Backends,
 ) -> Result<(wgpu::Instance, wgpu::Surface<'static>, wgpu::Adapter)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends,
-        display: Some(Box::new(display.clone())),
+        display: Some(Box::new(window.clone())),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let surface = instance.create_surface(Arc::clone(window))?;
+    let surface = instance.create_surface(window.clone())?;
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: Some(&surface),

@@ -84,11 +84,12 @@ impl WindowCtx<'_> {
     /// Route a request against the last published accessibility tree through
     /// the same application acknowledgement path as named control actions.
     pub(super) fn handle_accessibility_event(&mut self, event: accesskit_winit::WindowEvent) {
-        let action = self
-            .win
-            .accessibility
-            .as_mut()
-            .and_then(|adapter| adapter.handle(&self.win.window, event));
+        let action = self.win.window.as_winit().and_then(|winit_window| {
+            self.win
+                .accessibility
+                .as_mut()
+                .and_then(|adapter| adapter.handle(winit_window, event))
+        });
         let Some((target, action)) = action else {
             return;
         };
