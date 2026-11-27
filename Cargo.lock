@@ -4962,9 +4962,13 @@ dependencies = [
  "ultty-vt",
  "unicode-segmentation",
  "unicode-width",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "wgpu",
  "winit",
  "x11rb",
+ "xkbcommon-dl",
+ "xkeysym",
  "zbus",
 ]
 

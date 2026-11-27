@@ -107,12 +107,16 @@ libc = "0.2"
 signal-hook = "0.3"
 polling = "3.4"
 
-# X11 and Wayland GlobalShortcuts portal hotkey support (ADR 0028 Slices 3 & 4);
+# X11 and Wayland quick-terminal hotkey & wlr-layer-shell support (ADR 0028 Slices 2, 3 & 4);
 # all already in Cargo.lock via winit / accesskit_winit / notify-rust.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 x11rb = { version = "0.13.2", default-features = false }
 zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 futures-core = { workspace = true }
+wayland-client = { version = "0.31.15", default-features = false, features = ["system"] }
+wayland-protocols-wlr = { version = "0.3.12", default-features = false, features = ["client"] }
+xkbcommon-dl = "0.4.2"
+xkeysym = "0.2.1"
 
 [dev-dependencies]
 criterion = { workspace = true }
