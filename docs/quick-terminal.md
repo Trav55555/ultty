@@ -35,11 +35,18 @@ while a quick terminal exists (even when hidden).
 position = "top"     # top, bottom, left, right, center
 size = "40%"         # percentage of the monitor axis (10%-100%) or pixels (e.g. "420px")
 autohide = true      # hide when the quick terminal loses focus
-hotkey = "ctrl+grave" # built-in global hotkey on X11 and Wayland GlobalShortcuts portal
+hotkey = "ctrl+grave" # built-in global hotkey on X11, Wayland GlobalShortcuts portal, and macOS (e.g. "cmd+grave")
 ```
 
 ## Platform behavior & compositor snippets
 
+- **macOS (Slice 5):** Ultty configures the quick terminal `NSWindow` at
+  `NSFloatingWindowLevel` with `CanJoinAllSpaces | FullScreenAuxiliary | IgnoresCycle`
+  so it opens on the active Space and over full-screen apps, activates on show,
+  and restores focus to the previously frontmost application when hidden. Set
+  `quick_terminal.hotkey` (for example `hotkey = "cmd+grave"`) to register a
+  system-wide Carbon `RegisterEventHotKey` shortcut directly in Ultty; you can
+  also trigger `ultty --quick` from Shortcuts or `skhd`.
 - **X11:** Ultty positions and sizes the quick window on the active monitor
   according to `position` and `size`, sets always-on-top, hides/shows the same
   window (`WM_CLASS` `ultty-quick`), and registers `quick_terminal.hotkey`

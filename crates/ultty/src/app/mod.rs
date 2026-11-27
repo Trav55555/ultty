@@ -184,13 +184,18 @@ enum AppEvent {
     LayerRedraw(WindowKey),
 }
 
-/// Active global hotkey backend for the quick terminal (ADR 0028 Slices 3 & 4).
-/// Held for its `Drop` implementation, which releases the grab or portal session.
-#[cfg(all(unix, not(target_os = "macos")))]
+/// Active global hotkey backend for the quick terminal (ADR 0028 Slices 3, 4 & 5).
+/// Held for its `Drop` implementation, which releases the grab, portal session,
+/// or Carbon registration.
+#[cfg(unix)]
 #[allow(dead_code)]
 enum QuickHotkeyGuard {
+    #[cfg(not(target_os = "macos"))]
     X11(ultty::platform::x11_hotkey::X11GlobalHotkey),
+    #[cfg(not(target_os = "macos"))]
     WaylandPortal(ultty::platform::wayland_portal_hotkey::WaylandPortalHotkey),
+    #[cfg(target_os = "macos")]
+    Macos(ultty::platform::macos_quick::MacosGlobalHotkey),
 }
 
 impl From<accesskit_winit::Event> for AppEvent {
@@ -245,7 +250,7 @@ struct ProcessState {
     pending_restored_windows: Vec<(WindowKey, Option<LogicalSize<f64>>)>,
     pending_reload_config: bool,
     pending_cycle_theme: bool,
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(unix)]
     quick_hotkey: Option<QuickHotkeyGuard>,
     quick_hotkey_binding: Option<String>,
 }
@@ -369,6 +374,9 @@ pub struct App {
     quick_visible: bool,
     /// Whether `quick_window` has received `Focused(true)` since it was last shown.
     quick_had_focus: bool,
+    /// Frontmost external macOS app PID saved before activating the quick terminal.
+    #[cfg(target_os = "macos")]
+    quick_previous_app: Option<i32>,
     /// True when the active winit event loop is running on Wayland.
     is_wayland: bool,
 }
@@ -458,7 +466,15 @@ impl WindowState {
                     attrs
                 }
             };
-            PlatformWindow::from_winit(Arc::new(event_loop.create_window(attributes)?))
+            let window =
+                PlatformWindow::from_winit(Arc::new(event_loop.create_window(attributes)?));
+            #[cfg(target_os = "macos")]
+            if is_quick {
+                if let Some(ns_view) = macos_ns_view(&window) {
+                    ultty::platform::macos_quick::configure_quick_window(ns_view);
+                }
+            }
+            window
         };
         tracing::debug!(
             target: "ultty::startup",
@@ -919,7 +935,7 @@ impl App {
             pending_restored_windows,
             pending_reload_config: false,
             pending_cycle_theme: false,
-            #[cfg(all(unix, not(target_os = "macos")))]
+            #[cfg(unix)]
             quick_hotkey: None,
             quick_hotkey_binding: None,
         };
@@ -939,8 +955,18 @@ impl App {
             quick_window: start_quick.then_some(primary_key),
             quick_visible: start_quick,
             quick_had_focus: false,
+            #[cfg(target_os = "macos")]
+            quick_previous_app: None,
             is_wayland,
         };
+        #[cfg(target_os = "macos")]
+        if start_quick {
+            if let Some(win) = app.windows.get(&primary_key) {
+                if let Some(ns_view) = macos_ns_view(&win.window) {
+                    ultty::platform::macos_quick::activate_and_focus_quick_window(ns_view);
+                }
+            }
+        }
 
         app.with_window(primary_key, |ctx| {
             ctx.update_tab_bar();
@@ -1016,7 +1042,35 @@ impl App {
             }
         }
 
-        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        #[cfg(target_os = "macos")]
+        {
+            self.shared.quick_hotkey = None;
+            let Some(binding) = desired else {
+                return;
+            };
+            let proxy = self.shared.proxy.clone();
+            match ultty::platform::macos_quick::MacosGlobalHotkey::register(&binding, move || {
+                let _ = proxy.send_event(AppEvent::ToggleQuickHotkey {
+                    activation_token: None,
+                });
+            }) {
+                Ok(guard) => {
+                    self.shared.quick_hotkey = Some(QuickHotkeyGuard::Macos(guard));
+                    tracing::info!(
+                        hotkey = %binding,
+                        "Registered macOS Carbon global hotkey for quick terminal"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        hotkey = %binding,
+                        "Failed to register quick_terminal.hotkey on macOS: {err}"
+                    );
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
         {
             if let Some(binding) = desired {
                 tracing::info!(
@@ -1178,6 +1232,10 @@ impl App {
         activation_token: Option<&str>,
     ) -> Result<WindowKey> {
         let start = Instant::now();
+        #[cfg(target_os = "macos")]
+        if let Some(pid) = ultty::platform::macos_quick::capture_previous_app() {
+            self.quick_previous_app = Some(pid);
+        }
         let reference_monitor = self
             .target_window_key()
             .and_then(|key| self.windows.get(&key))
@@ -1196,6 +1254,10 @@ impl App {
                     let _ = win.window.request_inner_size(size);
                     win.window.set_window_level(WindowLevel::AlwaysOnTop);
                     win.window.focus_window();
+                }
+                #[cfg(target_os = "macos")]
+                if let Some(ns_view) = macos_ns_view(&win.window) {
+                    ultty::platform::macos_quick::activate_and_focus_quick_window(ns_view);
                 }
                 win.needs_redraw = true;
                 self.quick_visible = true;
@@ -1285,6 +1347,10 @@ impl App {
             }
         };
         let winit_id = win.window.winit_id();
+        #[cfg(target_os = "macos")]
+        if let Some(ns_view) = macos_ns_view(&win.window) {
+            ultty::platform::macos_quick::activate_and_focus_quick_window(ns_view);
+        }
         self.windows.insert(key, win);
         if let Some(winit_id) = winit_id {
             self.window_ids.insert(winit_id, key);
@@ -1333,9 +1399,28 @@ impl App {
             self.shared
                 .pending_resizes
                 .retain(|(window_key, _)| *window_key != quick_key);
-        } else if let Some(win) = self.windows.get_mut(&quick_key) {
-            win.window.set_visible(false);
-            win.needs_redraw = false;
+        } else {
+            #[cfg(target_os = "macos")]
+            let macos_view = self
+                .windows
+                .get(&quick_key)
+                .and_then(|win| macos_ns_view(&win.window));
+            if let Some(win) = self.windows.get_mut(&quick_key) {
+                win.window.set_visible(false);
+                win.needs_redraw = false;
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(ns_view) = macos_view {
+                let has_other_visible = self
+                    .windows
+                    .keys()
+                    .any(|&key| key != quick_key && self.is_window_visible(key));
+                ultty::platform::macos_quick::hide_quick_window_and_restore_focus(
+                    ns_view,
+                    self.quick_previous_app.take(),
+                    has_other_visible,
+                );
+            }
         }
         if self.focused_window == Some(quick_key) {
             self.focused_window = self
@@ -2981,6 +3066,15 @@ fn save_session(manager: &TerminalManager, file: Option<&std::path::Path>) {
 
 /// Compute the quick terminal's physical `(position, size)` for the best
 /// available monitor (falling back to 1280x800 when no monitor is reported).
+#[cfg(target_os = "macos")]
+fn macos_ns_view(window: &PlatformWindow) -> Option<std::ptr::NonNull<std::ffi::c_void>> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::AppKit(handle) => Some(handle.ns_view),
+        _ => None,
+    }
+}
+
 fn quick_geometry_for_loop(
     event_loop: &ActiveEventLoop,
     preferred: Option<&winit::monitor::MonitorHandle>,

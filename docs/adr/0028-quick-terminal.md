@@ -2,7 +2,7 @@
 
 ## Status
 
-**In progress** — Slices 1–4 landed (2026-11-24 – 2026-11-27):
+**Implemented** — Slices 1–5 landed (2026-11-24 – 2026-11-27):
 - Slice 1: Quick window role (`WindowRole::Quick`, app ID / `WM_CLASS`
   `ultty-quick`), `[quick_terminal]` config (`position`, `size`, `autohide`,
   `hotkey`), `ultty --quick` (handoff to running instance or cold-start
@@ -29,8 +29,15 @@
   spec `preferred_trigger` translation, `Activated` `activation_token`
   forwarding, clean `Session::Close` on drop/reload, and graceful fallback
   message on compositors without the portal).
+- Slice 5: macOS quick terminal window polish and global hotkey
+  (`crates/ultty/src/platform/macos_quick.rs`): `NSWindow` floating level
+  (`NSFloatingWindowLevel`), all-Spaces and full-screen auxiliary collection
+  behaviour (`CanJoinAllSpaces | FullScreenAuxiliary | IgnoresCycle`),
+  frontmost-app capture and focus restoration on hide via `NSWorkspace` /
+  `NSRunningApplication`, and Carbon `RegisterEventHotKey` global hotkey
+  registration with live reload.
 
-Slice 5 (macOS) is not yet implemented. Original proposal and decisions are
+Original proposal and decisions are
 from 2026-11-17 (code references in "What Ultty has today" were to `main` at
 252c082; winit references are to 0.30.13).
 
@@ -284,7 +291,7 @@ Estimates for one engineer who knows the codebase, after ADR 0027 slices
 | 2 (**Done**, 2026-11-27) | Wayland `zwlr_layer_shell_v1` backend (`wayland_layer_shell.rs`, `PlatformWindow`): edge/center anchoring, `Layer::Top`, `exclusive_zone(0)`, `OnDemand` keyboard interactivity, `xkbcommon-dl` keymap/repeat/modifiers, pointer events, `wl_surface::frame` pacing, shared `wgpu` surface, graceful fallback to `xdg_toplevel` where unsupported | 2–3 days | `platform::wayland_layer_shell::tests::*`, `app::platform_window::tests::*`, and `scripts/e2e/quick-terminal.sh` |
 | 3 (**Done**, 2026-11-24) | X11 global hotkey from `quick_terminal.hotkey` (keybinding syntax) | 2–3 days | `platform::x11_hotkey::tests::*` and `scripts/e2e/quick-terminal.sh` under Xvfb with `xdotool key ctrl+grave` (toggles on/off/on keeping PID, plus second-instance grab conflict warning) |
 | 4 (**Done**, 2026-11-24) | Wayland `GlobalShortcuts` portal | 2–4 days | `platform::wayland_portal_hotkey::tests::*` (XDG trigger translation, request handle sanitization, activation token extraction, unsupported-portal classification); graceful message on desktops without the portal |
-| 5 | macOS: level, Spaces, activation, Carbon hotkey | 4–6 days on a Mac | macOS CI build (ADR 0029); manual check recorded |
+| 5 (**Done**, 2026-11-27) | macOS: `NSFloatingWindowLevel`, all-Spaces + full-screen auxiliary collection behaviour, activation + previous-app focus restore, Carbon `RegisterEventHotKey` | 4–6 days on a Mac | `platform::macos_quick::tests::*` and macOS CI (`macos-latest` clippy, headless check, nextest, build) |
 | 6 | Slide animation | not planned | |
 
 ## Consequences
