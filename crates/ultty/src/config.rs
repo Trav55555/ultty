@@ -48,6 +48,7 @@ const CONFIG_SECTIONS: &[&str] = &[
     "search",
     "images",
     "quick_terminal",
+    "log",
 ];
 
 impl Config {

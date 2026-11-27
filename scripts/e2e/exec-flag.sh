@@ -221,7 +221,7 @@ echo "--working-directory -e: command started in requested directory"
 # Bare --working-directory starts the shell in that directory and skips session restore.
 start_ultty /bin/sh workdir-shell --working-directory "$workdir"
 [ "$(tab_count)" -eq 1 ] || fail "bare --working-directory should open 1 tab, not restore saved tabs"
-ctl send-text $'printf "SHELLCWD=%s\\n" "$(pwd -P)"\n' >/dev/null
+ctl --focused send-text $'printf "SHELLCWD=%s\\n" "$(pwd -P)"\n' >/dev/null
 ctl wait-for "SHELLCWD=$workdir_real" --timeout 4000 >/dev/null || fail "bare --working-directory shell did not start in $workdir_real"
 kill -TERM "$ultty_pid"
 wait_exit "SIGTERM (bare --working-directory)"
