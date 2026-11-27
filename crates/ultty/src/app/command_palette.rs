@@ -3,9 +3,9 @@
 //! [`App::perform_action`], as its keybinding does.
 
 use ultty::command_palette::{PaletteKey, PaletteOutcome};
-use winit::event::KeyEvent;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
+use super::input::InputKeyEvent;
 use super::WindowCtx;
 use ultty::action::Action;
 
@@ -42,7 +42,7 @@ impl WindowCtx<'_> {
 
     /// A key pressed while the palette is open. Its own keybinding closes
     /// it again.
-    pub(super) fn handle_palette_key(&mut self, event: &KeyEvent) {
+    pub(super) fn handle_palette_key(&mut self, event: &InputKeyEvent) {
         let toggles = self
             .bound_actions(&event.logical_key)
             .contains(&Action::CommandPalette);
