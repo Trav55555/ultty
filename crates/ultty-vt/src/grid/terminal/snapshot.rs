@@ -39,6 +39,9 @@ pub struct TerminalSnapshot {
     pub theme: ThemeColors,
     /// Application palette overrides, keyed by palette index.
     pub palette: Vec<(u8, [u8; 3])>,
+    /// Application dynamic colour overrides (OSC 10 foreground, 11 background, 12 cursor).
+    #[serde(default)]
+    pub dynamic_colors: [Option<[u8; 3]>; 3],
     /// OSC 8 links, keyed by the IDs referenced by cells.
     pub hyperlinks: Vec<(u32, String)>,
     /// Shell-reported command boundaries and working directory.
@@ -279,6 +282,17 @@ impl TerminalSnapshot {
             palette: (0..=255)
                 .filter_map(|i| terminal.palette.override_for(i).map(|rgb| (i, rgb)))
                 .collect(),
+            dynamic_colors: [
+                terminal
+                    .palette
+                    .dynamic_override(crate::ansi::DynamicColor::Foreground),
+                terminal
+                    .palette
+                    .dynamic_override(crate::ansi::DynamicColor::Background),
+                terminal
+                    .palette
+                    .dynamic_override(crate::ansi::DynamicColor::Cursor),
+            ],
             hyperlinks: terminal
                 .hyperlinks
                 .iter()
@@ -360,6 +374,21 @@ impl TerminalSnapshot {
         terminal.palette.set_theme(self.theme.clone());
         for &(index, rgb) in &self.palette {
             terminal.palette.set(index, rgb);
+        }
+        for (color, rgb) in [
+            (
+                crate::ansi::DynamicColor::Foreground,
+                self.dynamic_colors[0],
+            ),
+            (
+                crate::ansi::DynamicColor::Background,
+                self.dynamic_colors[1],
+            ),
+            (crate::ansi::DynamicColor::Cursor, self.dynamic_colors[2]),
+        ] {
+            if let Some(rgb) = rgb {
+                terminal.palette.set_dynamic(color, rgb);
+            }
         }
         terminal.share_image_ids();
         terminal.image_ids.set_next(
@@ -832,7 +861,7 @@ mod tests {
         feed(
             &mut terminal,
             &mut parser,
-            b"\x1b]4;1;rgb:12/34/56\x1b\\\x1b[?1049hALT\x1b[?2004h",
+            b"\x1b]4;1;rgb:12/34/56\x1b\\\x1b]10;#abcdef;#102030;#fedcba\x07\x1b[?1049hALT\x1b[?2004h",
         );
         terminal.images_mut().add(TerminalImage {
             id: ImageId(9),
@@ -860,6 +889,9 @@ mod tests {
             assert!(view.main.row_at(index).unwrap().eq_row(&original));
         }
         assert_eq!(view.palette().color(1), [0x12, 0x34, 0x56]);
+        assert_eq!(view.palette().foreground(), [0xab, 0xcd, 0xef]);
+        assert_eq!(view.palette().background(), [0x10, 0x20, 0x30]);
+        assert_eq!(view.palette().cursor(), [0xfe, 0xdc, 0xba]);
         assert_eq!(view.hyperlinks, terminal.hyperlinks);
         assert_eq!(*view.images().images().next().unwrap().data, [1, 2, 3, 255]);
         assert!(view.take_responses().is_empty());

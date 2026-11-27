@@ -276,6 +276,12 @@ pub enum Action {
         terminator: StringTerminator,
     },
 
+    /// Change a dynamic colour (OSC 10 / 11 / 12 with a colour spec).
+    SetDynamicColor { color: DynamicColor, rgb: [u8; 3] },
+
+    /// Reset a dynamic colour to the theme default (OSC 110 / 111 / 112).
+    ResetDynamicColor(DynamicColor),
+
     /// Change a palette entry (OSC 4 ; index ; spec)
     SetPaletteColor { index: u8, rgb: [u8; 3] },
 

@@ -963,6 +963,46 @@ fn ris_resets_the_palette() {
 }
 
 #[test]
+fn osc_10_11_12_set_query_reset_and_ris() {
+    let mut term = run(10, 3, b"");
+    term.set_theme_colors(everforest());
+    feed(&mut term, b"\x1b]10;#112233;rgb:44/55/66;#778899\x07");
+    assert_eq!(
+        replies(&mut term, b"\x1b]10;?;?;?\x07"),
+        "\x1b]10;rgb:1111/2222/3333\x07\x1b]11;rgb:4444/5555/6666\x07\x1b]12;rgb:7777/8888/9999\x07"
+    );
+    assert!(term.palette().has_overrides());
+
+    feed(&mut term, b"\x1b]110\x07");
+    assert_eq!(
+        replies(&mut term, b"\x1b]10;?\x07\x1b]11;?\x07"),
+        "\x1b]10;rgb:d3d3/c6c6/aaaa\x07\x1b]11;rgb:4444/5555/6666\x07"
+    );
+    feed(&mut term, b"\x1b]111;\x07\x1b]112\x1b\\");
+    assert!(!term.palette().has_overrides());
+    assert_eq!(
+        replies(&mut term, b"\x1b]11;?\x07\x1b]12;?\x07"),
+        "\x1b]11;rgb:2d2d/3535/3b3b\x07\x1b]12;rgb:a7a7/c0c0/8080\x07"
+    );
+
+    feed(&mut term, b"\x1b]11;#ffffff\x07\x1bc");
+    assert!(!term.palette().has_overrides());
+    assert_eq!(
+        replies(&mut term, b"\x1b]11;?\x07"),
+        "\x1b]11;rgb:2d2d/3535/3b3b\x07"
+    );
+}
+
+#[test]
+fn osc_11_background_change_notifies_color_scheme_updates() {
+    let mut term = run(10, 3, b"");
+    term.set_theme_colors(everforest());
+    feed(&mut term, b"\x1b[?2031h");
+    assert_eq!(replies(&mut term, b"\x1b]11;#ffffff\x07"), "\x1b[?997;2n");
+    assert_eq!(replies(&mut term, b"\x1b]111\x07"), "\x1b[?997;1n");
+}
+
+#[test]
 fn colon_sub_parameters_are_not_printed() {
     let (text, cursor) = screen(20, 2, b"A\x1b[4:3mB\x1b[58:2::255:0:0mC\x1b[38:2:1:2:3mD");
     assert_eq!(text, rows(&["ABCD", ""]));

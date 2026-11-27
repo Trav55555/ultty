@@ -199,11 +199,6 @@ impl AnsiParser {
                         callback(Action::Notification { title, body });
                     }
                 }
-                // Dynamic colour queries (OSC 10, 11, 12). Each further
-                // `;`-separated item names the next colour, as in xterm, so
-                // `OSC 10;?;?` asks for the foreground and the background.
-                // Setting these colours is not supported, so other items are
-                // ignored.
                 "10" | "11" | "12" => {
                     let colors = [
                         DynamicColor::Foreground,
@@ -218,6 +213,8 @@ impl AnsiParser {
                     for (item, &color) in data.split(';').zip(&colors[first..]) {
                         if item == "?" {
                             callback(Action::QueryDynamicColor { color, terminator });
+                        } else if let Some(rgb) = parse_color_spec(item) {
+                            callback(Action::SetDynamicColor { color, rgb });
                         }
                     }
                 }
@@ -244,10 +241,9 @@ impl AnsiParser {
                         callback(Action::ResetPaletteColor(Some(index)));
                     }
                 }
-                // Dynamic colour resets (OSC 110, 111, 112). The dynamic
-                // colours cannot be changed, so they are always at their
-                // defaults and there is nothing to do.
-                "110" | "111" | "112" => {}
+                "110" => callback(Action::ResetDynamicColor(DynamicColor::Foreground)),
+                "111" => callback(Action::ResetDynamicColor(DynamicColor::Background)),
+                "112" => callback(Action::ResetDynamicColor(DynamicColor::Cursor)),
                 "66" => {
                     self.dispatch_text_sizing(data, callback);
                 }
@@ -262,6 +258,9 @@ impl AnsiParser {
                 133 => callback(Action::PromptStart),
                 // Bare OSC 104 resets the whole palette
                 104 => callback(Action::ResetPaletteColor(None)),
+                110 => callback(Action::ResetDynamicColor(DynamicColor::Foreground)),
+                111 => callback(Action::ResetDynamicColor(DynamicColor::Background)),
+                112 => callback(Action::ResetDynamicColor(DynamicColor::Cursor)),
                 _ => {}
             }
         }
@@ -795,6 +794,42 @@ mod tests {
     }
 
     #[test]
+    fn osc_dynamic_color_set_and_reset() {
+        use DynamicColor::*;
+        use StringTerminator::*;
+
+        assert_eq!(
+            parse(b"\x1b]10;#112233;rgb:44/55/66;?\x07"),
+            vec![
+                Action::SetDynamicColor {
+                    color: Foreground,
+                    rgb: [0x11, 0x22, 0x33],
+                },
+                Action::SetDynamicColor {
+                    color: Background,
+                    rgb: [0x44, 0x55, 0x66],
+                },
+                query(Cursor, Bel),
+            ]
+        );
+        assert_eq!(
+            parse(b"\x1b]10;;#abcdef\x1b\\"),
+            vec![Action::SetDynamicColor {
+                color: Background,
+                rgb: [0xab, 0xcd, 0xef],
+            }]
+        );
+        assert_eq!(
+            parse(b"\x1b]110\x07\x1b]111;\x07\x1b]112\x1b\\"),
+            vec![
+                Action::ResetDynamicColor(Foreground),
+                Action::ResetDynamicColor(Background),
+                Action::ResetDynamicColor(Cursor),
+            ]
+        );
+    }
+
+    #[test]
     fn osc_4_sets_and_queries_several_entries() {
         assert_eq!(
             parse(b"\x1b]4;1;#ff8000;200;?;300;?;x;?\x1b\\"),
@@ -845,9 +880,15 @@ mod tests {
     }
 
     #[test]
-    fn osc_color_set_ignored() {
-        let actions = parse(b"\x1b]10;rgb:ff/ff/ff\x07");
-        assert!(actions.is_empty());
+    fn osc_invalid_color_set_ignored() {
+        assert_eq!(
+            parse(b"\x1b]10;rgb:ff/ff/ff\x07"),
+            vec![Action::SetDynamicColor {
+                color: DynamicColor::Foreground,
+                rgb: [0xff, 0xff, 0xff],
+            }]
+        );
+        assert!(parse(b"\x1b]10;not-a-color\x07").is_empty());
     }
 
     #[test]

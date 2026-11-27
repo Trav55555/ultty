@@ -846,14 +846,10 @@ impl Terminal {
         }
     }
 
-    /// Whether the theme's background is dark (relative luminance below
+    /// Whether the effective background is dark (relative luminance below
     /// one half).
     pub fn is_dark(&self) -> bool {
-        let [r, g, b] = self
-            .palette
-            .theme()
-            .background
-            .map(|c| f32::from(c) / 255.0);
+        let [r, g, b] = self.palette.background().map(|c| f32::from(c) / 255.0);
         0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5
     }
 
@@ -1393,6 +1389,7 @@ impl Terminal {
         self.inactive_kitty_keyboard = (0, Vec::new());
         self.title_stack.clear();
         self.palette.reset(None);
+        self.palette.reset_all_dynamic();
         self.pending_column_resize = None;
     }
 
