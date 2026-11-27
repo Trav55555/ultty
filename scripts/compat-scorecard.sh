@@ -41,7 +41,7 @@ colour_scheme_updates|Theme change reports (mode 2031)|Programs restyling when t
 colour_queries|Colour queries (OSC 10, 11)|Choosing a light or dark palette at start|Reports the live theme
 terminal_name|Terminal name (XTVERSION)|Detecting the terminal without guessing from TERM|
 sixel|Sixel images|Inline images and plots|
-kitty_graphics|Kitty graphics protocol (direct transmission)|Inline images in programs that only speak kitty's protocol: kitten icat, yazi, timg, chafa|RGB, RGBA and PNG, zlib, chunked; place, delete, query, z-index. File, temp-file and shared-memory media are refused; no Unicode placeholders or animation yet
+kitty_graphics|Kitty graphics protocol (direct transmission + Unicode placeholders)|Inline images in kitten icat, yazi, timg, chafa, tmux, and Neovim (`image.nvim`)|RGB, RGBA and PNG, zlib, chunked; place, delete, query, z-index, and `U=1` / `U+10EEEE` Unicode placeholders. File, temp-file and shared-memory media are refused; no relative placement or animation
 kitty_text_sizing|Kitty text sizing (OSC 66)|Keeping emoji, symbols and box glyphs at a known cell width|Honours `w=1..=7` cell width hints; `s=` scaled text is not supported (rendered at scale 1)
 EOF
 )
