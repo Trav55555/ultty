@@ -6,6 +6,8 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+pub mod macos_quick;
+
 pub mod runtime_files;
 pub mod shutdown;
 pub mod socket;

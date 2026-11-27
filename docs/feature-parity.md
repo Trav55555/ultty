@@ -66,27 +66,29 @@ Ranked by how much a typical user would notice:
    and can switch between a light and a dark theme with the system
    appearance, which Ultty does not read. Themes whose licence is unknown or
    restrictive upstream are left out.
-9. **Multi-window and quick terminal.** *Fixed for multi-window; Slice 1
-   shipped for quick terminal.* "New window" opens an in-process window sharing
-   the GPU device, font database, and ref-counted per-size glyph atlases with
-   per-window zoom; `ulttyctl` supports window-scoped automation (`windows`,
-   `new-window`, `close-window`, `move-tab`, `toggle-quick`, `show-quick`,
-   `hide-quick`, `--window`, and `window_opened`/`window_closed` events); tabs
-   can move between windows or detach via drag-out, context menu, and command
-   palette while keeping live PTYs; `SessionData` v2 saves and restores
-   multiple windows and their logical sizes with v1 backward compatibility;
-   opt-in `behavior.single_instance = true` hands off new `ultty` launches to
-   the running instance with `ultty --new-process` as an override
+9. **Multi-window and quick terminal (implemented).** "New window" opens an
+   in-process window sharing the GPU device, font database, and ref-counted
+   per-size glyph atlases with per-window zoom; `ulttyctl` supports
+   window-scoped automation (`windows`, `new-window`, `close-window`,
+   `move-tab`, `toggle-quick`, `show-quick`, `hide-quick`, `--window`, and
+   `window_opened`/`window_closed` events); tabs can move between windows or
+   detach via drag-out, context menu, and command palette while keeping live
+   PTYs; `SessionData` v2 saves and restores multiple windows and their logical
+   sizes with v1 backward compatibility; opt-in `behavior.single_instance = true`
+   hands off new `ultty` launches to the running instance with
+   `ultty --new-process` as an override
    ([ADR 0027](adr/0027-multiple-windows-per-process.md) slices 1–6; opt-in
    `behavior.window_per_process = true` keeps process isolation); and
    `ultty --quick` / `[quick_terminal]` provides a toggleable quick terminal on
-   X11 (built-in `XGrabKey`) and Wayland (native `zwlr_layer_shell_v1`
+   X11 (built-in `XGrabKey`), Wayland (native `zwlr_layer_shell_v1`
    edge/center anchoring on wlroots/Hyprland/sway/river/niri/KWin with
    automatic `xdg_toplevel` fallback on GNOME, plus
    `org.freedesktop.portal.GlobalShortcuts` with graceful compositor-binding
-   fallback) ([ADR 0028](adr/0028-quick-terminal.md) slices 1–4,
-   [docs/quick-terminal.md](quick-terminal.md)). Still missing for quick
-   terminal: macOS quick terminal/hotkey (slice 5).
+   fallback), and macOS (`NSFloatingWindowLevel`, all-Spaces + full-screen
+   auxiliary collection behaviour, activation + previous-app focus restore, and
+   Carbon `RegisterEventHotKey` global hotkey)
+   ([ADR 0028](adr/0028-quick-terminal.md) slices 1–5,
+   [docs/quick-terminal.md](quick-terminal.md)).
 10. **Linux x86_64 only in practice.** Release builds and CI cover Linux
     x86_64 only. macOS code exists but is not built or tested by CI. There
     is no Windows or BSD support. Alacritty runs on Linux, BSD, macOS and
@@ -209,7 +211,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Splits | yes; nested | yes; draggable | no | `pane_layout.rs`; `terminal_manager.rs` `split_pane` |
 | Multiple windows | partial: in-process windows sharing GPU device, font database, and ref-counted glyph atlases with per-window zoom (ADR 0027 slices 1–2; opt-in `behavior.window_per_process = true`); `ulttyctl --window`, session v2, moving tabs and single-instance pending | yes | yes; `CreateNewWindow`, `msg create-window` | `app/mod.rs` `App::open_new_window`; `app/gpu.rs` `SharedGpu`; `renderer/text.rs` `FontGridSet`; `scripts/e2e/multi-window.sh` |
 | Native vs self-drawn UI | self-drawn; no decorations, own tab bar | native GTK4/libadwaita and AppKit | native decorations, no chrome | `app/mod.rs` `with_decorations(false)`; `renderer/tabbar.rs` |
-| Quick terminal | no | yes; macOS and Wayland | no | none |
+| Quick terminal | yes; X11, Wayland (`wlr-layer-shell` + `xdg_toplevel` fallback + `GlobalShortcuts` portal), and macOS (`NSFloatingWindowLevel`, all Spaces, Carbon global hotkey) | yes; macOS and Wayland | no | `app/mod.rs` `toggle_quick_window`; `platform/{x11_hotkey,wayland_layer_shell,wayland_portal_hotkey,macos_quick}.rs`; `scripts/e2e/quick-terminal.sh` |
 | Search in scrollback | partial: in copy mode; smart case, optional regex, matches across wrapped lines, all matches highlighted with a count; no search bar | yes since 1.3 | yes; regex | `vim/search.rs`; `app/mod.rs` `perform_search` |
 | URL detection | yes; regex, Ctrl+click | yes; `link-url`, previews | yes; configurable regex hints | `url.rs` |
 | Vi or copy mode | yes; motions, search, char/line/block selection | no | yes | `vim/mod.rs` (tests in module) |
