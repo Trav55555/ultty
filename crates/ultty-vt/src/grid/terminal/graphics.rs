@@ -7,7 +7,7 @@ use super::Terminal;
 use crate::grid::graphics::command::{self, Command, Verb};
 use crate::grid::graphics::decode::{self, Encoding};
 use crate::grid::graphics::reply::{self, Addressee, Error};
-use crate::grid::graphics::store::{KittyImage, Upload};
+use crate::grid::graphics::store::{KittyImage, Upload, VirtualPlacement};
 use crate::grid::{ImageId, KittyPlacement, TerminalImage};
 
 impl Terminal {
@@ -197,6 +197,37 @@ impl Terminal {
         } else {
             command.placement_id
         };
+        if command.virtual_placement {
+            if client_id == 0 {
+                return Ok(());
+            }
+            let buffer = self.buffer_mut();
+            let previous = buffer
+                .kitty_images_mut()
+                .remove_virtual_placement(image, placement_id);
+            buffer
+                .kitty_images_mut()
+                .insert_virtual_placement(VirtualPlacement {
+                    image,
+                    client_id,
+                    placement_id,
+                    cols: layout.cols,
+                    rows: layout.rows,
+                    source: layout.source,
+                    dest: layout.dest,
+                    z: command.z,
+                });
+            if !buffer.enforce_image_limits(&[image]) {
+                buffer
+                    .kitty_images_mut()
+                    .remove_virtual_placement(image, placement_id);
+                if let Some(prev) = previous {
+                    buffer.kitty_images_mut().insert_virtual_placement(prev);
+                }
+                return Err(Error::NO_SPACE);
+            }
+            return Ok(());
+        }
         let cursor = self.grid().cursor().position;
         let line = self.buffer().line_of_screen_row(cursor.row);
         let id = self.allocate_image_id();
@@ -317,6 +348,23 @@ impl Terminal {
                 }
                 _ => true,
             });
+        if matches!(what, b'i' | b'n' | b'r') {
+            buffer.kitty_images_mut().retain_virtual_placements(|vp| {
+                let delete = match what {
+                    b'i' | b'n' => {
+                        named == Some(vp.image)
+                            && (command.placement_id == 0
+                                || vp.placement_id == command.placement_id)
+                    }
+                    b'r' => in_range(vp.client_id),
+                    _ => false,
+                };
+                if delete {
+                    touched.insert(vp.image);
+                }
+                !delete
+            });
+        }
         if free {
             // Images named by id or number go even if never placed, as do
             // those in an id range (kitty's `handle_delete_command`).
@@ -334,6 +382,12 @@ impl Terminal {
                 .images()
                 .images()
                 .filter_map(|placed| placed.kitty.as_ref().map(|kitty| kitty.image))
+                .chain(
+                    buffer
+                        .kitty_images()
+                        .virtual_placements()
+                        .map(|vp| vp.image),
+                )
                 .collect();
             for id in touched.difference(&placed) {
                 buffer.kitty_images_mut().remove(*id);

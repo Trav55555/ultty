@@ -171,7 +171,7 @@ impl<'a> RowView<'a> {
             let Some(cell) = self.cell(col) else {
                 break;
             };
-            if cell.is_wide_spacer() {
+            if cell.is_wide_spacer() || cell.char() == crate::grid::graphics::PLACEHOLDER_CHAR {
                 continue;
             }
             text.push(cell.char());

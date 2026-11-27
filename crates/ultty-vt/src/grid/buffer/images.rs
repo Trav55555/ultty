@@ -54,7 +54,7 @@ impl Buffer {
             let count = self.images.sixel_count() + self.kitty.len();
             if bytes <= self.image_quota
                 && count <= MAX_IMAGE_STORE_COUNT
-                && self.images.len() <= MAX_PLACEMENTS
+                && self.images.len() + self.kitty.virtual_placements_len() <= MAX_PLACEMENTS
             {
                 return true;
             }
@@ -80,6 +80,10 @@ impl Buffer {
                     on_screen.insert(kitty.image);
                 }
             }
+        }
+        for vp in self.kitty.virtual_placements() {
+            placed.insert(vp.image);
+            on_screen.insert(vp.image);
         }
         let kitty = || self.kitty.iter().filter(|image| !keep.contains(&image.id));
         if let Some(image) = kitty()
@@ -142,6 +146,7 @@ impl Buffer {
             .images
             .images()
             .filter_map(|image| image.kitty.as_ref().map(|kitty| kitty.image))
+            .chain(self.kitty.virtual_placements().map(|vp| vp.image))
             .collect();
         let orphans: Vec<ImageId> = self
             .kitty
@@ -161,13 +166,11 @@ impl Buffer {
     pub(super) fn check_image_integrity(&self) -> Result<(), String> {
         let bytes = self.images.total_bytes() + self.kitty.bytes();
         let count = self.images.sixel_count() + self.kitty.len();
-        if bytes > self.image_quota
-            || count > MAX_IMAGE_STORE_COUNT
-            || self.images.len() > MAX_PLACEMENTS
+        let placements = self.images.len() + self.kitty.virtual_placements_len();
+        if bytes > self.image_quota || count > MAX_IMAGE_STORE_COUNT || placements > MAX_PLACEMENTS
         {
             return Err(format!(
-                "screen holds {count} images, {} placements and {bytes} image bytes, beyond its limits",
-                self.images.len()
+                "screen holds {count} images, {placements} placements and {bytes} image bytes, beyond its limits"
             ));
         }
         let owned: usize = self.images.images().map(TerminalImage::owned_bytes).sum();
