@@ -46,20 +46,22 @@ hotkey = "ctrl+grave" # built-in global hotkey on X11 and Wayland GlobalShortcut
   directly via `XGrabKey` (updating live on config reload and logging a clear
   warning if another client already holds the grab). You can still bind
   `ultty --quick` in your WM if you prefer.
-- **Wayland (Slices 1 & 4):** Ultty creates an `xdg_toplevel` with app ID
-  `ultty-quick` (dropped on hide, recreated on show while keeping tabs/PTYs
+- **Wayland (Slices 1, 2 & 4):** On compositors that advertise
+  `zwlr_layer_shell_v1` (Hyprland, sway, river, niri, labwc, KDE Plasma), Ultty
+  anchors the quick terminal natively as a layer-shell overlay (`Layer::Top`,
+  `exclusive_zone(0)`, namespace `ultty-quick`) positioned and sized directly
+  from `quick_terminal.position` and `quick_terminal.size` — no compositor
+  window rules are required. On compositors without `zwlr_layer_shell_v1` (such
+  as GNOME/Mutter), Ultty automatically falls back to an `xdg_toplevel` with app
+  ID `ultty-quick` (dropped on hide, recreated on show while keeping tabs/PTYs
   alive). If `quick_terminal.hotkey` is set, Ultty registers it through the
   XDG `org.freedesktop.portal.GlobalShortcuts` portal (supported on KDE
   Plasma 5.27+, GNOME 48+, and Hyprland with `xdg-desktop-portal-hyprland`)
-  and forwards the portal's `activation_token` so the quick window receives
-  focus. On compositors without the `GlobalShortcuts` portal (such as sway or
-  niri), Ultty logs a graceful fallback message and you bind `ultty --quick`
-  in your compositor config. Because Wayland clients cannot self-position
-  ordinary toplevels without `wlr-layer-shell` (planned for ADR 0028 Slice 2),
-  placement and floating/sticky behavior come from your compositor's window
-  rules below. On GNOME (which has no layer shell or built-in window rules),
-  the quick terminal behaves as an ordinary window that toggles open and
-  closed.
+  and forwards the portal's `activation_token`. On compositors without the
+  `GlobalShortcuts` portal (such as sway or niri), Ultty logs a graceful
+  fallback message and you bind `ultty --quick` in your compositor config. The
+  window rules below are optional fallback rules if you prefer toplevel
+  placement.
 
 ### sway
 

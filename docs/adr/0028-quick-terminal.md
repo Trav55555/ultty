@@ -2,7 +2,7 @@
 
 ## Status
 
-**In progress** — Slices 1, 3, and 4 landed (2026-11-24):
+**In progress** — Slices 1–4 landed (2026-11-24 – 2026-11-27):
 - Slice 1: Quick window role (`WindowRole::Quick`, app ID / `WM_CLASS`
   `ultty-quick`), `[quick_terminal]` config (`position`, `size`, `autohide`,
   `hotkey`), `ultty --quick` (handoff to running instance or cold-start
@@ -11,6 +11,15 @@
   position/size/always-on-top/hide-show, Wayland drop-and-recreate while
   preserving tabs and PTYs, focus-loss autohide, session exclusion, and
   compositor setup snippets in [docs/quick-terminal.md](../quick-terminal.md).
+- Slice 2: Wayland `zwlr_layer_shell_v1` backend
+  (`crates/ultty/src/platform/wayland_layer_shell.rs`,
+  `crates/ultty/src/app/platform_window.rs`) anchoring the quick terminal to
+  `top`/`bottom`/`left`/`right`/`center` on `Layer::Top` with `exclusive_zone(0)`,
+  `KeyboardInteractivity::OnDemand`, namespace `"ultty-quick"`, `libxkbcommon`
+  (`xkbcommon-dl`) keymap/repeat/modifier handling, pointer input, and
+  `wl_surface::frame` pacing over the shared `wgpu` device, with automatic
+  fallback to Slice 1's `ultty-quick` `xdg_toplevel` on compositors without
+  `zwlr_layer_shell_v1` (such as GNOME).
 - Slice 3: X11 global hotkey via `x11rb` (`XGrabKey` on the root window across
   CapsLock/NumLock modifier variants, live re-registration on config reload,
   clear `AlreadyGrabbed` conflict reporting, zero-polling wakeup loop),
@@ -21,7 +30,7 @@
   forwarding, clean `Session::Close` on drop/reload, and graceful fallback
   message on compositors without the portal).
 
-Slices 2 and 5 are not yet implemented. Original proposal and decisions are
+Slice 5 (macOS) is not yet implemented. Original proposal and decisions are
 from 2026-11-17 (code references in "What Ultty has today" were to `main` at
 252c082; winit references are to 0.30.13).
 
@@ -272,7 +281,7 @@ Estimates for one engineer who knows the codebase, after ADR 0027 slices
 | Slice | Contents | Effort | Check |
 |---|---|---|---|
 | 1 (**Done**, 2026-11-24) | Quick role; `ultty --quick`; `toggle-quick`, `show-quick`, `hide-quick`; X11 position, size, always-on-top, hide/show; Wayland toplevel `ultty-quick` dropped and recreated, activation token forwarded; autohide; docs with sway, Hyprland, niri, KDE, GNOME and X11 binding snippets | 4–6 days | `config::tests::test_quick_terminal_config_defaults_parsing_and_geometry`, `control::single_instance::tests::quick_handoff_forwards_activation_token_and_reports_visibility`, and `scripts/e2e/quick-terminal.sh` (toggles twice under Xvfb, shell PID unchanged, X11 mapped state flips, hidden quick excluded from default targets/session save, keeps process alive when last normal window closes) |
-| 2 | Wayland layer shell: prototype SCTK path (keyboard, frame callbacks), then either finish it or adopt winit's | 2–3 days prototype; 8–12 days to finish | Prototype report with a go/no-go |
+| 2 (**Done**, 2026-11-27) | Wayland `zwlr_layer_shell_v1` backend (`wayland_layer_shell.rs`, `PlatformWindow`): edge/center anchoring, `Layer::Top`, `exclusive_zone(0)`, `OnDemand` keyboard interactivity, `xkbcommon-dl` keymap/repeat/modifiers, pointer events, `wl_surface::frame` pacing, shared `wgpu` surface, graceful fallback to `xdg_toplevel` where unsupported | 2–3 days | `platform::wayland_layer_shell::tests::*`, `app::platform_window::tests::*`, and `scripts/e2e/quick-terminal.sh` |
 | 3 (**Done**, 2026-11-24) | X11 global hotkey from `quick_terminal.hotkey` (keybinding syntax) | 2–3 days | `platform::x11_hotkey::tests::*` and `scripts/e2e/quick-terminal.sh` under Xvfb with `xdotool key ctrl+grave` (toggles on/off/on keeping PID, plus second-instance grab conflict warning) |
 | 4 (**Done**, 2026-11-24) | Wayland `GlobalShortcuts` portal | 2–4 days | `platform::wayland_portal_hotkey::tests::*` (XDG trigger translation, request handle sanitization, activation token extraction, unsupported-portal classification); graceful message on desktops without the portal |
 | 5 | macOS: level, Spaces, activation, Carbon hotkey | 4–6 days on a Mac | macOS CI build (ADR 0029); manual check recorded |
