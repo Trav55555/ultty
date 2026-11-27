@@ -1908,7 +1908,9 @@ impl TextRenderer {
                 None => continue,
             };
 
-            if cell.has_flag(CellFlags::HIDDEN) {
+            if cell.has_flag(CellFlags::HIDDEN)
+                || cell.char() == ultty_vt::grid::graphics::PLACEHOLDER_CHAR
+            {
                 continue;
             }
 

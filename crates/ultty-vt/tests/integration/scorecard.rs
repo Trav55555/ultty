@@ -234,6 +234,20 @@ fn scorecard_kitty_graphics() {
     let placed = term.images().images().next().expect("placed");
     assert_eq!((placed.width, placed.height), (1, 1));
     assert!(placed.kitty.is_some());
+
+    assert_eq!(
+        replies(&mut term, b"\x1b_Ga=p,U=1,i=1,c=2,r=1\x1b\\"),
+        "\x1b_Gi=1;OK\x1b\\"
+    );
+    let placeholder = format!(
+        "\x1b[38;5;1m{}{}{}\x1b[39m",
+        ultty_vt::grid::graphics::PLACEHOLDER_CHAR,
+        ultty_vt::grid::graphics::DIACRITICS[0],
+        ultty_vt::grid::graphics::PLACEHOLDER_CHAR,
+    );
+    feed(&mut term, placeholder.as_bytes());
+    let quads = ultty_vt::grid::graphics::resolve_visible_placeholders(term.buffer(), |_| true);
+    assert_eq!(quads.len(), 1);
 }
 
 #[test]

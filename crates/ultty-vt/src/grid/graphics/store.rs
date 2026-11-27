@@ -36,6 +36,29 @@ pub struct KittyImage {
     pub transient: bool,
 }
 
+/// A virtual placement (`U=1`) used as a prototype for `U+10EEEE` Unicode
+/// placeholder cells (ADR 0026 Slice 2).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct VirtualPlacement {
+    /// Internal id of the stored Kitty image (also its texture id).
+    pub image: ImageId,
+    /// The client's image id (`i=`, or the terminal-assigned id for `I=`).
+    pub client_id: u32,
+    /// The client's placement id (`p=`), 0 for none.
+    pub placement_id: u32,
+    /// Prototype width in cells.
+    pub cols: u16,
+    /// Prototype height in cells.
+    pub rows: u16,
+    /// Source rectangle in image pixels: `[x, y, width, height]`.
+    pub source: [u32; 4],
+    /// Drawn rectangle inside the `cols x rows` prototype, in cells:
+    /// `[x, y, width, height]`.
+    pub dest: [f32; 4],
+    /// Stacking order relative to text (`z=`).
+    pub z: i32,
+}
+
 /// A chunked upload in progress (spec, "Remote client").
 #[derive(Debug, Clone)]
 pub struct Upload {
@@ -57,6 +80,8 @@ pub struct KittyImages {
     bytes: usize,
     /// Where the search for a free client id starts.
     next_client_id: u32,
+    /// Virtual placements (`U=1`) keyed by `(image, placement_id)`.
+    virtual_placements: BTreeMap<(ImageId, u32), VirtualPlacement>,
     /// The upload in flight, if any.
     pub upload: Option<Upload>,
 }
@@ -78,14 +103,82 @@ impl KittyImages {
         replaced
     }
 
-    /// Remove an image by internal id.
+    /// Remove an image by internal id and any virtual placements referring to it.
     pub fn remove(&mut self, id: ImageId) -> Option<KittyImage> {
         let image = self.images.remove(&id)?;
         self.bytes -= image.rgba.len();
         if image.client_id != 0 && self.by_client.get(&image.client_id) == Some(&id) {
             self.by_client.remove(&image.client_id);
         }
+        self.virtual_placements
+            .retain(|&(img_id, _), _| img_id != id);
         Some(image)
+    }
+
+    /// Store or replace a virtual placement (`U=1`).
+    pub fn insert_virtual_placement(&mut self, placement: VirtualPlacement) {
+        self.virtual_placements
+            .insert((placement.image, placement.placement_id), placement);
+    }
+
+    /// Remove a virtual placement by `(image, placement_id)`.
+    pub fn remove_virtual_placement(
+        &mut self,
+        image: ImageId,
+        placement_id: u32,
+    ) -> Option<VirtualPlacement> {
+        self.virtual_placements.remove(&(image, placement_id))
+    }
+
+    /// Retain only virtual placements satisfying `keep`.
+    pub fn retain_virtual_placements(&mut self, mut keep: impl FnMut(&VirtualPlacement) -> bool) {
+        self.virtual_placements.retain(|_, vp| keep(vp));
+    }
+
+    /// Look up a virtual placement by internal image id and placement id.
+    pub fn virtual_placement(
+        &self,
+        image: ImageId,
+        placement_id: u32,
+    ) -> Option<&VirtualPlacement> {
+        self.virtual_placements.get(&(image, placement_id))
+    }
+
+    /// Look up the image and virtual placement for a placeholder cell's
+    /// `(client_id, placement_id)`. When `placement_id == 0`, returns the
+    /// placement with id 0 if present, or any virtual placement for the image.
+    pub fn virtual_placement_for(
+        &self,
+        client_id: u32,
+        placement_id: u32,
+    ) -> Option<(&KittyImage, &VirtualPlacement)> {
+        let image = self.by_client(client_id)?;
+        let vp = if placement_id != 0 {
+            self.virtual_placements.get(&(image.id, placement_id))?
+        } else {
+            self.virtual_placements.get(&(image.id, 0)).or_else(|| {
+                self.virtual_placements
+                    .range((image.id, 0)..=(image.id, u32::MAX))
+                    .next()
+                    .map(|(_, vp)| vp)
+            })?
+        };
+        Some((image, vp))
+    }
+
+    /// Whether any virtual placements exist on this screen.
+    pub fn has_virtual_placements(&self) -> bool {
+        !self.virtual_placements.is_empty()
+    }
+
+    /// Number of virtual placements on this screen.
+    pub fn virtual_placements_len(&self) -> usize {
+        self.virtual_placements.len()
+    }
+
+    /// Every virtual placement on this screen.
+    pub fn virtual_placements(&self) -> impl Iterator<Item = &VirtualPlacement> {
+        self.virtual_placements.values()
     }
 
     /// An image by internal id.
@@ -142,15 +235,16 @@ impl KittyImages {
         self.upload.as_ref().map_or(0, |upload| upload.data.len())
     }
 
-    /// Drop every image and the upload in flight.
+    /// Drop every image, virtual placement, and the upload in flight.
     pub fn clear(&mut self) {
         self.images.clear();
         self.by_client.clear();
+        self.virtual_placements.clear();
         self.bytes = 0;
         self.upload = None;
     }
 
-    /// Whether the byte count and the client map agree with the images.
+    /// Whether the byte count, client map, and virtual placements agree with the images.
     pub fn is_consistent(&self) -> bool {
         let bytes: usize = self.images.values().map(|image| image.rgba.len()).sum();
         bytes == self.bytes
@@ -158,6 +252,9 @@ impl KittyImages {
                 self.images
                     .get(id)
                     .is_some_and(|image| image.client_id == *client)
+            })
+            && self.virtual_placements.iter().all(|(&(img_id, pid), vp)| {
+                vp.image == img_id && vp.placement_id == pid && self.images.contains_key(&img_id)
             })
     }
 }

@@ -104,7 +104,7 @@ pub struct Command {
     pub hints: u32,
     /// `d`: what to delete, `a` by default.
     pub delete: u8,
-    /// `U` is non-zero: a virtual placement, refused in slice 1.
+    /// `U` is non-zero: a virtual placement for Unicode placeholders (`U+10EEEE`).
     pub virtual_placement: bool,
     /// `P`, `Q`, `H` or `V` is non-zero: a relative placement, refused in
     /// slice 1.
@@ -280,13 +280,8 @@ impl Command {
             }
         }
         let places = matches!(self.verb, Verb::TransmitAndPlace | Verb::Place);
-        if places {
-            if self.virtual_placement {
-                return Some(Error::PLACEHOLDER);
-            }
-            if self.relative {
-                return Some(Error::RELATIVE);
-            }
+        if places && self.relative {
+            return Some(Error::RELATIVE);
         }
         None
     }
@@ -392,7 +387,6 @@ mod tests {
             (b"i=1,f=16", Error::INDEXED),
             (b"i=1,f=7", Error::UNKNOWN_FORMAT),
             (b"i=1,o=x", Error::UNKNOWN_COMPRESSION),
-            (b"i=1,a=p,U=1", Error::PLACEHOLDER),
             (b"i=1,a=T,P=2", Error::RELATIVE),
             (b"i=1,a=p,H=-1", Error::RELATIVE),
             (b"i=1,a=f", Error::ANIMATION),
@@ -416,6 +410,8 @@ mod tests {
             b"a=p,i=1,p=2,z=-1",
             b"a=d,d=Z,z=1",
             b"a=p,i=1,U=0,P=0,H=0",
+            b"a=p,i=1,U=1,c=4,r=2",
+            b"a=T,i=1,U=1,f=32,s=1,v=1",
             b"m=1",
         ] {
             assert_eq!(parse(control).0.refusal(), None, "{control:?}");

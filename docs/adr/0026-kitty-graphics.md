@@ -2,8 +2,8 @@
 
 ## Status
 
-**Accepted for slices 0 and 1** (proposed 2026-11-12; slice 1 scheduled
-2026-11-17). Slices 2 and 3 are not scheduled.
+**Implemented for slices 0, 1, and 2** (proposed 2026-11-12; slice 1 scheduled
+2026-11-17; slice 2 landed 2026-11-27). Slice 3 (animation) is not scheduled.
 
 Slice 1 is built; see "Slice 1 as built" below for what it settled and
 where it differs from the plan.
@@ -696,7 +696,7 @@ prototype. Each slice also needs `cargo test --workspace`, clippy with
 |---|---|---|---|
 | 0 (done) | Line-pinned placements and the per-screen store for sixel; clear rules; DCS overflow; images in `encode_panes`; cache key and byte cap; PTY pixel size | 4–6 days (done in #129–#134) | The new sixel conformance tests; split-pane screenshot sampling |
 | 1 | APC `G` framing; commands; direct `f=24/32/100` with `o=z`; chunking; place, delete, query; replies; z passes; quotas and eviction; `ulttyctl images`; fuzz and proptests; scorecard; security-audit row | 8–12 days | Conformance, proptests, fuzz runs clean for 1 hour, kitty-graphics.sh |
-| 2 | Virtual placements; placeholder rendering; diacritics table; copy rule; optional relative placements | 4–6 days (plus 2–3 for relative placement) | Placeholder conformance; tmux e2e |
+| 2 (**Done**, 2026-11-27) | Virtual placements (`U=1`); `U+10EEEE` placeholder resolver with official 297-entry diacritics table and 3 inheritance rules; coalesced GPU quad rendering; copy/decoration suppression; spec deletion rules (`i`/`I`/`n`/`N`/`r`/`R`) | 4–6 days (plus 2–3 for relative placement) | `kitty_graphics.rs` virtual placement & placeholder conformance tests; `scorecard_kitty_graphics` |
 | 3 | Animation | 6–10 days | Not planned |
 
 ## Open questions

@@ -155,22 +155,38 @@ impl Renderer {
 
     /// Upload an image to the GPU and cache it.
     fn upload_image(&mut self, owner: u64, image: &TerminalImage) -> bool {
-        let key = ImageKey::new(owner, image.texture());
+        self.upload_rgba_texture(
+            owner,
+            image.texture(),
+            image.width,
+            image.height,
+            &image.data,
+        )
+    }
+
+    fn upload_rgba_texture(
+        &mut self,
+        owner: u64,
+        texture_id: crate::grid::ImageId,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> bool {
+        let key = ImageKey::new(owner, texture_id);
         if self.image_cache.contains(&key) {
             return true;
         }
 
         if !image_upload_size_ok(
-            image.width,
-            image.height,
-            image.data.len(),
+            width,
+            height,
+            data.len(),
             self.device.limits().max_texture_dimension_2d,
             "terminal image",
         ) {
             return false;
         }
 
-        // Ensure image pipeline exists
         if self.image_pipeline.is_none() {
             self.create_image_pipeline();
         }
@@ -179,12 +195,11 @@ impl Renderer {
             return false;
         };
 
-        // Create texture
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("image_texture"),
             size: wgpu::Extent3d {
-                width: image.width,
-                height: image.height,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -195,7 +210,6 @@ impl Renderer {
             view_formats: &[],
         });
 
-        // Upload pixel data
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -203,23 +217,21 @@ impl Renderer {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &image.data,
+            data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(image.width * 4),
-                rows_per_image: Some(image.height),
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
             },
             wgpu::Extent3d {
-                width: image.width,
-                height: image.height,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
         );
 
-        // Create texture view
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create bind group
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("image_bind_group"),
             layout: &pipeline.bind_group_layout,
@@ -240,11 +252,11 @@ impl Renderer {
             CachedImageTexture {
                 texture,
                 bind_group,
-                width: image.width,
-                height: image.height,
+                width,
+                height,
                 revision: None,
             },
-            image.data.len(),
+            data.len(),
         );
 
         true
@@ -369,12 +381,17 @@ impl Renderer {
 
     /// Check if there are images to render.
     pub fn has_images(&self, terminal: &Terminal) -> bool {
-        !terminal.images().is_empty()
+        !terminal.images().is_empty() || terminal.buffer().kitty_images().has_virtual_placements()
     }
 
     /// Whether any of the terminal's images draw in `layer`.
     pub(super) fn has_images_in(&self, terminal: &Terminal, layer: ImageLayer) -> bool {
         terminal.images().images().any(|image| layer.holds(image.z))
+            || terminal
+                .buffer()
+                .kitty_images()
+                .virtual_placements()
+                .any(|vp| layer.holds(vp.z))
     }
 
     /// Before the cell backgrounds of a frame that starts by clearing to
@@ -449,14 +466,19 @@ impl Renderer {
             .saturating_sub(buffer.scroll_offset());
         let owner = terminal.uid();
 
-        let mut images: Vec<_> = terminal
+        struct DrawQuad {
+            z: i32,
+            texture: crate::grid::ImageId,
+            order: u32,
+            quad: ClippedImage,
+        }
+
+        let mut draws: Vec<DrawQuad> = Vec::new();
+        for image in terminal
             .images()
             .images()
             .filter(|image| layer.holds(image.z))
-            .collect();
-        images.sort_by_key(|image| (image.z, image.texture(), image.id));
-        // Upload any new image, then render each one with its own texture
-        for image in images {
+        {
             let Some(quad) = clip_placement(
                 image,
                 image.line as isize - top_line as isize,
@@ -468,9 +490,51 @@ impl Renderer {
             if !self.upload_image(owner, image) {
                 continue;
             }
-            let Some(cached) = self.image_cache.get(&ImageKey::new(owner, image.texture())) else {
+            draws.push(DrawQuad {
+                z: image.z,
+                texture: image.texture(),
+                order: image.id.0,
+                quad,
+            });
+        }
+        let placeholders =
+            ultty_vt::grid::graphics::resolve_visible_placeholders(buffer, |vp| layer.holds(vp.z));
+        for placeholder in placeholders {
+            let Some(kitty_image) = buffer.kitty_images().get(placeholder.image) else {
                 continue;
             };
+            if !self.upload_rgba_texture(
+                owner,
+                kitty_image.id,
+                kitty_image.width,
+                kitty_image.height,
+                &kitty_image.rgba,
+            ) {
+                continue;
+            }
+            draws.push(DrawQuad {
+                z: placeholder.z,
+                texture: kitty_image.id,
+                order: placeholder.placement_id,
+                quad: ClippedImage {
+                    col0: placeholder.screen[0],
+                    row0: placeholder.screen[1],
+                    col1: placeholder.screen[2],
+                    row1: placeholder.screen[3],
+                    u0: placeholder.uv[0],
+                    v0: placeholder.uv[1],
+                    u1: placeholder.uv[2],
+                    v1: placeholder.uv[3],
+                },
+            });
+        }
+        draws.sort_by_key(|draw| (draw.z, draw.texture, draw.order));
+
+        for draw in draws {
+            let Some(cached) = self.image_cache.get(&ImageKey::new(owner, draw.texture)) else {
+                continue;
+            };
+            let quad = draw.quad;
 
             let x0 = origin.0 + quad.col0 * self.cell_width;
             let y0 = origin.1 + quad.row0 * self.cell_height;

@@ -86,10 +86,6 @@ fn unsupported_features_are_refused_with_einval() {
             "i=1,a=T,V=-1",
             "EINVAL:Relative placements are not supported",
         ),
-        (
-            "i=1,a=p,U=1",
-            "EINVAL:Unicode placeholders are not supported",
-        ),
         ("i=1,a=f", "EINVAL:Animation is not supported"),
         ("i=1,a=a", "EINVAL:Animation is not supported"),
         ("i=1,a=c", "EINVAL:Animation is not supported"),
@@ -926,4 +922,164 @@ fn ed_2_keeps_sixel_images_in_scrollback_too() {
     );
     feed(&mut term, b"\x1b[3J");
     assert!(term.images().is_empty());
+}
+
+#[test]
+fn virtual_placement_and_placeholder_inheritance_resolve_and_coalesce() {
+    use ultty_vt::grid::graphics::{
+        index_to_diacritic, resolve_visible_placeholders, PLACEHOLDER_CHAR,
+    };
+
+    let mut term = sized();
+    assert_eq!(
+        replies(
+            &mut term,
+            &apc("a=T,U=1,i=42,c=3,r=2,s=30,v=40", &pixels(30, 40)),
+        ),
+        "<i=42;OK>"
+    );
+    assert!(
+        term.images().is_empty(),
+        "virtual placement is invisible as a direct placement"
+    );
+    assert_eq!(
+        term.grid().cursor().position,
+        ultty_vt::grid::CursorPosition::new(0, 0),
+        "virtual placement does not move cursor"
+    );
+    assert_eq!(term.buffer().kitty_images().virtual_placements_len(), 1);
+
+    let d0 = index_to_diacritic(0).unwrap();
+    let d1 = index_to_diacritic(1).unwrap();
+    let row0 = format!(
+        "\x1b[38;5;42m{PLACEHOLDER_CHAR}{d0}{PLACEHOLDER_CHAR}{PLACEHOLDER_CHAR}\x1b[39m\r\n"
+    );
+    let row1 =
+        format!("\x1b[38;5;42m{PLACEHOLDER_CHAR}{d1}{PLACEHOLDER_CHAR}{PLACEHOLDER_CHAR}\x1b[39m");
+    feed(&mut term, row0.as_bytes());
+    feed(&mut term, row1.as_bytes());
+
+    let quads = resolve_visible_placeholders(term.buffer(), |_| true);
+    assert_eq!(
+        quads.len(),
+        1,
+        "full 3x2 placeholder grid coalesces to one quad"
+    );
+    let q = quads[0];
+    assert_eq!((q.client_id, q.placement_id), (42, 0));
+    assert_eq!(q.screen, [0.0, 0.0, 3.0, 2.0]);
+    assert_eq!(q.uv, [0.0, 0.0, 1.0, 1.0]);
+
+    assert_eq!(term.grid().row(0).unwrap().copy_text(0, 2), "");
+    assert_eq!(term.grid().row(1).unwrap().copy_text(0, 2), "");
+    term.check_integrity().unwrap();
+}
+
+#[test]
+fn placeholder_msb_diacritic_underline_placement_id_and_cropping() {
+    use ultty_vt::grid::graphics::{
+        index_to_diacritic, resolve_visible_placeholders, PLACEHOLDER_CHAR,
+    };
+
+    let mut term = sized();
+    let high_id: u32 = 42 + (2 << 24);
+    assert_eq!(
+        replies(
+            &mut term,
+            &apc(&format!("a=t,i={high_id},s=20,v=40"), &pixels(20, 40),),
+        ),
+        format!("<i={high_id};OK>")
+    );
+    assert_eq!(
+        replies(
+            &mut term,
+            &apc(&format!("a=p,U=1,i={high_id},p=7,c=2,r=2"), ""),
+        ),
+        format!("<i={high_id},p=7;OK>")
+    );
+
+    let d0 = index_to_diacritic(0).unwrap();
+    let d1 = index_to_diacritic(1).unwrap();
+    let d2 = index_to_diacritic(2).unwrap();
+    let line = format!(
+        "A\x1b[38;5;42;58;5;7m{PLACEHOLDER_CHAR}{d1}{d0}{d2}{PLACEHOLDER_CHAR}{d1}{d1}\x1b[39;59mB"
+    );
+    feed(&mut term, line.as_bytes());
+
+    let quads = resolve_visible_placeholders(term.buffer(), |_| true);
+    assert_eq!(quads.len(), 1);
+    let q = quads[0];
+    assert_eq!((q.client_id, q.placement_id), (high_id, 7));
+    assert_eq!(q.screen, [1.0, 0.0, 3.0, 1.0]);
+    assert_eq!(q.uv, [0.0, 0.5, 1.0, 1.0]);
+    assert_eq!(term.grid().row(0).unwrap().copy_text(0, 3), "AB");
+    term.check_integrity().unwrap();
+}
+
+#[test]
+fn virtual_placement_deletion_follows_spec_rules() {
+    let mut term = sized();
+    assert_eq!(
+        replies(
+            &mut term,
+            &apc("a=T,U=1,i=10,p=1,c=2,r=2,s=10,v=20", &pixels(10, 20))
+        ),
+        "<i=10,p=1;OK>"
+    );
+    assert_eq!(
+        replies(&mut term, &apc("a=p,U=1,i=10,p=2,c=2,r=2", "")),
+        "<i=10,p=2;OK>"
+    );
+
+    for d in [
+        "a", "A", "c", "C", "p", "P", "q", "Q", "x", "X", "y", "Y", "z", "Z",
+    ] {
+        feed(&mut term, &apc(&format!("a=d,d={d},x=1,y=1,z=0"), ""));
+        assert_eq!(
+            term.buffer().kitty_images().virtual_placements_len(),
+            2,
+            "d={d} must not delete virtual placements"
+        );
+        assert!(
+            term.buffer().kitty_images().by_client(10).is_some(),
+            "d={d} must not free image with virtual placements"
+        );
+    }
+
+    feed(&mut term, b"\x1b[2J");
+    assert_eq!(
+        term.buffer().kitty_images().virtual_placements_len(),
+        2,
+        "ED 2 must not delete virtual placements"
+    );
+
+    feed(&mut term, &apc("a=d,d=i,i=10,p=1", ""));
+    assert_eq!(term.buffer().kitty_images().virtual_placements_len(), 1);
+    assert!(term.buffer().kitty_images().by_client(10).is_some());
+
+    feed(&mut term, &apc("a=d,d=I,i=10", ""));
+    assert_eq!(term.buffer().kitty_images().virtual_placements_len(), 0);
+    assert!(term.buffer().kitty_images().by_client(10).is_none());
+
+    assert_eq!(
+        replies(
+            &mut term,
+            &apc("a=T,U=1,i=20,c=2,r=2,s=10,v=20", &pixels(10, 20))
+        ),
+        "<i=20;OK>"
+    );
+    feed(&mut term, &apc("a=d,d=R,x=15,y=25", ""));
+    assert_eq!(term.buffer().kitty_images().virtual_placements_len(), 0);
+    assert!(term.buffer().kitty_images().by_client(20).is_none());
+
+    assert_eq!(
+        replies(
+            &mut term,
+            &apc("a=T,U=1,i=30,c=2,r=2,s=10,v=20", &pixels(10, 20))
+        ),
+        "<i=30;OK>"
+    );
+    feed(&mut term, b"\x1bc");
+    assert_eq!(term.buffer().kitty_images().virtual_placements_len(), 0);
+    term.check_integrity().unwrap();
 }

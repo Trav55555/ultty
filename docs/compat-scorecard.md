@@ -27,5 +27,5 @@ and, for key encoding, `crates/ultty/src/keys.rs`. The README's
 | Colour queries (OSC 10, 11) | Yes | Choosing a light or dark palette at start | Reports the live theme |
 | Terminal name (XTVERSION) | Yes | Detecting the terminal without guessing from TERM |  |
 | Sixel images | Yes | Inline images and plots |  |
-| Kitty graphics protocol (direct transmission) | Yes | Inline images in programs that only speak kitty's protocol: kitten icat, yazi, timg, chafa | RGB, RGBA and PNG, zlib, chunked; place, delete, query, z-index. File, temp-file and shared-memory media are refused; no Unicode placeholders or animation yet |
+| Kitty graphics protocol (direct transmission + Unicode placeholders) | Yes | Inline images in kitten icat, yazi, timg, chafa, tmux, and Neovim (`image.nvim`) | RGB, RGBA and PNG, zlib, chunked; place, delete, query, z-index, and `U=1` / `U+10EEEE` Unicode placeholders. File, temp-file and shared-memory media are refused; no relative placement or animation |
 | Kitty text sizing (OSC 66) | Yes | Keeping emoji, symbols and box glyphs at a known cell width | Honours `w=1..=7` cell width hints; `s=` scaled text is not supported (rendered at scale 1) |
