@@ -94,7 +94,7 @@ Ranked by how much a typical user would notice:
     Proposed design for macOS CI:
     [ADR 0029](adr/0029-macos-in-ci.md).
 
-Smaller gaps: no SGR-pixel mouse (1016), no background blur or image, no
+Smaller gaps: no background blur or image, no
 audible bell, OSC 52 reads are refused (Ghostty can ask), and there are no
 key sequences or key tables.
 
@@ -151,7 +151,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Bracketed paste | yes: ESC and C1 stripped from paste | yes | yes | `scorecard_bracketed_paste` |
 | Focus events (1004) | yes | yes | yes | `scorecard_focus_reporting` |
 | Mouse: X10, 1000/1002/1003, SGR 1006, 1005, 1015, 1007 | yes | yes | partial; 1003 and 1015 not listed | `term_handler.rs` mode table; `scorecard_sgr_mouse`; `utf8_mouse_encodes_large_coordinates_as_utf8` |
-| Mouse: SGR-pixel (1016) | no | unverified in docs | no | no handler for 1016 in `ultty-vt` |
+| Mouse: SGR-pixel (1016) | yes; CSI ?1016h/l with DECRQM and 1-based pane-relative pixel coordinates | unverified in docs | no | `term_handler.rs`; `terminal.rs` `encode_mouse_event_at_pixel`; `conformance.rs` `sgr_pixel_mouse_1016_*`; `app/input.rs` |
 | Synchronized output (2026) | yes, with DECRQM | yes | yes | `scorecard_synchronized_output` |
 | OSC 8 hyperlinks | yes; Ctrl+click opens http, https, mailto, ftp only | yes; `link-osc8` config | yes | `scorecard_hyperlinks`; `ultty/src/url.rs` scheme allow-list |
 | OSC 52 clipboard | partial: writes (can be denied); reads always refused | yes; read `ask` by default, write `allow` | partial; copy only by default, paste opt-in | `scorecard_clipboard_write`; `ansi/osc.rs` refuses `?` |

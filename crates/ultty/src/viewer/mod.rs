@@ -691,10 +691,26 @@ impl Viewer {
             return false;
         }
         let dimensions = pane.terminal.dimensions();
-        if let Some(data) = pane.terminal.encode_mouse_event(
+        let (cell_w, cell_h) = self
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.cell_dimensions())
+            .or_else(|| {
+                pane.terminal
+                    .cell_pixel_size()
+                    .map(|(cw, ch)| (f32::from(cw), f32::from(ch)))
+            })
+            .unwrap_or((1.0, 1.0));
+        let max_px_x = (f32::from(dimensions.cols) * cell_w - 1.0).max(0.0);
+        let max_px_y = (f32::from(dimensions.rows) * cell_h - 1.0).max(0.0);
+        let pixel_x = (x.max(0.0) * cell_w).min(max_px_x).floor() as u32;
+        let pixel_y = (y.max(0.0) * cell_h).min(max_px_y).floor() as u32;
+        if let Some(data) = pane.terminal.encode_mouse_event_at_pixel(
             button,
             (x.max(0.0) as u16).min(dimensions.cols.saturating_sub(1)),
             (y.max(0.0) as u16).min(dimensions.rows.saturating_sub(1)),
+            pixel_x,
+            pixel_y,
             pressed,
             motion,
             MouseModifiers::new(

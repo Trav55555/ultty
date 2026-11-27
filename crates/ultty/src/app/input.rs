@@ -157,6 +157,33 @@ impl WindowCtx<'_> {
         (col, row)
     }
 
+    /// Convert terminal-area cursor position into focused-pane-relative 0-based
+    /// cell `(col, row)` and pixel `(px_x, px_y)` coordinates.
+    fn pointer_pane_coords(&self, adjusted_y: f64) -> (u16, u16, u32, u32) {
+        let (width, height) = self.win.renderer.terminal_area();
+        let (origin_x, origin_y, pane_w, pane_h) = self
+            .app
+            .runtime
+            .manager
+            .window_focused_terminal_id(self.win.key)
+            .and_then(|focused| {
+                self.app
+                    .runtime
+                    .manager
+                    .window_active_pane_rects(self.win.key, width, height)
+                    .into_iter()
+                    .find(|(id, _)| *id == focused)
+                    .map(|(_, rect)| rect)
+            })
+            .unwrap_or((0.0, 0.0, width, height));
+        let max_x = (pane_w as f64 - 1.0).max(0.0);
+        let max_y = (pane_h as f64 - 1.0).max(0.0);
+        let local_x = (self.win.mouse_pos.x - origin_x as f64).clamp(0.0, max_x);
+        let local_y = (adjusted_y - origin_y as f64).clamp(0.0, max_y);
+        let (col, row) = self.pixel_to_cell(local_x, local_y);
+        (col, row, local_x.floor() as u32, local_y.floor() as u32)
+    }
+
     fn mouse_modifiers(&self) -> MouseModifiers {
         MouseModifiers::new(
             self.win.modifiers.shift_key(),
@@ -285,10 +312,8 @@ impl WindowCtx<'_> {
         if report_to_program {
             if self.win.tab_bar.visible && y < self.win.tab_bar.height() {
             } else {
-                let (col, row) = self.pixel_to_cell(
-                    self.win.mouse_pos.x,
-                    self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64,
-                );
+                let adjusted_y = self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64;
+                let (col, row, px_x, px_y) = self.pointer_pane_coords(adjusted_y.max(0.0));
                 let term_button = match button {
                     MouseButton::Left => TerminalMouseButton::Left,
                     MouseButton::Middle => TerminalMouseButton::Middle,
@@ -303,10 +328,18 @@ impl WindowCtx<'_> {
                     self.win.reported_button.take().unwrap_or(term_button)
                 };
                 let mods = self.mouse_modifiers();
-                if let Some(bytes) = self
-                    .terminal()
-                    .and_then(|t| t.encode_mouse_event(term_button, col, row, pressed, false, mods))
-                {
+                if let Some(bytes) = self.terminal().and_then(|t| {
+                    t.encode_mouse_event_at_pixel(
+                        term_button,
+                        col,
+                        row,
+                        px_x,
+                        px_y,
+                        pressed,
+                        false,
+                        mods,
+                    )
+                }) {
                     let _ = self.send_input(&bytes);
                 }
                 return;
@@ -711,15 +744,14 @@ impl WindowCtx<'_> {
 
     fn report_mouse_drag(&mut self) {
         let adjusted_y = self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64;
-        let (col, row) = self.pixel_to_cell(self.win.mouse_pos.x, adjusted_y.max(0.0));
+        let (col, row, px_x, px_y) = self.pointer_pane_coords(adjusted_y.max(0.0));
         let Some(button) = self.win.reported_button else {
             return;
         };
         let mods = self.mouse_modifiers();
-        if let Some(bytes) = self
-            .terminal()
-            .and_then(|t| t.encode_mouse_event(button, col, row, true, true, mods))
-        {
+        if let Some(bytes) = self.terminal().and_then(|t| {
+            t.encode_mouse_event_at_pixel(button, col, row, px_x, px_y, true, true, mods)
+        }) {
             let _ = self.send_report(&bytes);
         }
     }
@@ -730,10 +762,19 @@ impl WindowCtx<'_> {
             return;
         }
 
-        let (col, row) = self.pixel_to_cell(self.win.mouse_pos.x, adjusted_y);
+        let (col, row, px_x, px_y) = self.pointer_pane_coords(adjusted_y);
         let mods = self.mouse_modifiers();
         if let Some(bytes) = self.terminal().and_then(|t| {
-            t.encode_mouse_event(TerminalMouseButton::Release, col, row, true, true, mods)
+            t.encode_mouse_event_at_pixel(
+                TerminalMouseButton::Release,
+                col,
+                row,
+                px_x,
+                px_y,
+                true,
+                true,
+                mods,
+            )
         }) {
             let _ = self.send_report(&bytes);
         }
@@ -983,7 +1024,7 @@ impl WindowCtx<'_> {
 
         if self.terminal().is_some_and(|t| t.mouse_tracking_enabled()) {
             let adjusted_y = self.win.mouse_pos.y - self.win.tab_bar.content_top() as f64;
-            let (col, row) = self.pixel_to_cell(self.win.mouse_pos.x, adjusted_y.max(0.0));
+            let (col, row, px_x, px_y) = self.pointer_pane_coords(adjusted_y.max(0.0));
             let button = if lines > 0 {
                 TerminalMouseButton::ScrollUp
             } else {
@@ -1003,10 +1044,9 @@ impl WindowCtx<'_> {
             );
 
             for _ in 0..count {
-                if let Some(bytes) = self
-                    .terminal()
-                    .and_then(|t| t.encode_mouse_event(button, col, row, true, false, mods))
-                {
+                if let Some(bytes) = self.terminal().and_then(|t| {
+                    t.encode_mouse_event_at_pixel(button, col, row, px_x, px_y, true, false, mods)
+                }) {
                     tracing::debug!(
                         "Sending scroll bytes: {:?}",
                         String::from_utf8_lossy(&bytes)
