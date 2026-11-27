@@ -635,6 +635,19 @@ not a missing-glyph box.
 When the font has no positioning rule for a second accent on an accented
 letter (as in `é̃`), Ultty stacks the accent above the first one itself.
 
+## Selection
+
+```toml
+[behavior]
+copy_on_select = true
+selection_word_chars = "_-."
+```
+
+Double-clicking selects the alphanumeric word under the pointer plus any
+characters listed in `behavior.selection_word_chars` (default `"_-."`). Add `/`
+or `:` to select file paths or URLs in one double-click, or set `""` for
+alphanumeric characters only. Changes apply immediately on config reload.
+
 ## Clipboard
 
 ```toml
