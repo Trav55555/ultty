@@ -38,6 +38,19 @@ pub struct Config {
     pub log: LogConfig,
 }
 
+const CONFIG_SECTIONS: &[&str] = &[
+    "colors",
+    "font",
+    "keybindings",
+    "behavior",
+    "terminal",
+    "profiles",
+    "search",
+    "images",
+    "quick_terminal",
+    "log",
+];
+
 impl Config {
     /// Load configuration from the default config file location.
     ///
@@ -56,11 +69,65 @@ impl Config {
     /// Load configuration from a specific path.
     pub fn load_from_path(path: &PathBuf) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
-        let mut config: Self = toml::from_str(&contents).map_err(ConfigError::Parse)?;
         let raw: toml::Table = toml::from_str(&contents).map_err(ConfigError::Parse)?;
         let user_themes = path.parent().map(|dir| dir.join("themes"));
+        Self::from_table(raw, user_themes.as_deref())
+    }
+
+    /// Load configuration from `config_path` (or the default config path when `None`),
+    /// then apply repeatable CLI `-o KEY=VALUE` overrides in order.
+    ///
+    /// When `config_path` is `Some`, a missing or unreadable file or invalid TOML is
+    /// returned as an error instead of falling back to defaults.
+    pub fn load_with_options(
+        config_path: Option<&std::path::Path>,
+        overrides: &[String],
+    ) -> Result<Self, ConfigError> {
+        let (mut raw, user_themes) = match config_path {
+            Some(path) => {
+                let contents = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
+                let table: toml::Table = toml::from_str(&contents).map_err(ConfigError::Parse)?;
+                let themes = path.parent().map(|dir| dir.join("themes"));
+                (table, themes)
+            }
+            None => {
+                let table = match Self::config_path() {
+                    Some(path) if path.exists() => match std::fs::read_to_string(&path) {
+                        Ok(contents) => match toml::from_str::<toml::Table>(&contents) {
+                            Ok(table) => table,
+                            Err(err) => {
+                                warn!("Failed to parse {}: {err}; using defaults", path.display());
+                                toml::Table::new()
+                            }
+                        },
+                        Err(err) => {
+                            warn!("Failed to read {}: {err}; using defaults", path.display());
+                            toml::Table::new()
+                        }
+                    },
+                    _ => toml::Table::new(),
+                };
+                let themes = Self::config_dir().map(|dir| dir.join("themes"));
+                (table, themes)
+            }
+        };
+
+        for spec in overrides {
+            apply_override(&mut raw, spec)?;
+        }
+
+        Self::from_table(raw, user_themes.as_deref())
+    }
+
+    fn from_table(
+        raw: toml::Table,
+        user_themes: Option<&std::path::Path>,
+    ) -> Result<Self, ConfigError> {
+        let mut config: Self = toml::Value::Table(raw.clone())
+            .try_into()
+            .map_err(ConfigError::Parse)?;
         config.colors.resolve_themes(
-            user_themes.as_deref(),
+            user_themes,
             raw.get("colors").and_then(toml::Value::as_table),
         );
         config.warn_on_duplicate_keybindings();
@@ -1663,11 +1730,74 @@ impl RgbaColor {
     }
 }
 
+fn parse_override_value(raw_value: &str) -> toml::Value {
+    let trimmed = raw_value.trim();
+    if trimmed.is_empty() {
+        return toml::Value::String(String::new());
+    }
+    let snippet = format!("v = {trimmed}");
+    if let Ok(mut table) = toml::from_str::<toml::Table>(&snippet) {
+        if let Some(value) = table.remove("v") {
+            return value;
+        }
+    }
+    toml::Value::String(trimmed.to_owned())
+}
+
+fn apply_override(root: &mut toml::Table, spec: &str) -> Result<(), ConfigError> {
+    let Some((raw_key, raw_value)) = spec.split_once('=') else {
+        return Err(ConfigError::Override(format!(
+            "'{spec}' must be in KEY=VALUE form"
+        )));
+    };
+    let key = raw_key.trim();
+    let segments: Vec<&str> = key.split('.').collect();
+    if key.is_empty() || segments.iter().any(|segment| segment.is_empty()) {
+        return Err(ConfigError::Override(format!(
+            "invalid config key '{key}' in '{spec}'"
+        )));
+    }
+    if !CONFIG_SECTIONS.contains(&segments[0]) {
+        return Err(ConfigError::Override(format!(
+            "unknown config section '{}' in '{spec}'",
+            segments[0]
+        )));
+    }
+
+    let value = parse_override_value(raw_value);
+    if segments.len() < 2 && !value.is_table() {
+        return Err(ConfigError::Override(format!(
+            "'{key}' must name a key inside a section (for example, font.size=16)"
+        )));
+    }
+
+    let mut current = root;
+    for segment in &segments[..segments.len() - 1] {
+        let entry = current
+            .entry((*segment).to_owned())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let Some(table) = entry.as_table_mut() else {
+            return Err(ConfigError::Override(format!(
+                "cannot set '{key}': '{segment}' is not a table"
+            )));
+        };
+        current = table;
+    }
+
+    let leaf = segments[segments.len() - 1];
+    current.insert(leaf.to_owned(), value);
+    Ok(())
+}
+
 /// Configuration error.
 #[derive(Debug)]
 pub enum ConfigError {
+    /// Failed to read the configuration file from disk.
     Io(std::io::Error),
+    /// Failed to parse TOML or deserialize into [`Config`].
     Parse(toml::de::Error),
+    /// Invalid CLI `-o` / `--option` override syntax or key path.
+    Override(String),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -1675,6 +1805,7 @@ impl std::fmt::Display for ConfigError {
         match self {
             ConfigError::Io(e) => write!(f, "IO error: {}", e),
             ConfigError::Parse(e) => write!(f, "Parse error: {}", e),
+            ConfigError::Override(msg) => write!(f, "Invalid config override: {}", msg),
         }
     }
 }
@@ -2305,5 +2436,87 @@ hotkey = "ctrl+grave"
             center.compute_geometry((0, 0), (1200, 800), 1.0),
             ((300, 200), (600, 400))
         );
+    }
+
+    #[test]
+    fn test_load_with_options_custom_path_and_missing_file_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("custom.toml");
+        std::fs::write(
+            &path,
+            "[font]\nsize = 17.5\n[terminal]\nterm = \"xterm-ultty\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_with_options(Some(&path), &[]).unwrap();
+        assert_eq!(config.font.size, 17.5);
+        assert_eq!(config.terminal.term, "xterm-ultty");
+
+        let missing = dir.path().join("does-not-exist.toml");
+        let err = Config::load_with_options(Some(&missing), &[]).unwrap_err();
+        assert!(matches!(err, ConfigError::Io(_)));
+    }
+
+    #[test]
+    fn test_load_with_options_applies_typed_bare_and_repeated_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("custom.toml");
+        std::fs::write(
+            &path,
+            "[font]\nsize = 12.0\n[behavior]\ncursor_blink = true\nopacity = 1.0\n",
+        )
+        .unwrap();
+
+        let overrides = vec![
+            "font.size=18".to_owned(),
+            "font.size=20.5".to_owned(),
+            "behavior.cursor_blink=false".to_owned(),
+            "behavior.opacity=0.8".to_owned(),
+            "colors.theme=dracula".to_owned(),
+            "colors.background=#112233".to_owned(),
+            "terminal.term=xterm-ultty".to_owned(),
+            "quick_terminal.size=50%".to_owned(),
+            "font.features=[\"calt\", \"-liga\"]".to_owned(),
+        ];
+
+        let config = Config::load_with_options(Some(&path), &overrides).unwrap();
+        assert_eq!(config.font.size, 20.5);
+        assert!(!config.behavior.cursor_blink);
+        assert!((config.behavior.opacity - 0.8).abs() < 1e-6);
+        assert_eq!(config.colors.theme.as_deref(), Some("dracula"));
+        assert_eq!(config.colors.background, RgbColor::new(0x11, 0x22, 0x33));
+        assert_eq!(
+            config.colors.foreground,
+            RgbColor::from_hex("#f8f8f2").unwrap()
+        );
+        assert_eq!(config.terminal.term, "xterm-ultty");
+        assert_eq!(config.quick_terminal.size, QuickTerminalSize::Percent(50));
+        assert_eq!(config.font.features, vec!["calt", "-liga"]);
+    }
+
+    #[test]
+    fn test_load_with_options_rejects_bad_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("custom.toml");
+        std::fs::write(&path, "").unwrap();
+
+        for bad in [
+            "no-equals",
+            "=12",
+            "font.=12",
+            ".size=12",
+            "bogus.key=1",
+            "font=12",
+        ] {
+            let err = Config::load_with_options(Some(&path), &[bad.to_owned()]).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::Override(_)),
+                "expected Override error for {bad:?}, got {err:?}"
+            );
+        }
+
+        let err = Config::load_with_options(Some(&path), &["font.size=not-a-number".to_owned()])
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(_)));
     }
 }

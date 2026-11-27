@@ -38,11 +38,13 @@ Ranked by how much a typical user would notice:
    (slice 2, for tmux and Neovim plugins such as image.nvim), relative
    placements and animation. File and shared-memory media are refused by
    design.
-4. **Few command-line options.** `ultty` accepts only `--help`, `--version`
-   and (added after this audit) `-e command`. There is no
-   `--working-directory`, `--config` or per-key override.
-   Alacritty has `-e`, `--working-directory` and `-o key=value`. Ghostty has
-   `-e` and `--key=value` for every config key.
+4. **Few command-line options.** *Fixed.* `ultty` now accepts `-e` / `--`
+   commands, `--working-directory DIR`, `--config PATH` (watched for
+   hot-reload and honoured by `--list-themes`), repeatable
+   `-o` / `--option KEY=VALUE` dotted TOML overrides (preserved across config
+   hot-reload), `--new-process`, `--quick`, `--profile`, `--workspace`, and
+   `--attach`. Invalid paths, unknown config sections, and type mismatches fail
+   with exit status `2` before opening a window.
 5. **Scrollback search is plain substring only.** *Fixed.* Search joins
    soft-wrapped rows, uses smart case, has an optional regex mode
    (`[search] regex`, or Ctrl+R in the prompt), highlights every match, counts
@@ -225,7 +227,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | Live reload | partial: file watched; `behavior.accessibility` needs restart | on request (keybind or menu) | yes; `live_config_reload` | `config_watcher.rs`; `tests/config_reload.rs` |
 | Bundled themes | 94; user themes dir; no light/dark pairs | hundreds (356 added in 1.4); light/dark pairs | none bundled (separate repo) | `themes.rs`; `crates/ultty/themes/`; `ultty --list-themes` |
 | Per-platform options | no | yes; `macos-*`, `gtk-*` | yes | none in `config.rs` |
-| CLI overrides | partial: `-e` only (added after this audit); no config overrides | yes; `--key=value` | yes; `-o`, `-e`, `--working-directory` | `main.rs` `invocation` |
+| CLI overrides | yes; `-e`, `--config`, `-o`/`--option key=value`, `--working-directory` | yes; `--key=value` | yes; `-o`, `-e`, `--working-directory` | `main.rs` `invocation`; `config.rs` `load_with_options`; `scripts/e2e/exec-flag.sh` |
 | Launch profiles | yes; tabs and panes with commands and directories | no | no | `config.rs` `ProfilesConfig` |
 
 ### Platforms

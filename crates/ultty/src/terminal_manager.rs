@@ -616,8 +616,19 @@ impl TerminalManager {
     /// Create a new terminal manager with one tab whose shell environment
     /// comes from `tab_env`.
     pub fn with_tab_env(cols: u16, rows: u16, tab_env: TabEnvFn) -> io::Result<Self> {
+        Self::with_tab_env_in_dir(cols, rows, None, tab_env)
+    }
+
+    /// Create a new terminal manager with one tab whose shell starts in
+    /// `working_dir` when given and whose environment comes from `tab_env`.
+    pub fn with_tab_env_in_dir(
+        cols: u16,
+        rows: u16,
+        working_dir: Option<&str>,
+        tab_env: TabEnvFn,
+    ) -> io::Result<Self> {
         let mut manager = Self::empty(cols, rows);
-        manager.create_tab_with_env(tab_env)?;
+        manager.create_tab_in_window_with_dir(WindowKey::PRIMARY, working_dir, tab_env)?;
         Ok(manager)
     }
 
@@ -631,8 +642,21 @@ impl TerminalManager {
         args: &[String],
         tab_env: TabEnvFn,
     ) -> io::Result<Self> {
+        Self::with_command_tab_in_dir(cols, rows, command, args, None, tab_env)
+    }
+
+    /// Create a new terminal manager whose one tab runs `command` with `args`
+    /// in `working_dir` when given instead of the shell.
+    pub fn with_command_tab_in_dir(
+        cols: u16,
+        rows: u16,
+        command: &str,
+        args: &[String],
+        working_dir: Option<&str>,
+        tab_env: TabEnvFn,
+    ) -> io::Result<Self> {
         let mut manager = Self::empty(cols, rows);
-        manager.create_tab_with_command(command, args, None, None, tab_env)?;
+        manager.create_tab_with_command(command, args, working_dir, None, tab_env)?;
         Ok(manager)
     }
 

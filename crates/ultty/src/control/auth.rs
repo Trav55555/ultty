@@ -29,19 +29,36 @@ pub fn write_auth_token(path: &Path) -> io::Result<String> {
         }
     }
 
-    // Replace atomically-ish: truncate an existing file rather than leaving
-    // a stale token readable while we write.
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    // `mode` only applies on creation; enforce it for pre-existing files too.
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(token.as_bytes())?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("ultty-auth.token");
+    let tmp_name = format!(".{file_name}.tmp.{}.{seq}", std::process::id());
+    let tmp_path = path.with_file_name(tmp_name);
+
+    let write_result = (|| -> io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(token.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
     Ok(token)
 }
 
