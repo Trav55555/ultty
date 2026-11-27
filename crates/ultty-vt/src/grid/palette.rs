@@ -1,5 +1,7 @@
-//! The colours the terminal reports to applications and the palette
-//! changes they make (OSC 4 / 104).
+//! The colours the terminal reports to applications and the palette and
+//! dynamic-colour changes they make (OSC 4 / 10 / 11 / 12 / 104 / 110–112).
+
+use crate::ansi::DynamicColor;
 
 /// An 8-bit-per-channel colour, `[r, g, b]`.
 pub type Rgb = [u8; 3];
@@ -49,14 +51,20 @@ impl Default for ThemeColors {
     }
 }
 
-/// The 256-colour palette: the theme's colours plus the entries an
-/// application changed with OSC 4.
+/// The 256-colour palette plus dynamic foreground, background, and cursor
+/// overrides applications make with OSC 4 / 10 / 11 / 12.
 #[derive(Debug, Clone, Default)]
 pub struct Palette {
     theme: ThemeColors,
     /// Changed entries; `None` until the first change, so the common case
     /// costs nothing to store or look up.
     overrides: Option<Box<[Option<Rgb>; 256]>>,
+    /// Dynamic foreground override set by OSC 10.
+    foreground_override: Option<Rgb>,
+    /// Dynamic background override set by OSC 11.
+    background_override: Option<Rgb>,
+    /// Dynamic cursor override set by OSC 12.
+    cursor_override: Option<Rgb>,
 }
 
 impl Palette {
@@ -70,6 +78,64 @@ impl Palette {
         self.theme = theme;
     }
 
+    /// Effective default foreground colour (OSC 10 override or theme default).
+    pub fn foreground(&self) -> Rgb {
+        self.foreground_override.unwrap_or(self.theme.foreground)
+    }
+
+    /// Effective default background colour (OSC 11 override or theme default).
+    pub fn background(&self) -> Rgb {
+        self.background_override.unwrap_or(self.theme.background)
+    }
+
+    /// Effective cursor colour (OSC 12 override or theme default).
+    pub fn cursor(&self) -> Rgb {
+        self.cursor_override.unwrap_or(self.theme.cursor)
+    }
+
+    /// Effective dynamic colour for `color`.
+    pub fn dynamic_color(&self, color: DynamicColor) -> Rgb {
+        match color {
+            DynamicColor::Foreground => self.foreground(),
+            DynamicColor::Background => self.background(),
+            DynamicColor::Cursor => self.cursor(),
+        }
+    }
+
+    /// Application override for dynamic colour `color`, if set.
+    pub fn dynamic_override(&self, color: DynamicColor) -> Option<Rgb> {
+        match color {
+            DynamicColor::Foreground => self.foreground_override,
+            DynamicColor::Background => self.background_override,
+            DynamicColor::Cursor => self.cursor_override,
+        }
+    }
+
+    /// Change dynamic colour `color` (OSC 10 / 11 / 12).
+    pub fn set_dynamic(&mut self, color: DynamicColor, rgb: Rgb) {
+        match color {
+            DynamicColor::Foreground => self.foreground_override = Some(rgb),
+            DynamicColor::Background => self.background_override = Some(rgb),
+            DynamicColor::Cursor => self.cursor_override = Some(rgb),
+        }
+    }
+
+    /// Restore dynamic colour `color` to the theme default (OSC 110 / 111 / 112).
+    pub fn reset_dynamic(&mut self, color: DynamicColor) {
+        match color {
+            DynamicColor::Foreground => self.foreground_override = None,
+            DynamicColor::Background => self.background_override = None,
+            DynamicColor::Cursor => self.cursor_override = None,
+        }
+    }
+
+    /// Restore every dynamic colour (foreground, background, cursor) to the theme default.
+    pub fn reset_all_dynamic(&mut self) {
+        self.foreground_override = None;
+        self.background_override = None;
+        self.cursor_override = None;
+    }
+
     /// The colour palette entry `index` shows now.
     pub fn color(&self, index: u8) -> Rgb {
         self.override_for(index)
@@ -81,9 +147,12 @@ impl Palette {
         self.overrides.as_ref()?[usize::from(index)]
     }
 
-    /// Whether any entry differs from the theme.
+    /// Whether any palette entry or dynamic colour differs from the theme.
     pub fn has_overrides(&self) -> bool {
         self.overrides.is_some()
+            || self.foreground_override.is_some()
+            || self.background_override.is_some()
+            || self.cursor_override.is_some()
     }
 
     /// Change entry `index` (OSC 4).

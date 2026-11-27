@@ -858,6 +858,7 @@ impl WindowCtx<'_> {
     }
 
     fn select_word(&mut self, col: u16, row: u16) {
+        let extra = self.app.config.behavior.selection_word_chars.clone();
         let word_bounds = {
             let Some(terminal) = self.terminal() else {
                 return;
@@ -870,7 +871,7 @@ impl WindowCtx<'_> {
 
                 while start_col > 0 {
                     if let Some(cell) = grid_row.cell(start_col - 1) {
-                        if is_word_char(cell.char()) {
+                        if is_word_char(cell.char(), &extra) {
                             start_col -= 1;
                         } else {
                             break;
@@ -883,7 +884,7 @@ impl WindowCtx<'_> {
                 let cols = grid.dimensions().cols;
                 while end_col < cols - 1 {
                     if let Some(cell) = grid_row.cell(end_col + 1) {
-                        if is_word_char(cell.char()) {
+                        if is_word_char(cell.char(), &extra) {
                             end_col += 1;
                         } else {
                             break;
@@ -1781,8 +1782,8 @@ fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
-fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '-' || c == '.'
+fn is_word_char(c: char, extra: &str) -> bool {
+    c.is_alphanumeric() || extra.contains(c)
 }
 
 /// Open the config file with the desktop's default handler, or its folder
@@ -1823,55 +1824,69 @@ mod tests {
 
     #[test]
     fn is_word_char_alphanumeric() {
+        let defaults = ultty::config::DEFAULT_SELECTION_WORD_CHARS;
         // ASCII letters
-        assert!(is_word_char('a'));
-        assert!(is_word_char('z'));
-        assert!(is_word_char('A'));
-        assert!(is_word_char('Z'));
-        assert!(is_word_char('m'));
+        assert!(is_word_char('a', defaults));
+        assert!(is_word_char('z', defaults));
+        assert!(is_word_char('A', defaults));
+        assert!(is_word_char('Z', defaults));
+        assert!(is_word_char('m', defaults));
         // Digits
-        assert!(is_word_char('0'));
-        assert!(is_word_char('5'));
-        assert!(is_word_char('9'));
+        assert!(is_word_char('0', defaults));
+        assert!(is_word_char('5', defaults));
+        assert!(is_word_char('9', defaults));
     }
 
     #[test]
     fn is_word_char_special() {
-        assert!(is_word_char('_'));
-        assert!(is_word_char('-'));
-        assert!(is_word_char('.'));
+        let defaults = ultty::config::DEFAULT_SELECTION_WORD_CHARS;
+        assert!(is_word_char('_', defaults));
+        assert!(is_word_char('-', defaults));
+        assert!(is_word_char('.', defaults));
     }
 
     #[test]
     fn is_word_char_space() {
-        assert!(!is_word_char(' '));
-        assert!(!is_word_char('\t'));
-        assert!(!is_word_char('\n'));
+        let defaults = ultty::config::DEFAULT_SELECTION_WORD_CHARS;
+        assert!(!is_word_char(' ', defaults));
+        assert!(!is_word_char('\t', defaults));
+        assert!(!is_word_char('\n', defaults));
     }
 
     #[test]
     fn is_word_char_punctuation() {
-        assert!(!is_word_char(','));
-        assert!(!is_word_char(';'));
-        assert!(!is_word_char('('));
-        assert!(!is_word_char(')'));
-        assert!(!is_word_char(':'));
-        assert!(!is_word_char('!'));
-        assert!(!is_word_char('@'));
-        assert!(!is_word_char('#'));
+        let defaults = ultty::config::DEFAULT_SELECTION_WORD_CHARS;
+        assert!(!is_word_char(',', defaults));
+        assert!(!is_word_char(';', defaults));
+        assert!(!is_word_char('(', defaults));
+        assert!(!is_word_char(')', defaults));
+        assert!(!is_word_char(':', defaults));
+        assert!(!is_word_char('!', defaults));
+        assert!(!is_word_char('@', defaults));
+        assert!(!is_word_char('#', defaults));
     }
 
     #[test]
     fn is_word_char_unicode() {
+        let defaults = ultty::config::DEFAULT_SELECTION_WORD_CHARS;
         // Accented Latin characters
-        assert!(is_word_char('é'));
-        assert!(is_word_char('ñ'));
-        assert!(is_word_char('ü'));
+        assert!(is_word_char('é', defaults));
+        assert!(is_word_char('ñ', defaults));
+        assert!(is_word_char('ü', defaults));
         // CJK characters
-        assert!(is_word_char('中'));
-        assert!(is_word_char('文'));
+        assert!(is_word_char('中', defaults));
+        assert!(is_word_char('文', defaults));
         // Cyrillic
-        assert!(is_word_char('Д'));
+        assert!(is_word_char('Д', defaults));
+    }
+
+    #[test]
+    fn test_is_word_char_respects_custom_selection_word_chars() {
+        assert!(is_word_char('/', "_-./"));
+        assert!(is_word_char(':', "_-.:/"));
+        assert!(!is_word_char('.', "_-"));
+        assert!(!is_word_char('_', ""));
+        assert!(is_word_char('a', ""));
     }
 
     #[test]

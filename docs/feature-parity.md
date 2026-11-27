@@ -94,8 +94,7 @@ Ranked by how much a typical user would notice:
     [ADR 0029](adr/0029-macos-in-ci.md).
 
 Smaller gaps: no SGR-pixel mouse (1016), no background blur or image, no
-audible bell, cursor and foreground/background colours cannot be set with OSC
-10/11/12, OSC 52 reads are refused (Ghostty can ask), and there are no
+audible bell, OSC 52 reads are refused (Ghostty can ask), and there are no
 key sequences or key tables.
 
 ## Where Ultty is ahead
@@ -159,7 +158,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | OSC 133 prompt marks | yes: A/B/C/D recorded, used by `ulttyctl last-command`, events, jump to prompt, and select last output (only when it fits on screen) | yes, with `click_events` and `cl=` extensions | no | `tests/command_marks.rs`; `scorecard_prompt_marks` |
 | Title stack (XTWINOPS 22/23) | yes, bounded | unverified in docs | yes | `conformance.rs` `title_stack_*` |
 | DECSCUSR cursor shapes | yes: block, underline, bar, steady or blinking | yes | yes | `term_handler.rs` DECSCUSR arms; `renderer/cursor.rs` |
-| Colour queries OSC 4/10/11/12 | partial: OSC 4 query and set; 10/11/12 query only; no setting fg/bg/cursor | yes | yes; query and set | `conformance.rs` `dynamic_colour_queries_*`, `osc_4_*`; `osc.rs` |
+| Colour queries OSC 4/10/11/12 | yes; query, set, and reset (OSC 4/104 and 10/11/12/110–112) | yes | yes; query and set | `conformance.rs` `dynamic_colour_queries_*`, `osc_4_*`, `osc_10_11_12_*`; `osc.rs`; `renderer/color.rs` |
 | Light/dark reports (2031, `CSI ? 996 n`) | yes | yes (version unverified) | no entry | `scorecard_colour_scheme_updates` |
 | XTVERSION, DA1, DA2, DECRQM, DECRQSS, XTGETTCAP | yes | DA and XTVERSION unverified in docs | DA1 yes; XTVERSION no entry | `conformance.rs` `device_attributes_tell_one_story`, `xtgettcap_*`, `decrqss_*`; `scorecard_terminal_name` |
 | Unicode width, mode 2027 | yes | yes; Unicode 17, grapheme conformance in 1.3 | partial; Unicode 17 widths, no 2027 | `scorecard_grapheme_clusters`; `grid/cluster.rs` |
@@ -214,7 +213,7 @@ Status key: **yes**, **partial** (says what is missing), **no**, **unknown**.
 | URL detection | yes; regex, Ctrl+click | yes; `link-url`, previews | yes; configurable regex hints | `url.rs` |
 | Vi or copy mode | yes; motions, search, char/line/block selection | no | yes | `vim/mod.rs` (tests in module) |
 | Selection: word, line, block | yes; double-click word, triple-click line, Alt for block | yes; plus select command output | yes; plus `semantic_escape_chars` | `app/input.rs` selection; `grid/terminal.rs` `SelectionMode`; `tests/selection.rs` |
-| Configurable word characters | no | yes; `selection-word-chars` | yes | `app/input.rs` `is_word_char` is fixed |
+| Configurable word characters | yes; `behavior.selection_word_chars` (default `"_-."`) | yes; `selection-word-chars` | yes | `config.rs` `BehaviorConfig::selection_word_chars`; `app/input.rs` `is_word_char` |
 | Command palette | yes; every bindable action with its key, fuzzy filter, recent first, screen reader dialog | yes | no | `command_palette.rs`; `renderer/command_palette.rs`; `keybindings.command_palette` (Ctrl+Shift+P) |
 | Inspector or debug overlay | partial: native-protocol status overlay, debug dump; no VT inspector | yes; terminal inspector | partial; render timer, damage highlight | `Ctrl+Shift+I`, `keybindings.debug_dump` |
 | Scrollbar | no | yes since 1.3 | no | none in renderer |

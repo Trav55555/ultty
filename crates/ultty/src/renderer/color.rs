@@ -257,21 +257,37 @@ impl ColorScheme {
     }
 
     /// This scheme as a terminal with `palette` shows it: entries the
-    /// application changed with OSC 4 replace the theme's. Borrowed as is
+    /// application changed with OSC 4 and dynamic foreground/background/cursor
+    /// overrides from OSC 10/11/12 replace the theme's. Borrowed as is
     /// when nothing was changed, which is the usual case.
     pub fn for_palette(&self, palette: &crate::grid::Palette) -> Cow<'_, ColorScheme> {
         if !palette.has_overrides() {
             return Cow::Borrowed(self);
         }
-        let overrides = std::array::from_fn(|i| {
-            palette
-                .override_for(i as u8)
-                .map(|[r, g, b]| Rgba::from_u8(r, g, b))
+        let has_indexed = (0..=255).any(|i| palette.override_for(i).is_some());
+        let overrides = has_indexed.then(|| {
+            Box::new(std::array::from_fn(|i| {
+                palette
+                    .override_for(i as u8)
+                    .map(|[r, g, b]| Rgba::from_u8(r, g, b))
+            }))
         });
-        Cow::Owned(Self {
-            overrides: Some(Box::new(overrides)),
+        let mut scheme = Self {
+            overrides,
             ..self.clone()
-        })
+        };
+        if let Some([r, g, b]) = palette.dynamic_override(ultty_vt::ansi::DynamicColor::Foreground)
+        {
+            scheme.foreground = Rgba::from_u8(r, g, b);
+        }
+        if let Some([r, g, b]) = palette.dynamic_override(ultty_vt::ansi::DynamicColor::Background)
+        {
+            scheme.background = Rgba::from_u8(r, g, b);
+        }
+        if let Some([r, g, b]) = palette.dynamic_override(ultty_vt::ansi::DynamicColor::Cursor) {
+            scheme.cursor = Rgba::from_u8(r, g, b);
+        }
+        Cow::Owned(scheme)
     }
 
     /// The scheme a screen is drawn with. While the screen is in reverse
@@ -586,6 +602,36 @@ mod tests {
         // The row cache keys on the scheme, so a palette change must make
         // the scheme compare unequal.
         assert_ne!(*scheme.for_terminal(&palette, false), scheme);
+    }
+
+    #[test]
+    fn test_dynamic_color_overrides_recolour_fg_bg_cursor_and_reverse_video() {
+        use ultty_vt::ansi::DynamicColor;
+
+        let scheme = ColorScheme::dark();
+        let mut palette = crate::grid::Palette::default();
+        palette.set_dynamic(DynamicColor::Foreground, [0x11, 0x22, 0x33]);
+        palette.set_dynamic(DynamicColor::Background, [0x44, 0x55, 0x66]);
+        palette.set_dynamic(DynamicColor::Cursor, [0x77, 0x88, 0x99]);
+
+        let normal = scheme.for_terminal(&palette, false);
+        assert_eq!(normal.foreground, Rgba::from_u8(0x11, 0x22, 0x33));
+        assert_eq!(normal.background, Rgba::from_u8(0x44, 0x55, 0x66));
+        assert_eq!(normal.cursor, Rgba::from_u8(0x77, 0x88, 0x99));
+        assert_ne!(*normal, scheme);
+
+        let reversed = scheme.for_terminal(&palette, true);
+        assert_eq!(reversed.foreground, Rgba::from_u8(0x44, 0x55, 0x66));
+        assert_eq!(reversed.background, Rgba::from_u8(0x11, 0x22, 0x33));
+        assert_eq!(reversed.cursor, Rgba::from_u8(0x77, 0x88, 0x99));
+
+        palette.reset_dynamic(DynamicColor::Foreground);
+        palette.reset_dynamic(DynamicColor::Background);
+        palette.reset_dynamic(DynamicColor::Cursor);
+        assert!(matches!(
+            scheme.for_terminal(&palette, false),
+            Cow::Borrowed(_)
+        ));
     }
 
     #[test]

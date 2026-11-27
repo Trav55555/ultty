@@ -1123,6 +1123,9 @@ pub struct ParsedKeybinding {
     pub key: String,
 }
 
+/// Default extra characters treated as part of a word during double-click selection.
+pub const DEFAULT_SELECTION_WORD_CHARS: &str = "_-.";
+
 /// Behavior configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -1135,6 +1138,9 @@ pub struct BehaviorConfig {
     pub url_detection: bool,
     /// Copy on selection (like xterm)
     pub copy_on_select: bool,
+    /// Extra non-alphanumeric characters included in double-click word
+    /// selection (default `"_-."`). Applies immediately on config reload.
+    pub selection_word_chars: String,
     /// Enable visual bell (border flash)
     pub bell_visual: bool,
     /// Mark the window as wanting attention (the taskbar urgency hint) when
@@ -1387,6 +1393,7 @@ impl Default for BehaviorConfig {
             scrollback_lines: 10_000,
             url_detection: true,
             copy_on_select: true,
+            selection_word_chars: DEFAULT_SELECTION_WORD_CHARS.to_string(),
             bell_visual: true,
             bell_urgent: true,
             cursor_blink: true,
@@ -2367,6 +2374,19 @@ copy = "ctrl+c"
         assert!(!BehaviorConfig::default().single_instance);
         let config: Config = toml::from_str("[behavior]\nsingle_instance = true\n").unwrap();
         assert!(config.behavior.single_instance);
+    }
+
+    #[test]
+    fn test_selection_word_chars_defaults_and_parses() {
+        assert_eq!(
+            BehaviorConfig::default().selection_word_chars,
+            DEFAULT_SELECTION_WORD_CHARS
+        );
+        let config: Config =
+            toml::from_str("[behavior]\nselection_word_chars = \"_-./:\"\n").unwrap();
+        assert_eq!(config.behavior.selection_word_chars, "_-./:");
+        let empty: Config = toml::from_str("[behavior]\nselection_word_chars = \"\"\n").unwrap();
+        assert_eq!(empty.behavior.selection_word_chars, "");
     }
 
     #[test]

@@ -432,18 +432,35 @@ impl<'a> TerminalHandler<'a> {
             // `Terminal::set_theme_colors`, in order with every other reply,
             // so a query followed by a DA1 sentinel is never misread.
             Action::QueryDynamicColor { color, terminator } => {
-                let theme = self.terminal.palette().theme();
-                let rgb = match color {
-                    DynamicColor::Foreground => theme.foreground,
-                    DynamicColor::Background => theme.background,
-                    DynamicColor::Cursor => theme.cursor,
-                };
+                let rgb = self.terminal.palette().dynamic_color(color);
                 self.reply(format!(
                     "\x1b]{};{}{}",
                     color.osc_code(),
                     format_color_spec(rgb),
                     terminator.as_str()
                 ));
+            }
+            Action::SetDynamicColor { color, rgb } => {
+                let was_dark = self.terminal.is_dark();
+                self.terminal.palette_mut().set_dynamic(color, rgb);
+                if color == DynamicColor::Background
+                    && self.terminal.modes().color_scheme_updates
+                    && self.terminal.is_dark() != was_dark
+                {
+                    let report = self.terminal.color_scheme_report();
+                    self.terminal.queue_response(report);
+                }
+            }
+            Action::ResetDynamicColor(color) => {
+                let was_dark = self.terminal.is_dark();
+                self.terminal.palette_mut().reset_dynamic(color);
+                if color == DynamicColor::Background
+                    && self.terminal.modes().color_scheme_updates
+                    && self.terminal.is_dark() != was_dark
+                {
+                    let report = self.terminal.color_scheme_report();
+                    self.terminal.queue_response(report);
+                }
             }
             Action::QueryPaletteColor { index, terminator } => {
                 let rgb = self.terminal.palette().color(index);
